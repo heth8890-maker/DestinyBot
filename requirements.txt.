@@ -1,0 +1,15 @@
+# Kết nối Bot
+discord.py
+aiohttp
+requests
+
+# Xử lý hình ảnh và chữ
+Pillow
+
+# Công cụ hỗ trợ
+python-dotenv
+pytz
+
+# Chạy server giữ bot sống trên Render
+flask
+
