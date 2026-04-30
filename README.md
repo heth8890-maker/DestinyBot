@@ -1,0 +1,2 @@
+# DestinyBot
+For bot discord
