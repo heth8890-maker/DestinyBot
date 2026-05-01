@@ -330,7 +330,7 @@ class RPGHunt(commands.Cog):
                         remaining      = BONUS_MAX - bonus["count"]
                         reset_in_min   = max(0, (bonus["reset_at"] - now) // 60)
                         bonus_msg = (
-                            f"🎉 {ctx.author.mention} Kho báu rơi ra {emoji} **{name}**!\n"
+                            f"<:2925:1495277191867400284> | {ctx.author.mention} Kho báu rơi ra {emoji} **{name}**!\n"
                             f"-# Bonus còn lại: **{remaining}/{BONUS_MAX}** "
                             f"(reset sau {reset_in_min} phút)"
                         )
@@ -343,7 +343,7 @@ class RPGHunt(commands.Cog):
                         remaining    = BONUS_MAX - bonus["count"]
                         reset_in_min = max(0, (bonus["reset_at"] - now) // 60)
                         bonus_msg = (
-                            f"🎉 {ctx.author.mention} Kho báu rơi ra "
+                            f"<:2925:1495277191867400284> | {ctx.author.mention} Kho báu rơi ra "
                             f"**{coins:,}** {COIN_EMOJI} **Coin**!\n"
                             f"-# Bonus còn lại: **{remaining}/{BONUS_MAX}** "
                             f"(reset sau {reset_in_min} phút)"

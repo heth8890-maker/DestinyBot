@@ -120,7 +120,7 @@ class RPGCrate(commands.Cog):
             remaining = int(user["crate_cd"] - now)
             return await ctx.send(f"⏳ Đang cooldown, còn **{remaining}s**.")
 
-        user["crate_cd"] = now + 8
+        user["crate_cd"] = now + 2
 
         # remove 1 crate (stack system)
         remove_item(user, crate_key)
