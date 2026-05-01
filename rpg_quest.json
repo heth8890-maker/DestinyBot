@@ -1,0 +1,161 @@
+{
+    "1146763208011546687": {
+        "last_reset": 1777534592.9345403,
+        "hunts": 22,
+        "items_sold": 121,
+        "weapons_equipped": 5,
+        "items_collected": 148,
+        "weapons_sold": 9,
+        "crates_opened": 5,
+        "rare_collected": 35,
+        "trades_done": 0,
+        "quests": [
+            {
+                "type": "sell_items",
+                "completed": false,
+                "claimed": false
+            }
+        ]
+    },
+    "1351492044433920050": {
+        "last_reset": 1776780479.1241457,
+        "quests": [
+            {
+                "type": "sell_weapons",
+                "completed": true,
+                "claimed": false
+            }
+        ],
+        "hunts": 2124,
+        "items_sold": 14926,
+        "weapons_sold": 147,
+        "rare_collected": 5134,
+        "weapons_equipped": 63,
+        "crates_opened": 156,
+        "trades_done": 4,
+        "items_collected": 14371
+    },
+    "1033247724205768714": {
+        "last_reset": 1777047863.6372724,
+        "quests": [
+            {
+                "type": "sell_items",
+                "completed": true,
+                "claimed": true
+            }
+        ],
+        "hunts": 156,
+        "rare_collected": 205,
+        "weapons_sold": 115,
+        "items_sold": 831,
+        "crates_opened": 116,
+        "trades_done": 0,
+        "weapons_equipped": 12,
+        "items_collected": 726
+    },
+    "1225069741618757666": {
+        "last_reset": 1776870433.5217736,
+        "quests": [
+            {
+                "type": "sell_items",
+                "completed": true,
+                "claimed": true
+            },
+            {
+                "type": "collect_items",
+                "completed": true,
+                "claimed": true
+            }
+        ],
+        "hunts": 1083,
+        "rare_collected": 1936,
+        "weapons_sold": 117,
+        "items_sold": 6736,
+        "crates_opened": 75,
+        "trades_done": 2,
+        "weapons_equipped": 21,
+        "items_collected": 6192
+    },
+    "1239162517612265514": {
+        "last_reset": 1777048387.196955,
+        "quests": [
+            {
+                "type": "high_rarity",
+                "completed": true,
+                "claimed": false
+            }
+        ],
+        "rare_collected": 26,
+        "items_sold": 132,
+        "crates_opened": 1,
+        "weapons_equipped": 1,
+        "items_collected": 79,
+        "trades_done": 0,
+        "hunts": 21,
+        "weapons_sold": 0
+    },
+    "889729521476050994": {
+        "last_reset": 1777442743.6228025,
+        "quests": [
+            {
+                "type": "sell_items",
+                "completed": true,
+                "claimed": false
+            },
+            {
+                "type": "collect_items",
+                "completed": true,
+                "claimed": false
+            }
+        ],
+        "items_sold": 922,
+        "weapons_equipped": 0,
+        "weapons_sold": 0,
+        "rare_collected": 135,
+        "items_collected": 919,
+        "hunts": 108,
+        "trades_done": 0,
+        "crates_opened": 0
+    },
+    "1052884686961115136": {
+        "last_reset": 1777521285.8533998,
+        "quests": [
+            {
+                "type": "open_crates",
+                "completed": false,
+                "claimed": false
+            }
+        ],
+        "items_collected": 0,
+        "hunts": 0,
+        "weapons_sold": 0,
+        "weapons_equipped": 0,
+        "trades_done": 0,
+        "rare_collected": 0,
+        "items_sold": 0,
+        "crates_opened": 0
+    },
+    "1480394540215959692": {
+        "last_reset": 1777524286.881092,
+        "quests": [
+            {
+                "type": "collect_items",
+                "completed": true,
+                "claimed": false
+            },
+            {
+                "type": "hunt_times",
+                "completed": true,
+                "claimed": false
+            }
+        ],
+        "crates_opened": 29,
+        "rare_collected": 335,
+        "weapons_sold": 23,
+        "trades_done": 1,
+        "items_collected": 2156,
+        "items_sold": 2212,
+        "hunts": 281,
+        "weapons_equipped": 5
+    }
+}

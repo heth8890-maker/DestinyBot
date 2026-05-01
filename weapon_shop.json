@@ -1,0 +1,105 @@
+{
+  "slots": [
+    {
+      "slot": 1,
+      "weapon_id": "3696",
+      "name": "Quả dâu tây",
+      "emoji": "<:3696:1496187477231145160>",
+      "rarity": "uncommon",
+      "drop_rate": 65,
+      "price": 20520,
+      "sold": false
+    },
+    {
+      "slot": 2,
+      "weapon_id": "465",
+      "name": "Tách trà thư giãn",
+      "emoji": "<:2863:1495250142364700883>",
+      "rarity": "uncommon",
+      "drop_rate": 31,
+      "price": 6699,
+      "sold": false
+    },
+    {
+      "slot": 3,
+      "weapon_id": "3695",
+      "name": "Ấn dấu",
+      "emoji": "<:3695:1496187479286481016>",
+      "rarity": "rare",
+      "drop_rate": 25.5,
+      "price": 31152,
+      "sold": false
+    },
+    {
+      "slot": 4,
+      "weapon_id": "465",
+      "name": "Tách trà thư giãn",
+      "emoji": "<:2863:1495250142364700883>",
+      "rarity": "uncommon",
+      "drop_rate": 31,
+      "price": 6699,
+      "sold": false
+    },
+    {
+      "slot": 5,
+      "weapon_id": "3696",
+      "name": "Quả dâu tây",
+      "emoji": "<:3696:1496187477231145160>",
+      "rarity": "uncommon",
+      "drop_rate": 65,
+      "price": 20520,
+      "sold": false
+    },
+    {
+      "slot": 6,
+      "weapon_id": "463",
+      "name": "Gỗ cổ thụ",
+      "emoji": "<:2850:1495250168340156467>",
+      "rarity": "common",
+      "drop_rate": 60,
+      "price": 3770,
+      "sold": false
+    },
+    {
+      "slot": 7,
+      "weapon_id": "3695",
+      "name": "Ấn dấu",
+      "emoji": "<:3695:1496187479286481016>",
+      "rarity": "rare",
+      "drop_rate": 25.5,
+      "price": 31152,
+      "sold": false
+    },
+    {
+      "slot": 8,
+      "weapon_id": "463",
+      "name": "Gỗ cổ thụ",
+      "emoji": "<:2850:1495250168340156467>",
+      "rarity": "common",
+      "drop_rate": 60,
+      "price": 3770,
+      "sold": false
+    },
+    {
+      "slot": 9,
+      "weapon_id": "463",
+      "name": "Gỗ cổ thụ",
+      "emoji": "<:2850:1495250168340156467>",
+      "rarity": "common",
+      "drop_rate": 60,
+      "price": 3770,
+      "sold": false
+    },
+    {
+      "slot": 10,
+      "weapon_id": "3706",
+      "name": "Tay gấu",
+      "emoji": "<:3706:1496188900006432929>",
+      "rarity": "epic",
+      "drop_rate": 6.5,
+      "price": 42868,
+      "sold": false
+    }
+  ],
+  "generated_at": 1777541949.9364567
+}
