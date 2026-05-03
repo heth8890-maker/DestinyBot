@@ -56,7 +56,7 @@ from rpg_weapon import (
 from rpg_item import ITEMS
 from rpg_addon import get_upgraded_weapon
 from rpg_quest import add_quest_progress
-from cash import update_balance, get_balance
+from cash import update_balance_safe, get_balance
 
 COIN_EMOJI = "<:Coin:1495831576397742241>"
 ERR        = "<:X_:1495466670616219819>"
@@ -196,11 +196,11 @@ async def _execute_trade(ctx, session: dict) -> str:
         notes.append(f"⚠️ <@{uid_b}> không đủ tiền → bỏ qua phần tiền.")
         sb["gold"] = 0
     if sa["gold"] > 0:
-        update_balance(int(uid_a), -sa["gold"])
-        update_balance(int(uid_b), +sa["gold"])
+        update_balance_safe(int(uid_a), -sa["gold"])
+        update_balance_safe(int(uid_b), +sa["gold"])
     if sb["gold"] > 0:
-        update_balance(int(uid_b), -sb["gold"])
-        update_balance(int(uid_a), +sb["gold"])
+        update_balance_safe(int(uid_b), -sb["gold"])
+        update_balance_safe(int(uid_a), +sb["gold"])
 
     # ── Chuyển weapon ──
     def _xfer_weapon(from_user, to_user, wid, from_uid):

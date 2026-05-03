@@ -18,7 +18,7 @@ from rpg_quest import (
     add_quest_progress,
     claim_quest_reward,
 )
-from cash import update_balance, get_balance
+from cash import update_balance_safe, get_balance
 
 COIN_EMOJI = "<:Coin:1495831576397742241>"
 ERR  = "<:X_:1495466670616219819>"
@@ -98,7 +98,7 @@ class RPGQuestion(commands.Cog):
         """Nhận tất cả phần thưởng từ quest đã hoàn thành."""
         ok, msg, reward = claim_quest_reward(ctx.author.id)
         if ok:
-            update_balance(ctx.author.id, reward)
+            update_balance_safe(ctx.author.id, reward)
             embed = discord.Embed(
                 title="<:Coin:1495831576397742241> | Nhận Phần Thưởng!",
                 description=f"{msg}\n\n<:2245:1493575277605949480> +**{reward:,}** {COIN_EMOJI}",

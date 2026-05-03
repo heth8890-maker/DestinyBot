@@ -2,7 +2,7 @@ import random
 import asyncio
 import discord
 from discord.ext import commands
-from cash import get_balance, update_balance
+from cash import get_balance, update_balance_safe
 
 # =========================
 # DATA & CONFIG
@@ -84,9 +84,9 @@ def is_natural(hand: list) -> bool:
 
 
 # FIX #6: Thread-safe balance update wrapper
-async def safe_update_balance(uid: int, amount: int) -> None:
+async def safe_update_balance_safe(uid: int, amount: int) -> None:
     async with _balance_lock:
-        update_balance(uid, amount)
+        update_balance_safe(uid, amount)
 
 
 # =========================
@@ -185,7 +185,7 @@ class BlackjackGame:
 
         if p_score > 21 and d_score > 21:
             # Both busted → push, refund bet
-            await safe_update_balance(uid, self.bet)
+            await safe_update_balance_safe(uid, self.bet)
             self._outcome     = "push"
             self._status_text = "🎲 ~ PUSH — cả hai cùng vượt 21! (refund)"
 
@@ -196,27 +196,27 @@ class BlackjackGame:
 
         elif p_natural and d_natural:
             # FIX #9: Both natural → push
-            await safe_update_balance(uid, self.bet)
+            await safe_update_balance_safe(uid, self.bet)
             self._outcome     = "push"
             self._status_text = "🎲 ~ PUSH — both Blackjack! (refund)"
 
         elif p_natural:
             # Natural blackjack → 2.5x payout
             payout = int(self.bet * 2.5)
-            await safe_update_balance(uid, payout)
+            await safe_update_balance_safe(uid, payout)
             self._outcome     = "win"
             self._status_text = f"🎲 ~ ♠ BLACKJACK! {name} WON {payout - self.bet:,} coins!"
 
         elif p_score == 21:
             # Non-natural 21 (3+ cards) → also 2.5x bonus payout
             payout = int(self.bet * 2.5)
-            await safe_update_balance(uid, payout)
+            await safe_update_balance_safe(uid, payout)
             self._outcome     = "win"
             self._status_text = f"🎲 ~  21 ĐIỂM! {name} WON {payout - self.bet:,} coins!"
 
         elif d_score > 21 or p_score > d_score:
             # Normal win → return bet + profit (bet × 2 total)
-            await safe_update_balance(uid, self.bet * 2)
+            await safe_update_balance_safe(uid, self.bet * 2)
             self._outcome     = "win"
             self._status_text = f"🎲 ~ {name} WON {self.bet:,} coins!"
 
@@ -227,7 +227,7 @@ class BlackjackGame:
 
         else:
             # Push → refund bet only
-            await safe_update_balance(uid, self.bet)
+            await safe_update_balance_safe(uid, self.bet)
             self._outcome     = "push"
             self._status_text = "🎲 ~ PUSH (refund bet)"
 
@@ -235,7 +235,7 @@ class BlackjackGame:
 
     async def start(self) -> None:
         # Deduct the bet upfront; refunded on win/push via _resolve_payout.
-        await safe_update_balance(self.ctx.author.id, -self.bet)
+        await safe_update_balance_safe(self.ctx.author.id, -self.bet)
 
         for _ in range(2):
             self.player_hand.append(draw_card())
@@ -490,7 +490,7 @@ class BlackjackCog(commands.Cog, name="Blackjack"):
             print(f"[Blackjack] Unhandled error for {ctx.author}: {exc}")
             # Safety: refund bet on unexpected crash
             try:
-                await safe_update_balance(user_id, bet_amount)
+                await safe_update_balance_safe(user_id, bet_amount)
             except Exception:
                 pass
             try:
