@@ -23,15 +23,15 @@ from discord.ext import commands
 
 # Import from rpg_core
 from rpg_core import (
-    load_data, save_data, get_user,
     get_item_by_id, get_weapon_by_id,
     roll_hunt_items, handle_egg,
     add_item, calc_hunt_cooldown, parse_effects,
     CRATES,
 )
+from rpg_database import get_user, save_user
 from rpg_addon import parse_effects_upgraded
 from rpg_quest import add_quest_progress
-from cash import get_balance, update_balance
+from cash import get_balance, update_balance_safe
 
 # ─────────────────────────────────────────────────────────
 # COSMETICS
@@ -47,8 +47,8 @@ OK  = "<:Tick:1495466684520206528>"
 # ─────────────────────────────────────────────────────────
 # BONUS SYSTEM — CONSTANTS
 # ─────────────────────────────────────────────────────────
-CRATE_DROP_CHANCE   = 1.5    # %
-COIN_DROP_CHANCE    = 5.5    # % (roll từ CRATE_DROP_CHANCE → CRATE_DROP_CHANCE + COIN_DROP_CHANCE)
+CRATE_DROP_CHANCE   = 1    # %
+COIN_DROP_CHANCE    = 1.75    # % (roll từ CRATE_DROP_CHANCE → CRATE_DROP_CHANCE + COIN_DROP_CHANCE)
 BONUS_MAX           = 10     # tối đa lần bonus mỗi chu kỳ
 BONUS_RESET_SEC     = 6 * 3600  # 6 tiếng
 
@@ -166,14 +166,8 @@ class RPGHunt(commands.Cog):
             # LOAD DATA & GET USER
             # ─────────────────────────────────────────────────────────
             try:
-                data = load_data()
-            except Exception as e:
-                await ctx.send(f"{ERR} | Failed to load game data: `{e}`")
-                raise e
-
-            try:
-                uid  = str(ctx.author.id)
-                user = get_user(uid, data)
+                uid        = str(ctx.author.id)
+                user, _    = get_user(uid)
             except Exception as e:
                 await ctx.send(f"{ERR} | Failed to get user data: `{e}`")
                 raise e
@@ -337,7 +331,7 @@ class RPGHunt(commands.Cog):
 
                     elif bonus_type == "coin":
                         coins = random.randint(2000, 6500)
-                        update_balance(ctx.author.id, coins)
+                        update_balance_safe(ctx.author.id, coins)
                         bonus["count"] += 1
 
                         remaining    = BONUS_MAX - bonus["count"]
@@ -356,7 +350,10 @@ class RPGHunt(commands.Cog):
             # SAVE DATA
             # ─────────────────────────────────────────────────────────
             try:
-                await save_data(data)
+                ok = save_user(uid, user)
+                if not ok:
+                    await ctx.send(f"{ERR} | Failed to save data.")
+                    raise RuntimeError("save_user returned False")
             except Exception as e:
                 await ctx.send(f"{ERR} | Failed to save data: `{e}`")
                 raise e
@@ -405,9 +402,8 @@ class RPGHunt(commands.Cog):
     async def hunt_log(self, ctx, amount: int = 10):
         """View recent hunt log. Usage: dtn hunt log [amount]"""
         try:
-            data = load_data()
-            uid  = str(ctx.author.id)
-            user = get_user(uid, data)
+            uid        = str(ctx.author.id)
+            user, _    = get_user(uid)
 
             amount = min(max(1, amount), 50)
             logs   = user.get("hunt_log", [])[-amount:]
@@ -449,9 +445,8 @@ class RPGHunt(commands.Cog):
     async def hunt_bonus(self, ctx):
         """Xem còn bao nhiêu lần bonus hunt trong chu kỳ hiện tại."""
         try:
-            data = load_data()
-            uid  = str(ctx.author.id)
-            user = get_user(uid, data)
+            uid        = str(ctx.author.id)
+            user, _    = get_user(uid)
             now  = int(time.time())
 
             bonus        = _get_bonus_data(user, now)
