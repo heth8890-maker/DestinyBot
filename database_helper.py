@@ -226,3 +226,20 @@ def close_connection():
         _client.close()
         _client = None
         log.info("🔌 Đã đóng kết nối MongoDB.")
+
+
+# ─────────────────────────────────────────────
+#  TEST CONNECTION (chạy trực tiếp để kiểm tra)
+#  python3 -c "import os; from database_helper import _get_client
+#  try:
+#      c = _get_client()
+#      print('✅ Kết nối OK:', c.server_info()['version'])
+#  except Exception as e:
+#      print('❌ Lỗi:', e)"
+# ─────────────────────────────────────────────
+if __name__ == "__main__":
+    try:
+        c = _get_client()
+        print("✅ Kết nối OK:", c.server_info()["version"])
+    except Exception as e:
+        print("❌ Lỗi:", e)
