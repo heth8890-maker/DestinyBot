@@ -99,7 +99,13 @@ def _migrate_from_json(uid_str: str, economy_col) -> Optional[dict]:
     try:
         with open(JSON_FILE, "r", encoding="utf-8") as f:
             old_db = json.load(f)
-        old_user = old_db.get("users", {}).get(uid_str)
+        # Hỗ trợ cả 2 cấu trúc JSON:
+        # Cũ: {"users": {"123": {...}}}
+        # Mới: {"123": {...}}
+        if "users" in old_db:
+            old_user = old_db["users"].get(uid_str)
+        else:
+            old_user = old_db.get(uid_str)
         if not old_user:
             return None
 
