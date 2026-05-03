@@ -22,9 +22,9 @@ log = logging.getLogger("db_helper")
 JSON_FILE          = "rpg_data.json"
 DB_NAME            = "rpg_bot_db"
 DEFAULT_USER       = {"cash": 0, "exp": 0, "equipped": [None, None, None], "upgraded_weapons": []}
-MAX_RETRIES        = 3
-RETRY_DELAY        = 2          # giây
-MONGO_TIMEOUT_MS   = 5_000      # 5 giây cho mỗi thao tác
+MAX_RETRIES        = 2
+RETRY_DELAY        = 1          # giây
+MONGO_TIMEOUT_MS   = 10_000     # 10 giây cho mỗi thao tác
 
 # ─────────────────────────────────────────────
 #  KẾT NỐI MONGODB  (singleton, lazy-init)
@@ -69,9 +69,9 @@ def _with_retry(fn, *args, **kwargs):
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             return fn(*args, **kwargs)
-        except pymongo.errors.AutoReconnect as e:
+        except (pymongo.errors.AutoReconnect, pymongo.errors.ServerSelectionTimeoutError) as e:
             last_err = e
-            log.warning(f"⚠️  AutoReconnect (lần {attempt}/{MAX_RETRIES}): {e}")
+            log.warning(f"⚠️  Connection error (lần {attempt}/{MAX_RETRIES}): {type(e).__name__}: {e}")
             _client = None                  # Bắt buộc tạo lại client
             time.sleep(RETRY_DELAY * attempt)
         except pymongo.errors.NetworkTimeout as e:
@@ -80,9 +80,9 @@ def _with_retry(fn, *args, **kwargs):
             time.sleep(RETRY_DELAY * attempt)
         except pymongo.errors.PyMongoError as e:
             # Lỗi nghiêm trọng khác → không retry
-            log.error(f"❌ Lỗi MongoDB không thể retry: {e}")
+            log.error(f"❌ Lỗi MongoDB không thể retry: {type(e).__name__}: {e}")
             raise
-    log.error(f"❌ Thất bại sau {MAX_RETRIES} lần thử: {last_err}")
+    log.error(f"❌ Thất bại sau {MAX_RETRIES} lần thử: {type(last_err).__name__}: {last_err}")
     raise last_err
 
 
@@ -184,7 +184,7 @@ def save_core_data(user_id, user_data: dict) -> bool:
         return True
 
     except Exception as e:
-        log.error(f"❌ save_core_data thất bại cho {uid_str}: {e}")
+        log.error(f"❌ save_core_data thất bại cho {uid_str}: {type(e).__name__}: {e}")
         return False
 
 
