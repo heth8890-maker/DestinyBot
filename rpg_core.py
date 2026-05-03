@@ -1,7 +1,54 @@
 """
-===== FILE: rpg_core.py (REFACTORED v1.7 — UNIFIED HYBRID WEAPON IDENTITY) =====
+===== FILE: rpg_core.py (REFACTORED v1.8 — MONGODB STORAGE) =====
 
-ARCHITECTURE CHANGELOG v1.7 — HYBRID MODEL ENFORCEMENT:
+STORAGE CHANGELOG v1.8 — JSON → MONGODB:
+────────────────────────────────────────────────────────────────────────
+WHAT CHANGED vs v1.7:
+
+  STORAGE LAYER (chỉ những thứ này thay đổi):
+  1. load_data(user_id)
+       — Không còn đọc file JSON.
+       — Gọi database_helper.load_core_data(uid_str) qua _with_retry.
+       — Returns {uid_str: user_doc, "upgraded_weapons": global_uw_dict}.
+       — user_id=None → trả về {} ngay (no-op, backward safe).
+
+  2. save_data(data, user_id)
+       — Không còn ghi file JSON / temp file / backup rotation.
+       — Gọi database_helper.save_core_data(uid_str, user_data, global_uw).
+       — user_data["upgraded_weapons"] (list) → lưu vào economy collection.
+       — global_uw dict → lưu vào global_metadata collection (dot-notation $set).
+       — Returns bool (True = thành công, False = thất bại).
+       — user_id=None → trả về False ngay (no-op, backward safe).
+
+  3. _validate_user() [MỚI]
+       — Helper nội bộ: validate + salvage mọi field trước khi trả về từ load_data.
+       — Thay thế vai trò của chuỗi _salvage_* trong load path (vẫn giữ _salvage_*
+         riêng cho get_user để tương thích cũ).
+
+  4. _emergency_dump()
+       — Vẫn ghi JSON local như cũ (last resort khi MongoDB cũng down).
+       — Trên Render (ephemeral FS) file sẽ mất sau restart — đây là ý định đúng:
+         emergency dump để admin đọc log, không phải để restore tự động.
+
+  ĐÃ XÓA (chỉ liên quan JSON):
+  • DATA_FILE / TEMP_FILE / BACKUP_FILES / LEGACY_BACKUP constants
+  • _try_load_json_file()
+  • _rotate_backups()
+
+KHÔNG THAY ĐỔI:
+  • Toàn bộ game logic, weapon logic, UID/base_id rules
+  • Cấu trúc data (user dict schema)
+  • Mọi tên biến / tên hàm được dùng ở file khác
+  • WeaponEntity / WeaponID / get_weapon_entity
+  • parse_effects / roll_hunt_items / handle_egg / calc_*
+  • equip_weapon / unequip_weapon / add_weapon / remove_weapon_from_bag
+  • ensure_weapon_uid / ensure_upgrade_entry
+  • get_user (Salvage-First philosophy)
+  • get_user_lock / _data_lock / _good_snapshots (concurrency model giữ nguyên)
+  • _validate_data_integrity (thêm guard skip "upgraded_weapons" key)
+  • _migrate_legacy_weapons
+
+ARCHITECTURE CHANGELOG v1.7 — HYBRID MODEL ENFORCEMENT (giữ nguyên):
 ────────────────────────────────────────────────────────────────────────
 ROOT CAUSE FIX:
   Previous versions conflated "has a UID" with "has upgrade data", creating
@@ -63,6 +110,13 @@ import random
 import time
 import uuid
 
+from database_helper import (
+    load_core_data,
+    save_core_data,
+    _with_retry,
+    MAX_RETRIES as _MAX_RETRIES,
+)
+
 from rpg_item import (
     ITEMS,
     BASE_RARITY_RATES,
@@ -102,7 +156,7 @@ __all__ = [
     # ── integrity ───────────────────────────────────────────────────────────────
     "_validate_data_integrity",
     "ITEMS", "WEAPONS", "CRATES", "RARITY_COLOR", "RARITY_LABEL",
-"DARK_CRATE_WEAPON",   # ← THÊM DÒNG NÀY
+    "DARK_CRATE_WEAPON",
 ]
 
 
@@ -124,15 +178,6 @@ def get_base_id(wid: str) -> str:
     """
     return str(wid).split("-")[0]
 
-# ─── File paths ─────────────────────────────────────────────────────────────────
-DATA_FILE    = "rpg_data.json"
-TEMP_FILE    = DATA_FILE + ".tmp"
-BACKUP_FILES = [
-    "rpg_data.backup_0.json",   # newest
-    "rpg_data.backup_1.json",
-    "rpg_data.backup_2.json",   # oldest
-]
-LEGACY_BACKUP = "rpg_data.backup.json"
 
 # ─── v5.5: Deterministic stat seed secret ───────────────────────────────────────
 # Override via environment: export RPG_WEAPON_SECRET="your-secret"
@@ -149,11 +194,11 @@ GLOBAL_SECRET: bytes = os.environb.get(
 
 _user_locks: dict[str, asyncio.Lock] = {}
 
-# v5.5: Single global lock — only ONE save_data() runs at a time.
+# Single global lock — only ONE save_data() runs at a time.
 # Prevents torn writes when two commands race to persist state simultaneously.
 _data_lock: asyncio.Lock = asyncio.Lock()
 
-# v5.5: Rolling RAM snapshots. Written ONLY after a successful disk verify.
+# Rolling RAM snapshots. Written ONLY after a successful DB write.
 # On catastrophic save failure, the last good snapshot is used to roll back RAM.
 _good_snapshots: list[dict] = []   # max 3; pop(0) when full
 
@@ -165,10 +210,10 @@ def get_user_lock(uid: str) -> asyncio.Lock:
 
     Usage:
         async with get_user_lock(uid):
-            data = load_data()
+            data = load_data(uid)
             user = get_user(uid, data)
             # ... modify user ...
-            await save_data(data)
+            await save_data(data, uid)
     """
     if uid not in _user_locks:
         _user_locks[uid] = asyncio.Lock()
@@ -319,7 +364,7 @@ class WeaponEntity:
         Apply a ±10% variance to every base effect using a deterministic HMAC seed.
 
         The same uid + stat_key always produces the same multiplier — no random
-        state is stored in JSON. Changing GLOBAL_SECRET rotates all rolls.
+        state is stored in DB. Changing GLOBAL_SECRET rotates all rolls.
 
         Returns a dict of {stat_key: rolled_value} for display / combat use.
         """
@@ -388,7 +433,7 @@ class WeaponEntity:
         return embed
 
 
-def get_weapon_entity(user: dict, uid: str) -> WeaponEntity | None:
+def get_weapon_entity(user: dict, uid: str) -> "WeaponEntity | None":
     """
     SINGLE ENTRY POINT for weapon data — used by all UI commands.
 
@@ -428,57 +473,18 @@ def get_weapon_entity(user: dict, uid: str) -> WeaponEntity | None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  INTERNAL HELPERS — file I/O, rotation, emergency dump
+#  INTERNAL HELPERS — emergency dump
 # ══════════════════════════════════════════════════════════════════════════════
-
-def _try_load_json_file(path: str) -> dict | None:
-    """
-    Safely read a JSON file.
-    Returns dict on success, None on any failure (missing, empty, corrupt).
-    """
-    try:
-        if not os.path.exists(path):
-            return None
-        if os.path.getsize(path) == 0:
-            logger.warning(f"⚠️  {path} is empty (0 bytes)")
-            return None
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            logger.warning(f"⚠️  {path}: root is not dict ({type(data).__name__})")
-            return None
-        return data
-    except json.JSONDecodeError as e:
-        logger.error(f"❌ {path} JSON corrupt: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"❌ Cannot read {path}: {e}")
-        return None
-
-
-def _rotate_backups(valid_data: dict) -> None:
-    """
-    Rotate 3 disk backups: backup_1 → backup_2, backup_0 → backup_1, write new backup_0.
-    Only runs if valid_data is non-empty.
-    """
-    if not valid_data:
-        return
-    try:
-        if os.path.exists(BACKUP_FILES[1]):
-            os.replace(BACKUP_FILES[1], BACKUP_FILES[2])
-        if os.path.exists(BACKUP_FILES[0]):
-            os.replace(BACKUP_FILES[0], BACKUP_FILES[1])
-        with open(BACKUP_FILES[0], "w", encoding="utf-8") as f:
-            json.dump(valid_data, f, indent=4, ensure_ascii=False)
-        logger.debug(f"📦 Backup rotated: {len(valid_data)} users → {BACKUP_FILES[0]}")
-    except Exception as e:
-        logger.warning(f"⚠️  Backup rotation failed: {e}")
-
 
 def _emergency_dump(data: dict) -> None:
     """
-    Last resort when save_data() fails completely — writes a timestamped emergency file.
-    Admin must restore manually. Data is never silently lost.
+    Last resort khi cả save_data() lẫn MongoDB đều thất bại hoàn toàn.
+    Ghi một file JSON có timestamp để admin đọc log và restore thủ công.
+
+    LƯU Ý (Render / ephemeral filesystem):
+        File này sẽ mất sau khi container restart — đây là hành vi đúng.
+        Mục đích là để admin đọc log trước khi restart, KHÔNG phải auto-restore.
+        Nếu cần persistent backup, forward log sang external sink (Papertrail v.v.).
     """
     try:
         ts       = int(time.time())
@@ -486,8 +492,8 @@ def _emergency_dump(data: dict) -> None:
         with open(emg_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
         logger.critical(
-            f"🚨 EMERGENCY DUMP: {len(data)} users → {emg_path} | "
-            f"Check disk/permissions and restore manually!"
+            f"🚨 EMERGENCY DUMP: {len(data)} keys → {emg_path} | "
+            f"MongoDB unreachable — check MONGO_URI and restore manually!"
         )
     except Exception as e:
         logger.critical(f"🚨 EMERGENCY DUMP ALSO FAILED: {e} — DATA MAY BE LOST!")
@@ -510,6 +516,10 @@ def _validate_data_integrity(data: dict) -> tuple[bool, list[str]]:
     only when the weapon is actually upgraded.  Flagging missing upgrade
     entries would produce false positives and is NOT performed here.
 
+    NOTE (v1.8): "upgraded_weapons" is a reserved key in the data dict holding
+    the global weapons dict from MongoDB.  It is automatically skipped so it
+    is never mistaken for a user record.
+
     Returns:
         (is_valid, audit_log) — is_valid is True only if zero issues were found.
     """
@@ -520,6 +530,10 @@ def _validate_data_integrity(data: dict) -> tuple[bool, list[str]]:
     global_uids: dict[str, str] = {}   # uid → "user_id:source" (first occurrence)
 
     for user_id, user in data.items():
+        # v1.8: skip the reserved global key — it's a dict but not a user record
+        if user_id == "upgraded_weapons":
+            continue
+
         if not isinstance(user, dict):
             continue
 
@@ -555,7 +569,7 @@ def _validate_data_integrity(data: dict) -> tuple[bool, list[str]]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SALVAGE HELPERS (unchanged from v3)
+#  SALVAGE HELPERS (unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _salvage_numeric(user: dict, key: str, default: int | float, uid: str) -> None:
@@ -840,158 +854,300 @@ def _migrate_legacy_weapons(user: dict, uid_str: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  LOAD — Multi-tier recovery (unchanged from v3)
+#  v1.8: VALIDATE USER — chạy sau khi load từ MongoDB
 # ══════════════════════════════════════════════════════════════════════════════
 
-def load_data() -> dict:
+def _validate_user(user_data: dict) -> dict:
     """
-    Load JSON data safely — tries sources in priority order until one succeeds.
+    Kiểm tra và sửa chữa từng field của user_data sau khi load từ MongoDB.
 
-    Order:
-        1. rpg_data.json           (primary)
-        2. rpg_data.json.tmp       (leftover from interrupted save)
-        3. rpg_data.backup_0.json  (newest rotating backup)
-        4. rpg_data.backup_1.json
-        5. rpg_data.backup_2.json  (oldest rotating backup)
-        6. rpg_data.backup.json    (legacy compatibility)
+    Strategy: Salvage-First — chỉ reset field nào thực sự sai,
+    không wipe toàn bộ user trừ khi user_data không phải dict.
 
-    Never crashes the bot on startup.
+    Fields được validate:
+        inv              → dict
+        weapons          → list[str]
+        upgraded_weapons → list[dict] (mỗi entry có 'uid' + 'base_id')
+        equipped         → list, len == 3, mỗi slot là None | str
+        hunt_cd          → numeric (int/float)
+        crate_cd         → numeric (int/float)
+        passives         → dict
+        hunt_log         → list
+
+    Returns:
+        user_data đã được sửa chữa in-place (cùng object).
+        Nếu user_data không phải dict → trả về _make_default_user().
     """
-    candidates = [
-        (DATA_FILE,       "primary file"),
-        (TEMP_FILE,       "temp file (.tmp)"),
-        (BACKUP_FILES[0], "backup_0 (newest)"),
-        (BACKUP_FILES[1], "backup_1"),
-        (BACKUP_FILES[2], "backup_2 (oldest)"),
-        (LEGACY_BACKUP,   "legacy backup"),
-    ]
+    if not isinstance(user_data, dict):
+        logger.warning("[VALIDATE] user_data không phải dict → fallback default_user")
+        return _make_default_user()
 
-    for path, label in candidates:
-        data = _try_load_json_file(path)
-        if data is not None:
-            if path == DATA_FILE:
-                logger.info(f"✅ Loaded {label}: {len(data)} users")
-            else:
-                logger.warning(
-                    f"⚠️  Primary failed — recovered from {label} ({path}): {len(data)} users"
-                )
-            return data
+    uid = user_data.get("_id", "<unknown>")
 
-    logger.error(
-        "🚨 All sources failed / do not exist — returning empty dict. "
-        "Bot is still alive; new users will be created on demand."
-    )
-    return {}
+    # ── inventory → dict ──────────────────────────────────────────────────────
+    if not isinstance(user_data.get("inv"), dict):
+        logger.warning("[VALIDATE] uid=%s: 'inv' không hợp lệ → reset {}", uid)
+        user_data["inv"] = {}
+
+    # ── weapons → list[str] ───────────────────────────────────────────────────
+    raw_weapons = user_data.get("weapons")
+    if not isinstance(raw_weapons, list):
+        logger.warning("[VALIDATE] uid=%s: 'weapons' không phải list → reset []", uid)
+        user_data["weapons"] = []
+    else:
+        cleaned = [w for w in raw_weapons if isinstance(w, str) and w]
+        if len(cleaned) != len(raw_weapons):
+            logger.warning(
+                "[VALIDATE] uid=%s: 'weapons' lọc %d/%d phần tử không hợp lệ",
+                uid, len(raw_weapons) - len(cleaned), len(raw_weapons),
+            )
+        user_data["weapons"] = cleaned
+
+    # ── upgraded_weapons → list[dict] với 'uid' + 'base_id' ──────────────────
+    raw_uw = user_data.get("upgraded_weapons")
+    if not isinstance(raw_uw, list):
+        logger.warning("[VALIDATE] uid=%s: 'upgraded_weapons' không phải list → reset []", uid)
+        user_data["upgraded_weapons"] = []
+    else:
+        valid_uw = [
+            e for e in raw_uw
+            if isinstance(e, dict) and "uid" in e and "base_id" in e
+        ]
+        if len(valid_uw) != len(raw_uw):
+            logger.warning(
+                "[VALIDATE] uid=%s: 'upgraded_weapons' loại bỏ %d entry thiếu 'uid'/'base_id'",
+                uid, len(raw_uw) - len(valid_uw),
+            )
+        user_data["upgraded_weapons"] = valid_uw
+
+    # ── equipped → list, độ dài 3, mỗi slot None | str ───────────────────────
+    raw_eq = user_data.get("equipped")
+    if not isinstance(raw_eq, list):
+        logger.warning("[VALIDATE] uid=%s: 'equipped' không phải list → reset [None,None,None]", uid)
+        user_data["equipped"] = [None, None, None]
+    else:
+        eq = list(raw_eq)
+        # Pad thiếu
+        while len(eq) < 3:
+            eq.append(None)
+        # Cắt dư — trả về weapon hợp lệ về bag
+        if len(eq) > 3:
+            overflow = [s for s in eq[3:] if isinstance(s, str) and s]
+            if overflow:
+                user_data.setdefault("weapons", []).extend(overflow)
+                logger.warning("[VALIDATE] uid=%s: equipped > 3 slots, trả %s về bag", uid, overflow)
+            eq = eq[:3]
+        # Sửa từng slot
+        for i, slot in enumerate(eq):
+            if slot is None or (isinstance(slot, str) and slot):
+                continue
+            logger.warning("[VALIDATE] uid=%s: equipped[%d]=%r không hợp lệ → None", uid, i, slot)
+            eq[i] = None
+        user_data["equipped"] = eq
+
+    # ── cooldowns → numeric ───────────────────────────────────────────────────
+    for cd_key in ("hunt_cd", "crate_cd"):
+        val = user_data.get(cd_key)
+        if not isinstance(val, (int, float)):
+            logger.warning("[VALIDATE] uid=%s: '%s'=%r không hợp lệ → 0", uid, cd_key, val)
+            user_data[cd_key] = 0
+
+    # ── passives → dict ───────────────────────────────────────────────────────
+    if not isinstance(user_data.get("passives"), dict):
+        user_data["passives"] = {}
+
+    # ── hunt_log → list ───────────────────────────────────────────────────────
+    if not isinstance(user_data.get("hunt_log"), list):
+        user_data["hunt_log"] = []
+
+    return user_data
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  v5.5: TRUE ATOMIC SAVE — Lock + Validator + Snapshot + Rollback
+#  LOAD — MongoDB (thay thế JSON multi-tier recovery)
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def save_data(data: dict) -> None:
+def load_data(user_id=None) -> dict:
     """
-    Persist data safely.  ALL callers MUST await this coroutine.
+    Tải dữ liệu user + global upgraded_weapons từ MongoDB.
+
+    Không bao giờ raise — trả về {} nếu DB lỗi hoàn toàn.
+
+    Args:
+        user_id: Discord user ID (int hoặc str).
+                 Nếu None → trả về {} ngay (no-op).
+
+    Returns:
+        {
+            uid_str:            user_dict,        # dùng bởi get_user(uid, data)
+            "upgraded_weapons": global_uw_dict,   # global weapons index (tương thích cũ)
+        }
+
+    Lưu ý về hai loại "upgraded_weapons":
+        • data["upgraded_weapons"]         — GLOBAL dict {uid: wdata, ...} từ
+                                             global_metadata collection (dùng để
+                                             cross-user UID lookup và global write).
+        • user["upgraded_weapons"]         — PER-USER list[dict] bên trong user_dict,
+                                             lưu trong economy collection (game logic
+                                             dùng cái này qua get_user()).
+        save_data() phân biệt và lưu đúng chỗ cho cả hai.
+
+    Callers điển hình:
+        async with get_user_lock(uid):
+            data = load_data(uid)
+            user = get_user(uid, data)
+            # ... modify user ...
+            await save_data(data, uid)
+    """
+    if user_id is None:
+        logger.debug("[LOAD] user_id=None → trả về dict rỗng.")
+        return {}
+
+    uid_str = str(user_id)
+
+    try:
+        result = _with_retry(load_core_data, uid_str)
+    except Exception as exc:
+        logger.error(
+            "[LOAD] Không thể tải uid=%s sau %d lần thử: %s",
+            uid_str, _MAX_RETRIES, exc, exc_info=True,
+        )
+        return {}
+
+    if not isinstance(result, dict):
+        logger.warning(
+            "[LOAD] load_core_data trả về %s cho uid=%s → dict rỗng.",
+            type(result).__name__, uid_str,
+        )
+        return {}
+
+    # load_core_data trả về {"user": {...}, "upgraded_weapons": {...}}
+    user_doc       = result.get("user") or {}
+    global_weapons = result.get("upgraded_weapons") or {}
+
+    if not isinstance(user_doc, dict):
+        logger.warning("[LOAD] 'user' không phải dict cho uid=%s → dict rỗng.", uid_str)
+        user_doc = {}
+
+    # Validate + salvage trước khi trả về — sửa field lỗi, không crash
+    _validate_user(user_doc)
+
+    logger.debug("[LOAD] ✅ uid=%s loaded (%d keys)", uid_str, len(user_doc))
+
+    return {
+        uid_str:            user_doc,
+        "upgraded_weapons": global_weapons,   # key tương thích với JSON cũ
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  v1.8: SAVE — MongoDB (thay thế JSON atomic save)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def save_data(data: dict, user_id=None) -> bool:
+    """
+    Lưu dữ liệu user + global upgraded_weapons vào MongoDB.
 
     Pipeline (inside _data_lock):
-    ┌─────────────────────────────────────────────────────────────────────────┐
-    │ 0. _validate_data_integrity(data) — detect corruption before disk write  │
-    │ 1. Rotate disk backups from the current live file                       │
-    │ 2. Write → TEMP_FILE                                                    │
-    │ 3. Verify TEMP_FILE exists + size > 0                                   │
-    │ 4. Re-parse TEMP_FILE (post-write JSON verify)                          │
-    │ 5. os.replace(TEMP_FILE, DATA_FILE)  — atomic on most OS/filesystems    │
-    │ 6. Commit deep-copy snapshot to _good_snapshots[] (max 3)               │
-    └─────────────────────────────────────────────────────────────────────────┘
+        1. Validate tham số đầu vào
+        2. Tách user_data (per-user) và global_uw (global index) từ data dict
+        3. Gọi save_core_data qua _with_retry
+           • user_data["upgraded_weapons"] (list)  → economy collection ($set)
+           • global_uw dict                        → global_metadata ($set dot-notation)
+        4. Commit RAM snapshot sau khi DB xác nhận thành công
+        5. Rollback RAM từ snapshot + emergency dump nếu tất cả retry thất bại
 
-    On any exception:
-      - TEMP_FILE is deleted (primary file untouched on disk).
-      - RAM is rolled back to last good snapshot (data dict modified in-place).
-      - _emergency_dump() fires to guarantee data is not silently lost.
+    Args:
+        data:    dict trả về từ load_data() — đã được modify bởi caller.
+        user_id: Discord user ID (int hoặc str).
+                 Nếu None → trả về False ngay (no-op).
+
+    Returns:
+        True  — lưu thành công.
+        False — lưu thất bại (đã log, KHÔNG crash bot).
+
+    Concurrency:
+        get_user_lock(uid) ở caller đảm bảo một user không bị modify song song.
+        _data_lock bên trong đảm bảo chỉ một save_data() ghi DB tại một thời điểm.
+        save_core_data dùng upsert + $set nên an toàn với race condition còn lại.
+
+    Callers điển hình:
+        async with get_user_lock(uid):
+            data = load_data(uid)
+            user = get_user(uid, data)
+            # ... modify user ...
+            await save_data(data, uid)
     """
     global _good_snapshots
 
     if not isinstance(data, dict):
-        logger.error(f"❌ save_data() got {type(data).__name__} instead of dict — aborting")
-        return
+        logger.error("[SAVE] data không phải dict (%s) — bỏ qua.", type(data).__name__)
+        return False
 
-    async with _data_lock:   # Only one save_data() runs at a time — prevents torn writes
+    if user_id is None:
+        logger.debug("[SAVE] user_id=None → bỏ qua.")
+        return False
 
-        # ── Step 0: Integrity validation (detect only — no mutations) ────────
-        is_valid, audit_log = _validate_data_integrity(data)
-        if audit_log:
-            for entry in audit_log:
-                logger.info(f"[Integrity Audit] {entry}")
+    uid_str   = str(user_id)
+    user_data = data.get(uid_str)
 
+    if not isinstance(user_data, dict) or not user_data:
+        logger.warning(
+            "[SAVE] Không tìm thấy user_data hợp lệ cho uid=%s — bỏ qua.", uid_str
+        )
+        return False
+
+    # ── Integrity validation (detect only — no mutations) ────────────────────
+    is_valid, audit_log = _validate_data_integrity(data)
+    if audit_log:
+        for entry in audit_log:
+            logger.info(f"[Integrity Audit] {entry}")
+
+    # ── Tách global upgraded_weapons ─────────────────────────────────────────
+    # data["upgraded_weapons"] = global dict {uid: wdata, ...} từ global_metadata.
+    # user_data["upgraded_weapons"] = per-user list[dict] → lưu qua payload $set.
+    # Hai cái này KHÁC NHAU — save_core_data xử lý đúng chỗ cho từng cái.
+    global_uw = data.get("upgraded_weapons")
+    if not isinstance(global_uw, dict):
+        global_uw = {}
+
+    async with _data_lock:   # Một save tại một thời điểm — tránh torn writes
         try:
-            # ── Step 1: Rotate disk backup from live file ─────────────────────
-            existing = _try_load_json_file(DATA_FILE)
-            if existing:
-                _rotate_backups(existing)
+            _with_retry(save_core_data, uid_str, user_data, global_uw)
+            logger.debug("[SAVE] ✅ uid=%s lưu thành công.", uid_str)
 
-            # ── Step 2: Write to temp file ────────────────────────────────────
-            with open(TEMP_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-
-            # ── Step 3: Verify TEMP_FILE exists + non-zero size ───────────────
-            if not os.path.exists(TEMP_FILE):
-                raise IOError(f"{TEMP_FILE} does not exist after write")
-            file_size = os.path.getsize(TEMP_FILE)
-            if file_size == 0:
-                raise IOError(f"{TEMP_FILE} is 0 bytes after write — possible disk full")
-
-            # ── Step 4: Post-write JSON verification ──────────────────────────
-            verified = _try_load_json_file(TEMP_FILE)
-            if verified is None:
-                raise IOError(
-                    f"{TEMP_FILE} written but re-parse failed — file may be corrupt"
-                )
-            if len(verified) != len(data):
-                logger.warning(
-                    f"⚠️  Post-verify user count mismatch "
-                    f"(input={len(data)}, verified={len(verified)}) — proceeding anyway"
-                )
-
-            # ── Step 5: Atomic replace ────────────────────────────────────────
-            os.replace(TEMP_FILE, DATA_FILE)
-            logger.info(f"✅ save_data(): {len(data)} users → {DATA_FILE} ({file_size:,} bytes)")
-
-            # ── Step 6: Commit RAM snapshot (ONLY after successful disk write) ─
-            # deep-copy so future mutations to `data` don't corrupt the snapshot.
+            # Commit RAM snapshot sau khi DB xác nhận
             snapshot = copy.deepcopy(data)
             _good_snapshots.append(snapshot)
             if len(_good_snapshots) > 3:
                 _good_snapshots.pop(0)   # evict the oldest snapshot
-            logger.debug(
-                f"📸 Snapshot committed ({len(_good_snapshots)}/3 slots used)"
+
+            return True
+
+        except Exception as exc:
+            logger.error(
+                "[SAVE] ❌ Không thể lưu uid=%s sau %d lần thử: %s",
+                uid_str, _MAX_RETRIES, exc, exc_info=True,
             )
 
-        except Exception as e:
-            logger.error(f"❌ save_data() failed: {e}")
-
-            # Clean up temp file so the next load doesn't read it accidentally
-            try:
-                if os.path.exists(TEMP_FILE):
-                    os.remove(TEMP_FILE)
-            except Exception:
-                pass
-
-            # ── RAM Rollback — restore in-memory dict to last known-good state ─
+            # ── RAM Rollback — khôi phục về snapshot cuối cùng tốt nhất ─────
             if _good_snapshots:
                 last_good = _good_snapshots[-1]
                 data.clear()
                 data.update(last_good)   # mutates the dict in-place (caller sees the rollback)
                 logger.warning(
-                    f"🔄 RAM ROLLBACK: restored from snapshot "
-                    f"({len(last_good)} users). Disk state is unchanged."
+                    "[SAVE] 🔄 RAM ROLLBACK: khôi phục từ snapshot (%d keys).",
+                    len(last_good),
                 )
             else:
                 logger.critical(
-                    "🚨 No snapshots available for rollback — "
-                    "in-memory state may be inconsistent. Restart recommended."
+                    "[SAVE] 🚨 Không có snapshot để rollback — "
+                    "state có thể không nhất quán. Nên restart bot."
                 )
 
-            # Emergency dump — data must never be silently lost
+            # Emergency dump — data không được mất hoàn toàn
             _emergency_dump(data)
+            return False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1022,6 +1178,9 @@ def get_user(uid, data: dict) -> dict:
     - Each field has its own salvage strategy (convert, filter, patch).
     - Reset a field only when truly irrecoverable (logged explicitly).
     - Reset the whole user only when it is not a dict at all (extremely rare).
+
+    Note (v1.8): user doc từ MongoDB có field '_id' (= uid_str).
+    Field này được giữ nguyên — save_core_data tự strip trước khi $set.
 
     Note: bare base_id weapons ("467") are valid stack weapons and are left
     as-is.  Call ensure_weapon_uid() from the upgrade command when a UID is
@@ -1092,8 +1251,6 @@ def remove_item(user: dict, item_id: str, amount: int = 1) -> bool:
 #  v5.5: add_weapon — FIXED (was appending raw base ID; now generates proper UID)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Trong rpg_core.py
-
 def add_weapon(user: dict, base_id: str, make_unique: bool = False) -> str:
     """
     Add a weapon to the bag.
@@ -1137,6 +1294,7 @@ def add_weapon(user: dict, base_id: str, make_unique: bool = False) -> str:
     user["weapons"].append(new_uid)
     return new_uid
 
+
 def _find_weapon_in_bag(weapons: list, weapon_id: str) -> int | None:
     """
     ID-aware bag search.  Returns the index of the first matching weapon, or None.
@@ -1164,6 +1322,7 @@ def _find_weapon_in_bag(weapons: list, weapon_id: str) -> int | None:
 
     # 0 matches → not found; 2+ matches → ambiguous (caller must use full UID)
     return None
+
 
 def remove_weapon_from_bag(user: dict, weapon_id: str) -> bool:
     """
@@ -1301,7 +1460,7 @@ def ensure_weapon_uid(user: dict, weapon_id: str) -> str | None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  EQUIP / UNEQUIP (unchanged from v3)
+#  EQUIP / UNEQUIP (unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def equip_weapon(user: dict, weapon_id: str, slot: int | None = None) -> tuple[bool, str]:
@@ -1328,7 +1487,7 @@ def equip_weapon(user: dict, weapon_id: str, slot: int | None = None) -> tuple[b
     if slot is not None:
         if slot not in (1, 2, 3):
             return False, "Ô trang bị chỉ từ 1 đến 3."
-        idx_slot     = slot - 1
+        idx_slot      = slot - 1
         old_weapon_id = equipped[idx_slot]   # capture before overwrite (may be None)
 
         # FIX: remove new weapon from bag FIRST, then assign to slot, then return old.
@@ -1382,7 +1541,7 @@ def unequip_weapon(user: dict, slot: int) -> tuple[bool, str]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SAFE PARSE EFFECTS (unchanged from v3)
+#  SAFE PARSE EFFECTS (unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def parse_effects(equipped: list, user: dict | None = None) -> dict:

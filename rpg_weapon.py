@@ -636,12 +636,12 @@ class RPGWeapon(commands.Cog):
 
     @commands.group(name="weapon", aliases=["w"], invoke_without_command=True)
     async def weapon(self, ctx, *, weapon_id: str = None):
-        from rpg_core import load_data, get_user, WeaponID, get_weapon_entity
+        from rpg_core import WeaponID, get_weapon_entity
         from rpg_addon import get_upgraded_weapon
+        from rpg_database import get_user
 
-        data = load_data()
         uid  = str(ctx.author.id)
-        user = get_user(uid, data)
+        user, upgraded = get_user(uid)
 
         if weapon_id:
             # ── dtn weapon <id> ── chi tiết vũ khí
@@ -771,12 +771,12 @@ class RPGWeapon(commands.Cog):
 
     @weapon.command(name="equip")
     async def weapon_equip(self, ctx, weapon_id: str, slot: int = None):
-        from rpg_core import load_data, save_data, get_user, equip_weapon, unequip_weapon, WeaponID
+        from rpg_core import equip_weapon, unequip_weapon, WeaponID
         from rpg_quest import add_quest_progress
+        from rpg_database import get_user, save_user
 
-        data = load_data()
         uid  = str(ctx.author.id)
-        user = get_user(uid, data)
+        user, upgraded = get_user(uid)
 
         # ── Resolve base_id (dùng WeaponID.parse() — KHÔNG dùng .split("-")) ─
         target_base_id, _ = WeaponID.parse(weapon_id)
@@ -820,7 +820,7 @@ class RPGWeapon(commands.Cog):
 
         ok, msg = equip_weapon(user, weapon_id, slot)
         if ok:
-            await save_data(data)
+            save_user(uid, user, upgraded)
             # Dùng WeaponID.parse() — KHÔNG dùng .split("-")
             base_id, _ = WeaponID.parse(weapon_id)
             w         = get_weapon_by_id(base_id)
@@ -835,15 +835,15 @@ class RPGWeapon(commands.Cog):
 
     @weapon.command(name="unequip")
     async def weapon_unequip(self, ctx, slot: int):
-        from rpg_core import load_data, save_data, get_user, unequip_weapon, WeaponID
+        from rpg_core import unequip_weapon, WeaponID
+        from rpg_database import get_user, save_user
 
-        data = load_data()
         uid  = str(ctx.author.id)
-        user = get_user(uid, data)
+        user, upgraded = get_user(uid)
 
         ok, result = unequip_weapon(user, slot)
         if ok:
-            await save_data(data)
+            save_user(uid, user, upgraded)
             # Dùng WeaponID.parse() — KHÔNG dùng .split("-")
             base_id, _ = WeaponID.parse(result)
             w    = get_weapon_by_id(base_id)
@@ -861,7 +861,8 @@ class RPGWeapon(commands.Cog):
         Gives a stack weapon (base_id). The recipient can enchant it to get a UID.
         Per project rule: only rpg_enchant is allowed to call make_unique=True.
         """
-        from rpg_core import load_data, save_data, get_user, add_weapon, get_weapon_entity
+        from rpg_core import add_weapon, get_weapon_entity
+        from rpg_database import get_user, save_user
 
         # ── 1. Validate weapon exists in the database ─────────────────────────
         w = get_weapon_by_id(weapon_id)
@@ -869,15 +870,13 @@ class RPGWeapon(commands.Cog):
             return await ctx.send(f"{ERR} | Không tìm thấy vũ khí ID `{weapon_id}`.")
 
         # ── 2. Load user data ─────────────────────────────────────────────────
-        data   = load_data()
-        user   = get_user(str(member.id), data)
+        user, upgraded = get_user(str(member.id))
 
         # ── 3. Add weapon to bag (stack weapon — admin gives base_id) ─────────
         new_id = add_weapon(user, weapon_id)
 
-        # ── 4. Persist (save_data is a coroutine — MUST be awaited ONCE) ──────
-        # FIX 4: was `await await save_data(data)` (double-await → TypeError)
-        await save_data(data)
+        # ── 4. Persist ────────────────────────────────────────────────────────
+        save_user(str(member.id), user, upgraded)
 
         # ── 5. Build display via WeaponEntity — single source of truth ────────
         entity       = get_weapon_entity(user, new_id)
@@ -931,11 +930,11 @@ class RPGWeapon(commands.Cog):
         """
         Hiển thị danh sách vũ khí dưới dạng text thuần để dễ copy ID.
         """
-        from rpg_core import load_data, get_user, get_weapon_entity
+        from rpg_core import get_weapon_entity
+        from rpg_database import get_user
         
-        data = load_data()
         uid  = str(ctx.author.id)
-        user = get_user(uid, data)
+        user, upgraded = get_user(uid)
         
         lines = []
         lines.append(f"**=== DANH SÁCH VŨ KHÍ CỦA {ctx.author.display_name.upper()} ===**")

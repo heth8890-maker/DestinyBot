@@ -21,8 +21,7 @@ log = logging.getLogger("db_helper")
 # ─────────────────────────────────────────────
 JSON_FILE          = "rpg_data.json"
 DB_NAME            = "rpg_bot_db"
-GLOBAL_WEAPONS_ID  = "upgraded_weapons"
-DEFAULT_USER       = {"cash": 0, "exp": 0, "equipped": [None, None, None]}
+DEFAULT_USER       = {"cash": 0, "exp": 0, "equipped": [None, None, None], "upgraded_weapons": []}
 MAX_RETRIES        = 3
 RETRY_DELAY        = 2          # giây
 MONGO_TIMEOUT_MS   = 5_000      # 5 giây cho mỗi thao tác
@@ -55,9 +54,9 @@ def _get_client() -> pymongo.MongoClient:
 
 
 def _get_collections():
-    """Trả về (economy_col, global_col) từ client hiện tại."""
+    """Trả về (economy_col, shop_col) từ client hiện tại."""
     db = _get_client()[DB_NAME]
-    return db["economy"], db["global_metadata"]
+    return db["economy"], db["shop_data"]
 
 
 # ─────────────────────────────────────────────
@@ -130,7 +129,7 @@ def load_core_data(user_id) -> dict:
     """
     uid_str = str(user_id)
     try:
-        economy_col, global_col = _get_collections()
+        economy_col, _ = _get_collections()
 
         # 1. Tìm user trên Mongo
         user = _with_retry(economy_col.find_one, {"_id": uid_str})
@@ -149,9 +148,8 @@ def load_core_data(user_id) -> dict:
                 # Race-condition: request khác vừa tạo → đọc lại
                 user = _with_retry(economy_col.find_one, {"_id": uid_str}) or user
 
-        # 4. Global weapons
-        g_data = _with_retry(global_col.find_one, {"_id": GLOBAL_WEAPONS_ID})
-        upgraded_weapons = g_data.get("data", {}) if g_data else {}
+        # 4. upgraded_weapons nằm trong user doc (list)
+        upgraded_weapons = user.get("upgraded_weapons", [])
 
         return {"user": user, "upgraded_weapons": upgraded_weapons}
 
@@ -160,21 +158,21 @@ def load_core_data(user_id) -> dict:
         # Trả về dữ liệu mặc định để bot không crash
         return {
             "user": {"_id": uid_str, **DEFAULT_USER},
-            "upgraded_weapons": {},
+            "upgraded_weapons": [],
         }
 
 
-def save_core_data(user_id, user_data: dict, upgraded_weapons: dict) -> bool:
+def save_core_data(user_id, user_data: dict) -> bool:
     """
-    Lưu dữ liệu user + global weapons.
-    Dùng $set nguyên tử cho global weapons để không ghi đè mất đồ người khác.
+    Lưu dữ liệu user. upgraded_weapons đã nằm trong user_data.
     Trả về True nếu thành công, False nếu thất bại.
     """
     uid_str = str(user_id)
     try:
-        economy_col, global_col = _get_collections()
+        economy_col, _ = _get_collections()
 
         # ── Lưu user (chỉ $set các field thay đổi, giữ nguyên _id) ──
+        # upgraded_weapons đã nằm trong user_data, $set tự lưu cùng
         payload = {k: v for k, v in user_data.items() if k != "_id"}
         _with_retry(
             economy_col.update_one,
@@ -183,25 +181,42 @@ def save_core_data(user_id, user_data: dict, upgraded_weapons: dict) -> bool:
             upsert=True,
         )
 
-        # ── Lưu global weapons: $set từng key riêng lẻ ──────────────
-        # Tránh đọc-gộp-ghi (race condition) bằng cách dùng dot-notation
-        if upgraded_weapons:
-            weapon_update = {
-                f"data.{wid}": wdata
-                for wid, wdata in upgraded_weapons.items()
-            }
-            _with_retry(
-                global_col.update_one,
-                {"_id": GLOBAL_WEAPONS_ID},
-                {"$set": weapon_update},
-                upsert=True,
-            )
-
         return True
 
     except Exception as e:
         log.error(f"❌ save_core_data thất bại cho {uid_str}: {e}")
         return False
+
+
+_SHOP_DOC_ID = "weapon_shop"
+
+
+def load_shop_data() -> dict:
+    """Tải shop từ collection shop_data. Trả về {} nếu chưa có."""
+    try:
+        _, shop_col = _get_collections()
+        doc = _with_retry(shop_col.find_one, {"_id": _SHOP_DOC_ID})
+        if doc:
+            doc.pop("_id", None)
+        return doc or {}
+    except Exception as e:
+        log.error(f"❌ load_shop_data thất bại: {e}")
+        return {}
+
+
+def save_shop_data(data: dict) -> None:
+    """Lưu shop lên collection shop_data."""
+    try:
+        _, shop_col = _get_collections()
+        payload = {k: v for k, v in data.items() if k != "_id"}
+        _with_retry(
+            shop_col.update_one,
+            {"_id": _SHOP_DOC_ID},
+            {"$set": payload},
+            upsert=True,
+        )
+    except Exception as e:
+        log.error(f"❌ save_shop_data thất bại: {e}")
 
 
 def close_connection():

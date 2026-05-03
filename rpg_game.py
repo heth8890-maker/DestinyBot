@@ -37,7 +37,6 @@ import discord
 from discord.ext import commands
 
 from rpg_core import (
-    load_data, save_data, get_user,
     get_item_by_id, get_weapon_by_id, get_crate_by_id,
     add_item, remove_item,
     add_weapon, remove_weapon_from_bag,
@@ -50,6 +49,7 @@ from rpg_core import (
     # ── Agent3: base_id resolver (Ghost Inventory fix) ────
     get_base_id,
 )
+from rpg_database import get_user, save_user
 from rpg_weapon import (
     RARE_CRATE_WEAPONS,
     DARK_CRATE_WEAPON,
@@ -228,9 +228,8 @@ class RPGInventory(commands.Cog):
 
     @commands.command(name="inv")
     async def inv(self, ctx):
-        data = load_data()
         uid  = str(ctx.author.id)
-        user = get_user(uid, data)
+        user, upgraded_weapons = get_user(uid)
 
         item_lines, crate_lines, weapon_lines, upgraded_lines = [], [], [], []
 
@@ -255,10 +254,8 @@ class RPGInventory(commands.Cog):
         # Under v1.7 a UID without an upgrade record is valid, but the old code
         # skipped them in both the regular-weapon block (is_unique check) AND the
         # upgraded-weapon block (no entry in upgraded_weapons) → they were invisible.
-        uw_uids: set[str] = {
-            uw["uid"] for uw in user.get("upgraded_weapons", [])
-            if isinstance(uw, dict) and "uid" in uw
-        }
+        # upgraded_weapons is now a separate dict {uid: {...}} from get_user()
+        uw_uids: set[str] = {uw["uid"] for uw in upgraded_weapons}
 
         weapon_counts:    dict[str, int] = {}
         uid_no_upgrade:   list[str]      = []   # UIDs with no upgrade entry yet
@@ -286,12 +283,18 @@ class RPGInventory(commands.Cog):
                 )
 
         # ── Upgraded weapons — dùng entity.fmt_name() → thống nhất với status ─
-        for uw in user.get("upgraded_weapons", []):
-            entity = get_weapon_entity(user, uw["uid"])
+        # TODO: get_weapon_entity() vẫn đọc user["upgraded_weapons"] (list cũ từ rpg_core).
+        # fmt_name() có thể không hiển thị upgrade decorators cho đến khi rpg_weapon.py
+        # được refactor sang MongoDB pattern. max_lv ở đây đọc trực tiếp từ upgraded_weapons
+        # dict nên vẫn đúng.
+        for uw_data in upgraded_weapons:
+            uid_key = uw_data["uid"]
+            entity = get_weapon_entity(user, uid_key)
             if entity:
-                max_lv = max(uw["effect_levels"].values()) if uw["effect_levels"] else 1
+                effect_levels = uw_data.get("effect_levels", {})
+                max_lv = max(effect_levels.values()) if effect_levels else 1
                 upgraded_lines.append(
-                    f"<:Effect:1495466103047061679> `{uw['uid']}` "
+                    f"<:Effect:1495466103047061679> `{uid_key}` "
                     f"{entity.fmt_name()} _(max lv{max_lv}/30)_"
                 )
 
@@ -424,9 +427,8 @@ class RPGSell(commands.Cog):
 
     @sell.command(name="item")
     async def sell_item(self, ctx, item_id: str, amount: str = "1"):
-        data = load_data()
         uid  = str(ctx.author.id)
-        user = get_user(uid, data)
+        user, upgraded_weapons = get_user(uid)
 
         if item_id not in user["inv"]:
             return await ctx.send(f"{ERR} | Bạn không có vật phẩm này.")
@@ -453,7 +455,8 @@ class RPGSell(commands.Cog):
         if not remove_item(user, item_id, qty):
             return await ctx.send(f"{ERR} | Không thể bán.")
 
-        await save_data(data)
+        if not save_user(uid, user, upgraded_weapons):
+            return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
         update_balance(ctx.author.id, total)
         add_quest_progress(ctx.author.id, "items_sold", qty)
 
@@ -487,8 +490,7 @@ class RPGSell(commands.Cog):
         uid = str(ctx.author.id)
 
         async with get_user_lock(uid):
-            data = load_data()          # fresh read inside lock — prevents stale data
-            user = get_user(uid, data)
+            user, upgraded_weapons = get_user(uid)  # fresh read inside lock — prevents stale data
 
             # ── 1. Resolve targets (all validation happens here) ───────
             targets, err = _resolve_sell_weapon_targets(user, weapon_arg, qty)
@@ -529,12 +531,12 @@ class RPGSell(commands.Cog):
                 # Clean up upgrade record for unique weapons
                 if WeaponID.is_unique(t):
                     user["upgraded_weapons"] = [
-                        uw for uw in user.get("upgraded_weapons", [])
-                        if uw.get("uid") != t
+                        uw for uw in user["upgraded_weapons"] if uw.get("uid") != t
                     ]
 
             # ── 5. Persist → reward (order matters) ───────────────────
-            await save_data(data)           # inventory committed first
+            if not save_user(uid, user, upgraded_weapons):   # sync, no await
+                return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
             update_balance(ctx.author.id, total_value)
             add_quest_progress(ctx.author.id, "weapons_sold", qty)
 
@@ -547,9 +549,8 @@ class RPGSell(commands.Cog):
 
     @sell.command(name="all")
     async def sell_all(self, ctx):
-        data = load_data()
         uid  = str(ctx.author.id)
-        user = get_user(uid, data)
+        user, upgraded_weapons = get_user(uid)
 
         sell_ids = [k for k in user["inv"] if not k.startswith("crate_")]
         if not sell_ids:
@@ -573,7 +574,8 @@ class RPGSell(commands.Cog):
             lines.append(f"{item['emoji']} {item['name']} x{qty} → **{total:,}** {COIN_EMOJI}")
             remove_item(user, item_id, qty)
 
-        await save_data(data)
+        if not save_user(uid, user, upgraded_weapons):
+            return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
         update_balance(ctx.author.id, grand_total)
         add_quest_progress(ctx.author.id, "items_sold", total_qty)
 
@@ -852,15 +854,15 @@ class RPGShopBuy(commands.Cog):
                 f"(bạn có **{bal:,}** {COIN_EMOJI})."
             )
 
-        data = load_data()
         uid  = str(ctx.author.id)
-        user = get_user(uid, data)
+        user, upgraded_weapons = get_user(uid)
 
         update_balance(ctx.author.id, -price)
         # ── ALWAYS stackable: shop must never produce a UID ──────────────────
         add_weapon(user, slot_data["weapon_id"], make_unique=False)
         mark_shop_slot_sold(slot)
-        await save_data(data)
+        if not save_user(uid, user, upgraded_weapons):
+            return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
 
         w     = get_weapon_by_id(slot_data["weapon_id"])
         color = RARITY_COLOR.get(slot_data["rarity"], 0x5865F2)

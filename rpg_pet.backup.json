@@ -1,0 +1,194 @@
+{
+  "1146763208011546687": {
+    "pets": [
+      {
+        "id": "994",
+        "type": "cat",
+        "level": 1,
+        "exp": 0,
+        "fullness": 50,
+        "affection": 0,
+        "last_update": 1777295546.9833977
+      },
+      {
+        "id": "023",
+        "type": "peguin",
+        "level": 1,
+        "exp": 0,
+        "fullness": 50,
+        "affection": 0,
+        "last_update": 1777295569.3413157
+      },
+      {
+        "id": "701",
+        "type": "cat",
+        "level": 1,
+        "exp": 0,
+        "fullness": 50,
+        "affection": 0,
+        "last_update": 1777295615.5274951
+      },
+      {
+        "id": "752",
+        "type": "dog",
+        "level": 1,
+        "exp": 0,
+        "fullness": 50,
+        "affection": 0,
+        "last_update": 1777352987.181099
+      },
+      {
+        "id": "859",
+        "type": "cat",
+        "level": 1,
+        "exp": 0,
+        "fullness": 50,
+        "affection": 0,
+        "last_update": 1777353068.6461248
+      },
+      {
+        "id": "161",
+        "type": "cat",
+        "level": 1,
+        "exp": 0,
+        "fullness": 3,
+        "affection": 0,
+        "last_update": 1777381282.2110493
+      },
+      {
+        "id": "634",
+        "type": "owl",
+        "level": 1,
+        "exp": 0,
+        "fullness": 0,
+        "affection": 0,
+        "last_update": 1777535111.9577708
+      },
+      {
+        "id": "710",
+        "type": "cat",
+        "level": 1,
+        "exp": 0,
+        "fullness": 50,
+        "affection": 0,
+        "last_update": 1777356056.3643072
+      },
+      {
+        "id": "378",
+        "type": "cat",
+        "level": 1,
+        "exp": 0,
+        "fullness": 50,
+        "affection": 0,
+        "last_update": 1777382570.056204
+      },
+      {
+        "id": "593",
+        "type": "chicken",
+        "level": 1,
+        "exp": 0,
+        "fullness": 50,
+        "affection": 0,
+        "last_update": 1777382581.2922666
+      },
+      {
+        "id": "805",
+        "type": "cat",
+        "level": 1,
+        "exp": 0,
+        "fullness": 50,
+        "affection": 0,
+        "last_update": 1777388626.0390527
+      },
+      {
+        "id": "048",
+        "type": "chicken",
+        "level": 1,
+        "exp": 0,
+        "fullness": 50,
+        "affection": 0,
+        "last_update": 1777528741.4714422
+      }
+    ],
+    "equipped_pet": "634",
+    "food_inventory": {
+      "cookie": 1
+    },
+    "pity": 5
+  },
+  "1257173256633319498": {
+    "pets": [
+      {
+        "id": "883",
+        "type": "chicken",
+        "level": 1,
+        "exp": 0,
+        "fullness": 50,
+        "affection": 0,
+        "last_update": 1777356063.0006363
+      }
+    ],
+    "equipped_pet": null,
+    "food_inventory": {},
+    "pity": 1
+  },
+  "1225069741618757666": {
+    "pets": [
+      {
+        "id": "963",
+        "type": "chicken",
+        "level": 1,
+        "exp": 0,
+        "fullness": 50,
+        "affection": 0,
+        "last_update": 1777356112.2911253
+      },
+      {
+        "id": "250",
+        "type": "chicken",
+        "level": 1,
+        "exp": 0,
+        "fullness": 50,
+        "affection": 0,
+        "last_update": 1777356135.41942
+      },
+      {
+        "id": "579",
+        "type": "chicken",
+        "level": 1,
+        "exp": 0,
+        "fullness": 50,
+        "affection": 0,
+        "last_update": 1777356147.746994
+      },
+      {
+        "id": "117",
+        "type": "peguin",
+        "level": 1,
+        "exp": 0,
+        "fullness": 0,
+        "affection": 0,
+        "last_update": 1777388563.9615664
+      }
+    ],
+    "equipped_pet": "117",
+    "food_inventory": {},
+    "pity": 0
+  },
+  "1480394540215959692": {
+    "pets": [
+      {
+        "id": "471",
+        "type": "chicken",
+        "level": 1,
+        "exp": 0,
+        "fullness": 50,
+        "affection": 0,
+        "last_update": 1777611511.9669337
+      }
+    ],
+    "equipped_pet": null,
+    "food_inventory": {},
+    "pity": 1
+  }
+}

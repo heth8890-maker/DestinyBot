@@ -11,21 +11,23 @@ Quản lý Weapon Shop (10 slot, reset mỗi SHOP_RESET_SEC giây)
 ⚡ THAY ĐỔI v5.5-fix (Hybrid Stack/UID restore):
   - parse_effects_upgraded(): dùng get_base_id() từ rpg_core thay vì WeaponID.parse()
     → CẤM dùng .split("-") ngoài get_base_id() (rpg_core.py)
+
+⚡ THAY ĐỔI v6 (MongoDB shop storage):
+  - _load_raw() / _save_raw() dùng database_helper thay vì weapon_shop.json
+  - Bỏ SHOP_FILE, import os, import json (không cần nữa)
 """
 
-import json
-import os
 import random
 import time
 import uuid as _uuid
 
 from rpg_weapon import WEAPONS, RARE_CRATE_WEAPONS
+from database_helper import load_shop_data, save_shop_data
 
 # ═══════════════════════════════════════════════════════════════
 # CONSTANTS — SHOP
 # ═══════════════════════════════════════════════════════════════
 
-SHOP_FILE      = "weapon_shop.json"
 SHOP_RESET_SEC = 6 * 3600
 SHOP_SLOTS     = 10
 
@@ -67,7 +69,7 @@ _LEGENDARY_TIERS:         frozenset = frozenset({"legendary", "legend"})
 UPGRADE_MAX_LEVEL: int = 30
 
 RARITY_MULT: dict[str, float] = {
-    "common":    0.10,  # Legend = chuẩn 1.0, common = 10%
+    "common":    0.10,
     "uncommon":  0.20,
     "rare":      0.45,
     "epic":      0.80,
@@ -196,22 +198,17 @@ def generate_new_shop() -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════
-# SHOP I/O
+# SHOP I/O  — MongoDB backend (thay thế JSON file)
 # ═══════════════════════════════════════════════════════════════
 
 def _load_raw() -> dict:
-    if os.path.exists(SHOP_FILE):
-        try:
-            with open(SHOP_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, KeyError, OSError):
-            pass
-    return {}
+    """Đọc shop data từ MongoDB. Trả về {} nếu chưa có."""
+    return load_shop_data()
 
 
 def _save_raw(data: dict) -> None:
-    with open(SHOP_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """Ghi shop data lên MongoDB."""
+    save_shop_data(data)
 
 
 def load_weapon_shop() -> dict:
@@ -380,7 +377,6 @@ def parse_effects_upgraded(equipped: list, user: dict) -> dict:
     """
     from rpg_core import get_weapon_by_id, get_base_id
 
-    # Effects áp dụng stacking diminishing returns (Rule #1)
     _STACKABLE: frozenset = frozenset({
         "sell_bonus", "rare_bias", "reduce_fail",
         "reduce_cooldown", "double_value",
@@ -391,7 +387,6 @@ def parse_effects_upgraded(equipped: list, user: dict) -> dict:
         uw["uid"]: uw for uw in user.get("upgraded_weapons", [])
     }
 
-    # Per-key list of contributions (before stacking merge)
     raw_contribs: dict[str, list[float]] = {}
     non_stack: dict[str, float]          = {}
 
@@ -399,7 +394,6 @@ def parse_effects_upgraded(equipped: list, user: dict) -> dict:
         if wid is None:
             continue
 
-        # ── Use get_base_id() — KHÔNG dùng .split("-") trực tiếp ─────────────
         base_id = get_base_id(str(wid))
         if not base_id:
             continue
@@ -422,13 +416,11 @@ def parse_effects_upgraded(equipped: list, user: dict) -> dict:
 
         for k, v in effects.items():
             if not isinstance(v, (int, float)):
-                # Non-numeric (e.g. string flags) → keep last seen
                 non_stack[k] = v
                 continue
             if k in _STACKABLE:
                 raw_contribs.setdefault(k, []).append(float(v))
             else:
-                # Non-stackable numeric (e.g. extra_slot) → additive
                 non_stack[k] = non_stack.get(k, 0.0) + v
 
     # Apply stacking formula: max + sum_others × 0.4

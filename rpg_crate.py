@@ -21,14 +21,16 @@ import discord
 from discord.ext import commands
 
 from rpg_core import (
-    load_data, save_data, get_user,
     add_item, remove_item,
     add_weapon, roll_weapon,
     CRATES, RARITY_COLOR, RARITY_LABEL,
 )
+# ✅ Dùng get_user / save_user từ rpg_database (MongoDB) thay vì load_data / save_data JSON
+from rpg_database import get_user, save_user
+
 from rpg_weapon import roll_rare_crate_weapon, roll_dark_crate_weapon
 from rpg_quest import add_quest_progress
-from cash import update_balance, get_balance
+from cash import update_balance_safe, get_balance
 
 
 COIN_EMOJI  = "<:Coin:1495831576397742241>"
@@ -77,17 +79,18 @@ class RPGCrate(commands.Cog):
                 f"(bạn có **{bal:,}** {COIN_EMOJI})."
             )
 
-        data = load_data()
         uid  = str(ctx.author.id)
-        user = get_user(uid, data)
+        # ✅ Tải user từ MongoDB
+        user, _ = get_user(uid)
 
-        update_balance(ctx.author.id, -price)
+        await update_balance_safe(ctx.author.id, -price)
 
         # 👉 STACK ITEM CRATE (base_id)
         crate_key = f"crate_{crate_id}"
         add_item(user, crate_key, amount)
 
-        await save_data(data)
+        # ✅ Lưu lên MongoDB
+        save_user(uid, user)
 
         await ctx.send(
             f"{OK} | Đã mua **{amount}x** {crate['emoji']} {crate['name']} "
@@ -105,9 +108,9 @@ class RPGCrate(commands.Cog):
             )
 
         crate_key = f"crate_{crate_id}"
-        data = load_data()
         uid  = str(ctx.author.id)
-        user = get_user(uid, data)
+        # ✅ Tải user từ MongoDB
+        user, _ = get_user(uid)
 
         if user["inv"].get(crate_key, 0) <= 0:
             return await ctx.send(
@@ -124,7 +127,8 @@ class RPGCrate(commands.Cog):
 
         # remove 1 crate (stack system)
         remove_item(user, crate_key)
-        await save_data(data)
+        # ✅ Lưu cooldown + xóa crate lên MongoDB
+        save_user(uid, user)
 
         crate = CRATES[crate_id]
 
@@ -146,7 +150,8 @@ class RPGCrate(commands.Cog):
                 special_pool = ["5001", "5002", "5003"]
                 w_id = random.choice(special_pool)
                 add_weapon(user, w_id, make_unique=False)
-                await save_data(data)
+                # ✅ Lưu lên MongoDB
+                save_user(uid, user)
 
                 from rpg_core import get_weapon_entity
                 entity = get_weapon_entity(user, w_id)
@@ -160,15 +165,16 @@ class RPGCrate(commands.Cog):
             elif roll <= 35.6:
                 amount = random.randint(4, 18)
                 add_item(user, "5200", amount)
-                await save_data(data)
+                # ✅ Lưu lên MongoDB
+                save_user(uid, user)
                 return await msg.edit(content=f"<:Opensoulcrate:1498617029077499935> | Chúc mừng bạn đã mở ra **x{amount}** <:Linh_hoa:1498614127386562601> **Linh hoả**")
 
             # 3. TRÚNG COIN (64.4%)
             else:
                 coins = random.randint(2000, 6000)
-                from cash import update_balance
-                update_balance(ctx.author.id, coins)
-                await save_data(data)
+                from cash import update_balance_safe
+                await update_balance_safe(ctx.author.id, coins)
+                # ✅ update_balance tự lưu; user dict không thay đổi → không cần save_user
                 return await msg.edit(content=f"<:Opensoulcrate:1498617029077499935> | Chúc mừng bạn đã mở ra **x{coins:,}** <:Coin:1495831576397742241> **Coin**")
 
         # ── [LOGIC CHO CÁC CRATE CÒN LẠI] ──
@@ -179,13 +185,14 @@ class RPGCrate(commands.Cog):
         else:
             weapon = roll_weapon()
 
-        data = load_data()
-        user = get_user(uid, data)
+        # ✅ Tải lại user từ MongoDB (giống re-load JSON cũ, đảm bảo dữ liệu mới nhất)
+        user, _ = get_user(uid)
 
         # 🔥 IMPORTANT: STACK BASE_ID ONLY — NEVER produce a UID from a crate
         add_weapon(user, weapon["id"], make_unique=False)
 
-        await save_data(data)
+        # ✅ Lưu lên MongoDB
+        save_user(uid, user)
 
         add_quest_progress(ctx.author.id, "crates_opened")
 
@@ -261,9 +268,9 @@ class RPGCrate(commands.Cog):
         if amount <= 0:
             return await ctx.send(f"{ERR} | Số lượng không hợp lệ.")
 
-        data = load_data()
         uid = str(ctx.author.id)
-        user = get_user(uid, data)
+        # ✅ Tải user từ MongoDB
+        user, _ = get_user(uid)
 
         # Cấu hình ID
         currency_id = "5200"  # ID Linh hoả
@@ -282,7 +289,8 @@ class RPGCrate(commands.Cog):
         user["inv"][currency_id] -= total_cost
         add_item(user, f"crate_{crate_id}", amount)
 
-        await save_data(data)
+        # ✅ Lưu lên MongoDB
+        save_user(uid, user)
         await ctx.send(f"{OK} | Chúc mừng bạn đã đổi thành công **{total_cost}** Linh hoả lấy **{amount}x** <:Soulcrate:1498617031501807646> **Soul Crate**!")
 
 
