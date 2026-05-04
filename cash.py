@@ -69,7 +69,7 @@ async def update_balance_safe(user_id, amount: int) -> int:
         user["cash"] = user.get("cash", 0) + amount
         # ✅ FIX Lỗi 1: truyền `data` (toàn bộ dict) thay vì `user` (chỉ phần bên trong)
         # Bug cũ: save_core_data(uid, user) → lưu sai cấu trúc → tiền không được trừ
-        save_core_data(uid, data)
+        save_core_data(uid, user)
         return user["cash"]
 
 
@@ -237,7 +237,7 @@ class Cash(commands.Cog):
             user["daily_date"]   = today.strftime("%Y-%m-%d")
             user["daily_streak"] = streak
             # ✅ FIX Lỗi 1 (ở daily): truyền `data` thay vì `user`
-            save_core_data(uid, data)
+            save_core_data(uid, user)
 
         # ── Tặng rương (RPG data — MongoDB) ──
         # ✅ FIX Lỗi 2 & 3: dùng get_user / save_user từ rpg_database, không dùng load_data / save_data JSON
