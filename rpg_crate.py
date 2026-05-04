@@ -83,7 +83,7 @@ class RPGCrate(commands.Cog):
         # ✅ Tải user từ MongoDB
         user, _ = get_user(uid)
 
-        await update_balance_safe(ctx.author.id, -price)
+        await await update_balance_safe(ctx.author.id, -price)
 
         # 👉 STACK ITEM CRATE (base_id)
         crate_key = f"crate_{crate_id}"
@@ -172,8 +172,8 @@ class RPGCrate(commands.Cog):
             # 3. TRÚNG COIN (64.4%)
             else:
                 coins = random.randint(2000, 6000)
-                from cash import update_balance_safe
-                await update_balance_safe(ctx.author.id, coins)
+                from cash import await update_balance_safe
+                await await update_balance_safe(ctx.author.id, coins)
                 # ✅ update_balance tự lưu; user dict không thay đổi → không cần save_user
                 return await msg.edit(content=f"<:Opensoulcrate:1498617029077499935> | Chúc mừng bạn đã mở ra **x{coins:,}** <:Coin:1495831576397742241> **Coin**")
 

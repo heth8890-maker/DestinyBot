@@ -331,7 +331,7 @@ class RPGHunt(commands.Cog):
 
                     elif bonus_type == "coin":
                         coins = random.randint(2000, 6500)
-                        update_balance_safe(ctx.author.id, coins)
+                        await update_balance_safe(ctx.author.id, coins)
                         bonus["count"] += 1
 
                         remaining    = BONUS_MAX - bonus["count"]
