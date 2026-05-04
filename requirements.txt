@@ -5,5 +5,4 @@ python-dotenv
 flask
 discord.py
 pymongo[srv]
-flask
 dnspython 
