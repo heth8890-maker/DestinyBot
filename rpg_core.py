@@ -1113,7 +1113,7 @@ async def save_data(data: dict, user_id=None) -> bool:
 
     async with _data_lock:   # Một save tại một thời điểm — tránh torn writes
         try:
-            _with_retry(save_core_data, uid_str, user_data, global_uw)
+            _with_retry(save_core_data, uid_str, user_data)
             logger.debug("[SAVE] ✅ uid=%s lưu thành công.", uid_str)
 
             # Commit RAM snapshot sau khi DB xác nhận

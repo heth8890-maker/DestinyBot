@@ -63,7 +63,7 @@ async def update_balance_safe(user_id, amount: int) -> int:
         data = load_core_data(uid)
         user = data["user"]
         user["cash"] = user.get("cash", 0) + amount
-        save_core_data(uid, user, data["upgraded_weapons"])
+        save_core_data(uid, user)
         return user["cash"]
 
 
@@ -235,7 +235,7 @@ class Cash(commands.Cog):
             user["cash"]        = user.get("cash", 0) + total
             user["daily_date"]  = today.strftime("%Y-%m-%d")
             user["daily_streak"] = streak
-            save_core_data(uid, user, data["upgraded_weapons"])
+            save_core_data(uid, user)
 
         # ── Tặng rương (RPG data — load_data riêng của rpg_crate) ──
         rpg_data = load_data()
