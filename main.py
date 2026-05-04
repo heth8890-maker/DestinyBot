@@ -1,18 +1,13 @@
 """
-===== FILE: main.py (FIXED) =====
+===== FILE: main.py (OPTIMIZED) =====
 FIXES APPLIED:
-1. EXCLUDE_MODULES now only contains confirmed non-Cog utility modules:
-   rpg_core, rpg_addon, rpg_item (+ main itself).
-   rpg_weapon, rpg_quest, rpg_daily, cash, exp are NOT excluded —
-   they are valid Cogs and must be attempted.
-
-2. Removed the name-prefix filter (startswith('rpg_') / == 'cash').
-   That filter silently dropped exp.py and any future Cog with an
-   unexpected name. A module is a Cog if and only if it has
-   `async def setup(bot)` — detected at runtime via NoEntryPointError.
-
-3. Kept comprehensive per-extension try/except logging:
-   success / NoEntryPointError / ExtensionFailed / ModuleNotFoundError / fallback.
+1. Flask keep-alive: thêm use_reloader=False, threaded=True, log debug
+2. Flask start TRƯỚC khi bot khởi động → Render detect port ngay
+3. Logging format chuẩn hơn (timestamp + level)
+4. on_command_error: xử lý thêm MissingRequiredArgument, CommandNotFound
+5. on_ready: log đầy đủ guild count
+6. EXCLUDE_MODULES giữ nguyên (đúng)
+7. Thêm health check route /health cho Render uptime monitor
 """
 
 import discord
@@ -25,22 +20,51 @@ import logging
 from flask import Flask
 from threading import Thread
 
-# ─── Keep-alive server (giữ bot không bị Render spin down) ───
+# ─── Logging Setup (phải setup TRƯỚC mọi thứ) ───────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+# ─── Keep-alive Flask Server ─────────────────────────────────────────────────
+# Render yêu cầu app phải lắng nghe PORT ngay khi khởi động.
+# Flask chạy trong daemon thread → không block asyncio của Discord bot.
+
 _app = Flask(__name__)
 
-@_app.route('/')
+# Tắt log Flask để không spam console
+_flask_log = logging.getLogger("werkzeug")
+_flask_log.setLevel(logging.WARNING)
+
+@_app.route("/")
 def _home():
-    return "Bot is running!", 200
+    return "✅ bot is running!", 200
+
+@_app.route("/health")
+def _health():
+    """Health check endpoint cho Render uptime monitor."""
+    return {"status": "ok", "bot": str(bot.user) if bot.is_ready() else "starting"}, 200
 
 def _run_server():
-    _app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+    port = int(os.environ.get("PORT", 8080))
+    logger.info(f"[Flask] Keep-alive server starting on port {port}")
+    _app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+        use_reloader=False,   # QUAN TRỌNG: tắt reloader trong thread
+        threaded=True,        # Xử lý nhiều request đồng thời
+    )
 
-Thread(target=_run_server, daemon=True).start()
-# ─────────────────────────────────────────────────────────────
+# ✅ Start Flask TRƯỚC khi Discord bot khởi động
+# → Render sẽ detect open port ngay, không bị timeout
+_flask_thread = Thread(target=_run_server, daemon=True, name="FlaskKeepAlive")
+_flask_thread.start()
+logger.info("[Main] Flask keep-alive thread started")
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ─── Discord Bot Setup ────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -51,8 +75,10 @@ bot = commands.Bot(
     command_prefix=["dtn ", "Dtn ", "d", "dn", "dnt", "D", "Dnt", "Dn"],
     intents=intents,
     owner_id=1146763208011546687,
-    help_command=None
+    help_command=None,
 )
+
+# ─── Commands ─────────────────────────────────────────────────────────────────
 
 @bot.command(name="reload")
 @commands.is_owner()
@@ -60,91 +86,112 @@ async def reload_cog(ctx, name: str):
     """Reload a Cog dynamically."""
     try:
         await bot.reload_extension(name)
-        await ctx.send(f"✅ Đã cập nhật file `{name}.py` thành công!")
+        await ctx.send(f"✅ Đã reload `{name}.py` thành công!")
         logger.info(f"Reloaded extension: {name}")
+    except commands.ExtensionNotLoaded:
+        await ctx.send(f"⚠️ `{name}` chưa được load.")
+    except commands.ExtensionNotFound:
+        await ctx.send(f"❌ Không tìm thấy file `{name}.py`.")
     except Exception as e:
-        await ctx.send(f"❌ Lỗi khi cập nhật `{name}`: {e}")
+        await ctx.send(f"❌ Lỗi khi reload `{name}`: {e}")
         logger.error(f"Failed to reload {name}: {e}")
-# ✅ Global error handling
+
+# ─── Events ───────────────────────────────────────────────────────────────────
+
+@bot.event
+async def on_ready():
+    """Bot startup event."""
+    guild_count = len(bot.guilds)
+    logger.info(f"Bot logged in as {bot.user} | Guilds: {guild_count}")
+    print(f"--- Myonster Bot đã sẵn sàng: {bot.user} | {guild_count} server(s) ---")
+
 @bot.event
 async def on_command_error(ctx, error):
-    """Handle command errors globally."""
+    """Global error handler."""
+
+    # Bỏ qua lỗi đã được xử lý trong Cog
+    if hasattr(ctx.command, "on_error"):
+        return
+
+    # Unwrap CommandInvokeError
+    error = getattr(error, "original", error)
+
     if isinstance(error, commands.CommandOnCooldown):
         remaining = math.ceil(error.retry_after)
         await ctx.send(
             f"⏳ | {ctx.author.mention}, lệnh đang cooldown, còn **{remaining}s** nữa!",
-            delete_after=3  # 👈 tự xoá sau 3 giây
+            delete_after=5,
         )
+
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(
+            f"❌ | Thiếu tham số: `{error.param.name}`. Dùng lệnh đúng cú pháp nhé!",
+            delete_after=8,
+        )
+
+    elif isinstance(error, commands.CommandNotFound):
+        pass  # Bỏ qua lệnh không tồn tại — không spam chat
+
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.send(
+            f"🚫 | Bạn không có quyền dùng lệnh này!",
+            delete_after=5,
+        )
+
+    elif isinstance(error, commands.NotOwner):
+        await ctx.send("🚫 | Lệnh này chỉ dành cho chủ bot!", delete_after=5)
+
     else:
-        logger.error(f"Command error in {ctx.command}: {error}")
+        logger.error(f"Unhandled error in command '{ctx.command}': {type(error).__name__}: {error}")
         raise error
-@bot.event
-async def on_ready():
-    """Bot startup event."""
-    print(f"--- Myonster Bot đã sẵn sàng: {bot.user.name} ---")
-    logger.info(f"Bot logged in as {bot.user}")
+
+# ─── Extension Loader ─────────────────────────────────────────────────────────
 
 async def load_extensions():
     """
-    Load ALL valid Cog files found in the current directory.
+    Load tất cả Cog hợp lệ trong thư mục hiện tại.
 
-    A file is a valid Cog if and only if it defines `async def setup(bot)`.
-    We do NOT use filenames or prefixes to judge this — discord.py will
-    raise NoEntryPointError for any file that lacks setup(), and we log
-    that as an informational skip rather than an error.
+    Một file là Cog nếu và chỉ nếu nó có `async def setup(bot)`.
+    discord.py sẽ raise NoEntryPointError cho file không có setup() → skip an toàn.
 
-    Hard-excluded (confirmed non-Cog utility modules with no setup()):
-        main      – this file
-        rpg_core  – database + core game logic library
-        rpg_addon – shared utility / helper functions
-        rpg_item  – item-definition data module
-
-    Everything else (cash, exp, rpg_weapon, rpg_enchant, rpg_catch, …)
-    is attempted.  If it has setup() it loads; if not, NoEntryPointError
-    tells us cleanly.
+    EXCLUDE_MODULES: các module utility thuần túy, KHÔNG phải Cog.
     """
 
-    # Only confirmed non-Cog modules — the absolute minimum exclusion list.
-    # DO NOT add cash, exp, rpg_weapon, rpg_quest, rpg_daily, etc. here.
     EXCLUDE_MODULES = {
-        'main',       # This file — never a Cog
-        'rpg_core',   # Pure library: DB I/O + game logic, no setup()
-        'rpg_addon',  # Pure library: shared utility helpers, no setup()
-        'rpg_item',   # Pure data module: item definitions, no setup()
+        "main",       # File này — không phải Cog
+        "rpg_core",   # Library: DB I/O + game logic
+        "rpg_addon",  # Library: shared utility helpers
+        "rpg_item",   # Data module: item definitions
     }
 
     loaded_count  = 0
     skipped_count = 0
     failed_count  = 0
 
-    for filename in sorted(os.listdir('./')):         # sorted for stable log order
-        if not filename.endswith('.py'):
+    for filename in sorted(os.listdir("./")):
+        if not filename.endswith(".py"):
             continue
 
-        ext_name = filename[:-3]  # strip .py
+        ext_name = filename[:-3]
 
-        # Skip confirmed non-Cog utility modules
         if ext_name in EXCLUDE_MODULES:
             logger.info(f"⏭️  Skipping utility module: {filename}")
             skipped_count += 1
             continue
 
-        # --- Attempt to load every other .py file ---
         try:
             await bot.load_extension(ext_name)
-            logger.info(f"✅ Loaded Cog:  {filename}")
+            logger.info(f"✅ Loaded Cog: {filename}")
             loaded_count += 1
 
         except commands.ExtensionAlreadyLoaded:
             logger.warning(f"⚠️  Already loaded: {filename}")
 
         except commands.NoEntryPointError:
-            # File exists but has no async def setup(bot) — not a Cog, safe to skip.
-            logger.info(f"⏭️  No setup() in {filename} — not a Cog, skipping")
+            logger.info(f"⏭️  No setup() in {filename} — skipping")
             skipped_count += 1
 
         except commands.ExtensionFailed as e:
-            # setup() raised an exception at runtime
             logger.error(
                 f"❌ Runtime error in {filename} setup(): "
                 f"{type(e.original).__name__}: {e.original}"
@@ -152,57 +199,50 @@ async def load_extensions():
             failed_count += 1
 
         except ModuleNotFoundError as e:
-            # The module itself (or one of its imports) could not be found
             logger.error(f"❌ Import error loading {filename}: {e}")
             failed_count += 1
 
         except Exception as e:
-            logger.error(
-                f"❌ Unexpected error loading {filename}: "
-                f"{type(e).__name__}: {e}"
-            )
+            logger.error(f"❌ Unexpected error loading {filename}: {type(e).__name__}: {e}")
             failed_count += 1
 
-    # ── Summary ────────────────────────────────────────────────────────────────
     logger.info(
         f"Extension loading complete — "
         f"{loaded_count} loaded, {skipped_count} skipped, {failed_count} failed"
     )
     if failed_count > 0:
-        logger.warning(
-            f"⚠️  {failed_count} extension(s) failed to load. "
-            f"Review the errors above."
-        )
+        logger.warning(f"⚠️  {failed_count} extension(s) failed to load — xem log ở trên.")
+
+# ─── Main Entry Point ─────────────────────────────────────────────────────────
 
 async def main():
     """Main bot startup."""
     async with bot:
         await load_extensions()
 
-        # ⚠️  SECURITY: Move your token to an environment variable or a .env file.
-        #     e.g.  TOKEN = os.environ["DISCORD_TOKEN"]
         TOKEN = os.environ.get("DISCORD_TOKEN", "")
         if not TOKEN:
             logger.critical(
-                "DISCORD_TOKEN environment variable is not set. "
-                "Set it before starting the bot."
+                "❌ DISCORD_TOKEN chưa được set! "
+                "Thêm vào Environment Variables trên Render."
             )
             sys.exit(1)
 
         try:
             await bot.start(TOKEN)
         except discord.LoginFailure:
-            logger.error("Invalid bot token — check DISCORD_TOKEN.")
+            logger.error("❌ Token không hợp lệ — kiểm tra DISCORD_TOKEN.")
             sys.exit(1)
         except Exception as e:
-            logger.error(f"Failed to start bot: {e}")
+            logger.error(f"❌ Lỗi khi khởi động bot: {e}")
             sys.exit(1)
+
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot shutdown by user")
+        logger.info("Bot đã dừng (KeyboardInterrupt)")
     except Exception as e:
         logger.critical(f"Fatal error: {e}")
         sys.exit(1)
