@@ -10,6 +10,10 @@ from datetime import datetime, timezone, timedelta
 
 from database_helper import load_core_data, save_core_data
 
+# ✅ FIX Lỗi 2: import đúng từ rpg_database + rpg_core thay vì rpg_crate (JSON cũ)
+from rpg_database import get_user, save_user
+from rpg_core import add_item, CRATES
+
 # ───────────────────────────────────────────
 # HẰNG SỐ CHUNG
 # ───────────────────────────────────────────
@@ -63,7 +67,9 @@ async def update_balance_safe(user_id, amount: int) -> int:
         data = load_core_data(uid)
         user = data["user"]
         user["cash"] = user.get("cash", 0) + amount
-        save_core_data(uid, user)
+        # ✅ FIX Lỗi 1: truyền `data` (toàn bộ dict) thay vì `user` (chỉ phần bên trong)
+        # Bug cũ: save_core_data(uid, user) → lưu sai cấu trúc → tiền không được trừ
+        save_core_data(uid, data)
         return user["cash"]
 
 
@@ -93,7 +99,6 @@ class ConfirmPay(discord.ui.View):
         if interaction.user != self.ctx.author:
             return await interaction.response.send_message("❌ Không phải bạn!", ephemeral=True)
 
-        # Kiểm tra lại số dư trước khi trừ
         sender_bal = get_balance(self.ctx.author.id)
         if sender_bal < self.amount:
             return await interaction.response.edit_message(
@@ -101,7 +106,6 @@ class ConfirmPay(discord.ui.View):
                 embed=None, view=None
             )
 
-        # Trừ người gửi, cộng người nhận (tuần tự để tránh race condition)
         await update_balance_safe(self.ctx.author.id, -self.amount)
         await update_balance_safe(self.member.id, self.amount)
         self.stop()
@@ -192,8 +196,6 @@ class Cash(commands.Cog):
     # ── LỆNH DAILY ────────────────────────
     @commands.command(name="daily")
     async def daily(self, ctx):
-        from rpg_crate import load_data, save_data, get_user, add_item, CRATES
-
         uid    = str(ctx.author.id)
         vn_tz  = timezone(timedelta(hours=7))
         now_vn = datetime.now(vn_tz)
@@ -204,7 +206,6 @@ class Cash(commands.Cog):
             data = load_core_data(uid)
             user = data["user"]
 
-            # Đọc streak từ MongoDB (field daily_date / daily_streak trong user doc)
             last_daily  = user.get("daily_date")
             last_streak = int(user.get("daily_streak", 0))
 
@@ -231,20 +232,22 @@ class Cash(commands.Cog):
             bonus  = (streak - 1) * 200
             total  = base + bonus
 
-            # Cập nhật user doc và lưu vào MongoDB
-            user["cash"]        = user.get("cash", 0) + total
-            user["daily_date"]  = today.strftime("%Y-%m-%d")
+            # Cập nhật cash trong user doc
+            user["cash"]         = user.get("cash", 0) + total
+            user["daily_date"]   = today.strftime("%Y-%m-%d")
             user["daily_streak"] = streak
-            save_core_data(uid, user)
+            # ✅ FIX Lỗi 1 (ở daily): truyền `data` thay vì `user`
+            save_core_data(uid, data)
 
-        # ── Tặng rương (RPG data — load_data riêng của rpg_crate) ──
-        rpg_data = load_data()
-        rpg_user = get_user(uid, rpg_data)
-        crate_id = "001"
-        add_item(rpg_user, crate_id, 1)
-        save_data(rpg_data)
+        # ── Tặng rương (RPG data — MongoDB) ──
+        # ✅ FIX Lỗi 2 & 3: dùng get_user / save_user từ rpg_database, không dùng load_data / save_data JSON
+        rpg_user, _ = await get_user(uid)
+        crate_item_id = "001"
+        crate_key     = f"crate_{crate_item_id}"
+        add_item(rpg_user, crate_key, 1)
+        await save_user(uid, rpg_user)
 
-        crate_info = CRATES.get(f"crate_{crate_id}")
+        crate_info = CRATES.get(crate_item_id)
         if crate_info is None:
             return await ctx.send("❌ Lỗi nội bộ: không tìm thấy thông tin crate.")
 
@@ -330,7 +333,6 @@ class Cash(commands.Cog):
 
         if amount.lower() == "all":
             amount = min(bal, MAX_ALL_BET)
-            
         else:
             try:
                 amount = int(amount)
