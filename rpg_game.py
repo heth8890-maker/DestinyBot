@@ -457,7 +457,7 @@ class RPGSell(commands.Cog):
 
         if not save_user(uid, user, upgraded_weapons):
             return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
-        update_balance_safe(ctx.author.id, total)
+       await update_balance_safe(ctx.author.id, total)
         add_quest_progress(ctx.author.id, "items_sold", qty)
 
         await ctx.send(
@@ -537,7 +537,7 @@ class RPGSell(commands.Cog):
             # ── 5. Persist → reward (order matters) ───────────────────
             if not save_user(uid, user, upgraded_weapons):   # sync, no await
                 return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
-            update_balance_safe(ctx.author.id, total_value)
+           await update_balance_safe(ctx.author.id, total_value)
             add_quest_progress(ctx.author.id, "weapons_sold", qty)
 
         # ── 6. Confirm to user (outside lock — no shared state access) ─
@@ -576,7 +576,7 @@ class RPGSell(commands.Cog):
 
         if not save_user(uid, user, upgraded_weapons):
             return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
-        update_balance_safe(ctx.author.id, grand_total)
+        await update_balance_safe(ctx.author.id, grand_total)
         add_quest_progress(ctx.author.id, "items_sold", total_qty)
 
         embed = discord.Embed(
@@ -857,7 +857,7 @@ class RPGShopBuy(commands.Cog):
         uid  = str(ctx.author.id)
         user, upgraded_weapons = get_user(uid)
 
-        update_balance_safe(ctx.author.id, -price)
+       await update_balance_safe(ctx.author.id, -price)
         # ── ALWAYS stackable: shop must never produce a UID ──────────────────
         add_weapon(user, slot_data["weapon_id"], make_unique=False)
         mark_shop_slot_sold(slot)
