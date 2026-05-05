@@ -80,10 +80,11 @@ class RPGCrate(commands.Cog):
             )
 
         uid  = str(ctx.author.id)
-        # ✅ Tải user từ MongoDB
-        user, _ = get_user(uid)
 
         await update_balance_safe(ctx.author.id, -price)
+
+        # ✅ Tải user SAU khi trừ tiền — tránh save_user overwrite lại cash cũ
+        user, _ = get_user(uid)
 
         # 👉 STACK ITEM CRATE (base_id)
         crate_key = f"crate_{crate_id}"

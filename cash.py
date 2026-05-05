@@ -56,20 +56,26 @@ def get_balance(user_id) -> int:
     return data["user"].get("cash", 0)
 
 
-async def update_balance_safe(user_id, amount: int) -> int:
+async def update_balance_safe(user_id, amount: int, require: int = 0) -> int | None:
     """
     Cộng/trừ tiền an toàn (có Lock + lưu MongoDB).
     Dùng số dương để cộng, số âm để trừ.
-    Trả về số dư mới sau khi cập nhật.
+
+    require > 0  → kiểm tra balance >= require BÊN TRONG lock trước khi trừ.
+                   Nếu không đủ trả về None (không trừ, không lưu).
+                   Dùng để chống TOCTOU race condition khi trừ tiền.
+
+    Trả về số dư mới sau khi cập nhật, hoặc None nếu không đủ tiền.
     """
     uid = str(user_id)
     async with get_user_lock(uid):
         data = load_core_data(uid)
         user = data["user"]
-        user["cash"] = user.get("cash", 0) + amount
-        # ✅ FIX Lỗi 1: truyền `data` (toàn bộ dict) thay vì `user` (chỉ phần bên trong)
-        # Bug cũ: save_core_data(uid, user) → lưu sai cấu trúc → tiền không được trừ
-        save_core_data(uid, user)
+        current = user.get("cash", 0)
+        if require > 0 and current < require:
+            return None
+        user["cash"] = current + amount
+        save_core_data(uid, data)
         return user["cash"]
 
 
@@ -99,14 +105,14 @@ class ConfirmPay(discord.ui.View):
         if interaction.user != self.ctx.author:
             return await interaction.response.send_message("❌ Không phải bạn!", ephemeral=True)
 
-        sender_bal = get_balance(self.ctx.author.id)
-        if sender_bal < self.amount:
+        # require=amount → guard bên trong lock, chống race condition
+        result = await update_balance_safe(self.ctx.author.id, -self.amount, require=self.amount)
+        if result is None:
             return await interaction.response.edit_message(
                 content="❌ Bạn không đủ tiền để thực hiện giao dịch.",
                 embed=None, view=None
             )
 
-        await update_balance_safe(self.ctx.author.id, -self.amount)
         await update_balance_safe(self.member.id, self.amount)
         self.stop()
 
@@ -236,16 +242,15 @@ class Cash(commands.Cog):
             user["cash"]         = user.get("cash", 0) + total
             user["daily_date"]   = today.strftime("%Y-%m-%d")
             user["daily_streak"] = streak
-            # ✅ FIX Lỗi 1 (ở daily): truyền `data` thay vì `user`
-            save_core_data(uid, user)
+            save_core_data(uid, data)
 
         # ── Tặng rương (RPG data — MongoDB) ──
-        # ✅ FIX Lỗi 2 & 3: dùng get_user / save_user từ rpg_database, không dùng load_data / save_data JSON
-        rpg_user, _ = await get_user(uid)
+        # get_user / save_user là sync — không dùng await
+        rpg_user, _ = get_user(uid)
         crate_item_id = "001"
         crate_key     = f"crate_{crate_item_id}"
         add_item(rpg_user, crate_key, 1)
-        await save_user(uid, rpg_user)
+        save_user(uid, rpg_user)
 
         crate_info = CRATES.get(crate_item_id)
         if crate_info is None:
@@ -341,10 +346,15 @@ class Cash(commands.Cog):
 
         if amount <= 0:
             return await ctx.send("❌ Số tiền cược phải lớn hơn 0...")
+        if amount > MAX_ALL_BET:
+            return await ctx.send(f"❌ Cược tối đa **{MAX_ALL_BET:,}** {ICON_COIN} mỗi lần.")
         if bal < amount:
             return await ctx.send("❌ Bạn không đủ tiền để cược...")
 
-        await update_balance_safe(ctx.author.id, -amount)
+        # require=amount → trừ tiền + guard balance âm bên trong lock
+        deducted = await update_balance_safe(ctx.author.id, -amount, require=amount)
+        if deducted is None:
+            return await ctx.send("❌ Bạn không đủ tiền để cược...")
 
         is_win = random.random() < SPIN_WIN_RATE
 
@@ -411,10 +421,15 @@ class Cash(commands.Cog):
 
         if amount <= 0:
             return await ctx.send("❌ Số tiền cược phải lớn hơn 0.")
+        if amount > MAX_ALL_BET:
+            return await ctx.send(f"❌ Cược tối đa **{MAX_ALL_BET:,}** {ICON_COIN} mỗi lần.")
         if bal < amount:
             return await ctx.send(f"❌ Bạn không đủ tiền (Số dư: {bal:,}).")
 
-        await update_balance_safe(ctx.author.id, -amount)
+        # require=amount → trừ tiền + guard balance âm bên trong lock
+        deducted = await update_balance_safe(ctx.author.id, -amount, require=amount)
+        if deducted is None:
+            return await ctx.send("❌ Bạn không đủ tiền để cược...")
 
         # ── CẤU HÌNH ICON ──
         CHANGE   = "<a:Changev4:1494983646505861161>"
