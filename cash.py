@@ -75,7 +75,7 @@ async def update_balance_safe(user_id, amount: int, require: int = 0) -> int | N
         if require > 0 and current < require:
             return None
         user["cash"] = current + amount
-        save_core_data(uid, data)
+        save_core_data(uid, user)   # ✅ FIX: truyền user doc, không phải wrapper data
         return user["cash"]
 
 
@@ -242,7 +242,7 @@ class Cash(commands.Cog):
             user["cash"]         = user.get("cash", 0) + total
             user["daily_date"]   = today.strftime("%Y-%m-%d")
             user["daily_streak"] = streak
-            save_core_data(uid, data)
+            save_core_data(uid, user)   # ✅ FIX: truyền user doc, không phải wrapper data
 
         # ── Tặng rương (RPG data — MongoDB) ──
         # get_user / save_user là sync — không dùng await
