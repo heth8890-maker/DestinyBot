@@ -2,27 +2,26 @@ import random
 import asyncio
 import discord
 from discord.ext import commands
-from cash import get_balance, update_balance_safe
+from database_helper import load_core_data, save_core_data
 
 # =========================
 # DATA & CONFIG
 # =========================
 
 CARDS = {
-    "2":  ["<:2_nhep:1498334768561914129>",  "<:2_co:1498334764367614064>",  "<:2_bich:1498334760714637422>",  "<:2_ro:1498334758533599302>"],
-    "3":  ["<:3_nhep:1498334755421163751>",  "<:3_co:1498334752162185268>",  "<:3_ro:1498334744855711774>",   "<:3_bich:1498334741974487222>"],
-    "4":  ["<:4_ro:1498334738753257593>",    "<:4_co:1498334725562040370>",  "<:4_bich:1498334734730661948>", "<:4_nhep:1498334722953052282>"],
-    "5":  ["<:5_ro:1498334720847773788>",    "<:5_bich:1498334717315911861>","<:5_co:1498334710143910099>",   "<:5_nhep:1498334707266355210>"],
-    "6":  ["<:6_ro:1498334704469020713>",    "<:6_bich:1498334701805375578>","<:6_co:1498334693614031019>",   "<:6_nhep:1498334691030470826>"],
-    "7":  ["<:7_ro:1498334686517264424>",    "<:7_bich:1498334677529001995>","<:7_co:1498334675188453538>",   "<:7_nhep:1498334672625602661>"],
-    "8":  ["<:8_ro:1498334670318735440>",    "<:8_bich:1498334667743559690>","<:8_co:1498334665570914545>",   "<:8_nhep:1498334662660067388>"],
-    "9":  ["<:9_ro:1498334653122215997>",    "<:9_bich:1498334647350726879>","<:9_co:1498334643731173466>",   "<:9_nhep:1498334641436885012>"],
-    "10": ["<:10_ro:1498334638815318118>",   "<:10_bich:1498334636940460112>","<:10_co:1498334635250155530>", "<:10_nhep:1498334631982792714>"],
-    "J":  ["<:J_ro:1498334630120656999>",    "<:J_bich:1498334628023635968>","<:J_co:1498334625183830097>",   "<:J_nhep:1498334622746939442>"],
-    "Q":  ["<:Q_ro:1498334620209643601>",    "<:Q_bich:1498334618552897667>","<:Q_co:1498334616724176996>",   "<:Q_nhep:1498334613976907827>"],
-    "K":  ["<:K_ro:1498334611300941945>",    "<:K_bich:1498334609492938845>","<:K_co:1498334606963904672>",   "<:K_nhep:1498334604074029126>"],
-    # FIX #1: Added missing A_co (replace ID with actual emoji ID from your server)
-    "A":  ["<:A_ro:1498334601192669327>",    "<:A_bich:1498334599376404720>","<:A_co:1498334597094834286>",   "<:A_nhep:1498334593986854973>"],
+    "2":  ["<a:2_nhep:1501223722466672731>",  "<a:2_co:1501223719987839137>",   "<a:2_bich:1501223717454352405>",  "<a:2_ro:1501223711393710090>"],
+    "3":  ["<a:3_nhep:1501223707778224178>",  "<a:3_co:1501223704603131914>",   "<a:3_bich:1501223701713129715>",  "<a:3_ro:1501223699393810442>"],
+    "4":  ["<a:4_nhep:1501223691558588466>",  "<a:4_co:1501223686643122286>",   "<a:4_bich:1501223694184222720>",  "<a:4_ro:1501223688916439072>"],
+    "5":  ["<a:5_nhep:1501223675905708153>",  "<a:5_co:1501223678598320221>",   "<a:5_bich:1501223681735524554>",  "<a:5_ro:1501223684126539986>"],
+    "6":  ["<a:6_nhep:1501223662487867492>",  "<a:6_co:1501223666434703474>",   "<a:6_bich:1501223669639413831>",  "<a:6_ro:1501223673292390551>"],
+    "7":  ["<a:7_nhep:1501223761452597368>",  "<a:7_co:1501228368312668230>",   "<a:7_bich:1501223764472369152>",  "<a:7_ro:1501223767110848563>"],
+    "8":  ["<a:8_nhep:1501223757862142083>",  "<a:8_co:1501223747162607736>",   "<a:8_bich:1501223752371933286>",  "<a:8_ro:1501223755010019360>"],
+    "9":  ["<a:9_nhep:1501223738874789978>",  "<a:9_co:1501223741387178004>",   "<a:9_bich:1501223733451292832>",  "<a:9_ro:1501223744436179025>"],
+    "10": ["<a:10_nhep:1501223727315161158>", "<a:10_co:1501223730515542157>",  "<a:10_bich:1501229502049812590>", "<a:10_ro:1501223736505008128>"],
+    "J":  ["<a:J_nhep:1501223781845438606>",  "<a:J_co:1501223786677141784>",   "<a:J_bich:1501223789009047623>",  "<a:J_ro:1501223790938554480>"],
+    "Q":  ["<a:Q_nhep:1501228375317024939>",  "<a:Q_co:1501223774224257135>",   "<a:Q_bich:1501223776807948419>",  "<a:Q_ro:1501223779211411546>"],
+    "K":  ["<a:K_nhep:1501223769610522766>",  "<a:K_co:1501228373236650094>",   "<a:K_bich:1501223784370405517>",  "<a:K_ro:1501223771862728774>"],
+    "A":  ["<a:A_nhep:1501223805459370106>",  "<a:A_co:1501223796756058174>",   "<a:A_bich:1501223802904907868>",  "<a:A_ro:1501223800170086430>"],
 }
 
 VALUES = {
@@ -32,16 +31,13 @@ VALUES = {
 
 RANKS = list(VALUES.keys())
 
-# Equal probability: every rank has the same chance of appearing.
-
-# FIX: Replace OPEN_CARD with new emoji
-OPEN_CARD   = "<a:Opencard:1499321421841829998>"
-HIDDEN_CARD = "<:Bai:1498341726392287232>"
+HIDDEN_CARD = "<:Hidden:1501231444956287026>"
 
 HIT_EMOJI   = "👊"
 STAND_EMOJI = "🛑"
 
-GAME_TIMEOUT = 90   # seconds before auto-forfeit
+MAX_BET      = 250_000          # [YC1] tăng từ 25k → 250k
+GAME_TIMEOUT = 90               # seconds before auto-forfeit
 
 COLOR_ACTIVE = 0x00BFFF
 COLOR_WIN    = 0x57F287
@@ -51,8 +47,47 @@ COLOR_PUSH   = 0xFEE75C
 # Global active-session store  { user_id: BlackjackGame }
 active_games: dict = {}
 
-# FIX #6: Global async lock for thread-safe economy writes
-_balance_lock = asyncio.Lock()
+# Per-user async lock — dùng chung pattern với cash.py
+_user_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_user_lock(user_id) -> asyncio.Lock:
+    uid = str(user_id)
+    if uid not in _user_locks:
+        _user_locks[uid] = asyncio.Lock()
+    return _user_locks[uid]
+
+
+# =========================
+# ECONOMY — MONGODB
+# =========================
+
+def get_balance(user_id) -> int:
+    """Đọc số dư của user từ MongoDB."""
+    data = load_core_data(str(user_id))
+    return data["user"].get("cash", 0)
+
+
+async def update_balance_safe(user_id, amount: int, require: int = 0) -> int | None:
+    """
+    Cộng/trừ tiền an toàn (có Lock + lưu MongoDB).
+    Dùng số dương để cộng, số âm để trừ.
+
+    require > 0 → kiểm tra balance >= require bên trong lock trước khi trừ.
+                  Nếu không đủ trả về None.
+
+    Trả về số dư mới sau khi cập nhật, hoặc None nếu không đủ tiền.
+    """
+    uid = str(user_id)
+    async with _get_user_lock(uid):
+        data = load_core_data(uid)
+        user = data["user"]
+        current = user.get("cash", 0)
+        if require > 0 and current < require:
+            return None
+        user["cash"] = current + amount
+        save_core_data(uid, user)
+        return user["cash"]
 
 
 # =========================
@@ -60,7 +95,7 @@ _balance_lock = asyncio.Lock()
 # =========================
 
 def draw_card() -> dict:
-    rank  = random.choice(RANKS)          # Equal probability for every rank
+    rank  = random.choice(RANKS)
     emoji = random.choice(CARDS[rank])
     return {"rank": rank, "emoji": emoji}
 
@@ -83,12 +118,6 @@ def is_natural(hand: list) -> bool:
     return len(hand) == 2 and calc_score(hand) == 21
 
 
-# FIX #6: Thread-safe balance update wrapper
-async def safe_update_balance_safe(uid: int, amount: int) -> None:
-    async with _balance_lock:
-        update_balance_safe(uid, amount)
-
-
 # =========================
 # GAME CLASS
 # =========================
@@ -108,13 +137,7 @@ class BlackjackGame:
 
     # ── Embed builder ──────────────────────────────────────────────────────────
 
-    async def _build_embed(
-        self,
-        *,
-        dealer_reveal: bool = False,
-        animate_side: str | None = None,
-    ) -> discord.Embed:
-
+    async def _build_embed(self, *, dealer_reveal: bool = False) -> discord.Embed:
         user   = self.ctx.author
         avatar = user.display_avatar.url
         name   = user.display_name
@@ -139,14 +162,11 @@ class BlackjackGame:
             d_header = f"Dealer [{d_score}]"
             d_cards  = hand_str(self.dealer_hand)
         else:
-            first_rank   = self.dealer_hand[0]["rank"] if self.dealer_hand else "?"
-            first_val    = VALUES.get(first_rank, 0) if self.dealer_hand else 0
-            d_header     = f"Dealer [{first_val}+?]"
-            first_emoji  = self.dealer_hand[0]["emoji"] if self.dealer_hand else ""
-            d_cards      = f"{first_emoji} {HIDDEN_CARD}"
-
-        if animate_side == "dealer":
-            d_cards += f"  {OPEN_CARD}"
+            first_rank  = self.dealer_hand[0]["rank"] if self.dealer_hand else "?"
+            first_val   = VALUES.get(first_rank, 0) if self.dealer_hand else 0
+            d_header    = f"Dealer [{first_val}+?]"
+            first_emoji = self.dealer_hand[0]["emoji"] if self.dealer_hand else ""
+            d_cards     = f"{first_emoji} {HIDDEN_CARD}"
 
         embed.add_field(name=d_header, value=d_cards or "\u200b", inline=False)
 
@@ -154,9 +174,6 @@ class BlackjackGame:
         p_score  = calc_score(self.player_hand)
         p_header = f"{name} [{p_score}]"
         p_cards  = hand_str(self.player_hand)
-
-        if animate_side == "player":
-            p_cards += f"  {OPEN_CARD}"
 
         embed.add_field(name=p_header, value=p_cards or "\u200b", inline=False)
 
@@ -185,7 +202,7 @@ class BlackjackGame:
 
         if p_score > 21 and d_score > 21:
             # Both busted → push, refund bet
-            await safe_update_balance_safe(uid, self.bet)
+            await update_balance_safe(uid, self.bet)
             self._outcome     = "push"
             self._status_text = "🎲 ~ PUSH — cả hai cùng vượt 21! (refund)"
 
@@ -195,28 +212,28 @@ class BlackjackGame:
             self._status_text = f"🎲 ~ {name} LOST {self.bet:,} coins!"
 
         elif p_natural and d_natural:
-            # FIX #9: Both natural → push
-            await safe_update_balance_safe(uid, self.bet)
+            # Both natural → push
+            await update_balance_safe(uid, self.bet)
             self._outcome     = "push"
             self._status_text = "🎲 ~ PUSH — both Blackjack! (refund)"
 
         elif p_natural:
             # Natural blackjack → 2.5x payout
             payout = int(self.bet * 2.5)
-            await safe_update_balance_safe(uid, payout)
+            await update_balance_safe(uid, payout)
             self._outcome     = "win"
             self._status_text = f"🎲 ~ ♠ BLACKJACK! {name} WON {payout - self.bet:,} coins!"
 
         elif p_score == 21:
             # Non-natural 21 (3+ cards) → also 2.5x bonus payout
             payout = int(self.bet * 2.5)
-            await safe_update_balance_safe(uid, payout)
+            await update_balance_safe(uid, payout)
             self._outcome     = "win"
             self._status_text = f"🎲 ~  21 ĐIỂM! {name} WON {payout - self.bet:,} coins!"
 
         elif d_score > 21 or p_score > d_score:
             # Normal win → return bet + profit (bet × 2 total)
-            await safe_update_balance_safe(uid, self.bet * 2)
+            await update_balance_safe(uid, self.bet * 2)
             self._outcome     = "win"
             self._status_text = f"🎲 ~ {name} WON {self.bet:,} coins!"
 
@@ -227,7 +244,7 @@ class BlackjackGame:
 
         else:
             # Push → refund bet only
-            await safe_update_balance_safe(uid, self.bet)
+            await update_balance_safe(uid, self.bet)
             self._outcome     = "push"
             self._status_text = "🎲 ~ PUSH (refund bet)"
 
@@ -235,7 +252,7 @@ class BlackjackGame:
 
     async def start(self) -> None:
         # Deduct the bet upfront; refunded on win/push via _resolve_payout.
-        await safe_update_balance_safe(self.ctx.author.id, -self.bet)
+        await update_balance_safe(self.ctx.author.id, -self.bet, require=self.bet)
 
         for _ in range(2):
             self.player_hand.append(draw_card())
@@ -243,8 +260,6 @@ class BlackjackGame:
 
         embed = await self._build_embed()
         self.message = await self.ctx.send(embed=embed)
-
-        # Even if starting hand is 21, player must press Stand to confirm.
 
         try:
             await self.message.add_reaction(HIT_EMOJI)
@@ -263,58 +278,49 @@ class BlackjackGame:
             )
 
         while not self.is_over:
-            try:
-                reaction, user = await self.bot.wait_for(
-                    "reaction_add",
-                    timeout=GAME_TIMEOUT,
-                    check=_check,
-                )
-            except asyncio.TimeoutError:
+            # Listen for BOTH reaction_add and reaction_remove simultaneously.
+            # Whichever fires first (add OR remove) counts as pressing the button.
+            task_add = asyncio.ensure_future(
+                self.bot.wait_for("reaction_add", check=_check)
+            )
+            task_remove = asyncio.ensure_future(
+                self.bot.wait_for("reaction_remove", check=_check)
+            )
+
+            done, pending = await asyncio.wait(
+                {task_add, task_remove},
+                timeout=GAME_TIMEOUT,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Cancel whichever task did not fire
+            for t in pending:
+                t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            if not done:
+                # Timeout — neither event fired in time
                 await self._timeout_forfeit()
                 return
 
-            # FIX #5: Skip if lock is already held (spam protection)
+            try:
+                reaction, user = done.pop().result()
+            except Exception:
+                continue
+
+            emoji = str(reaction.emoji)
+
+            # Spam protection: skip if lock already held
             if self._lock.locked():
-                try:
-                    # FIX #3: Correct remove_reaction API
-                    await self.message.remove_reaction(reaction.emoji, user)
-                except Exception:
-                    pass
                 continue
 
             async with self._lock:
-                # Re-check is_over after acquiring lock (race condition guard)
+                # Race-condition guard
                 if self.is_over:
                     break
-
-                emoji = str(reaction.emoji)
-
-                # ── Cancel detection ─────────────────────────────────────────
-                # Give a 150 ms window: if the player removes the reaction
-                # before we process it, treat the action as cancelled.
-                _cancelled = False
-                try:
-                    await self.bot.wait_for(
-                        "reaction_remove",
-                        timeout=0.15,
-                        check=lambda r, u: (
-                            u.id == self.ctx.author.id
-                            and r.message.id == self.message.id
-                            and str(r.emoji) == emoji
-                        ),
-                    )
-                    _cancelled = True
-                except asyncio.TimeoutError:
-                    pass   # Not removed → proceed normally
-
-                if _cancelled:
-                    continue  # Player cancelled — wait for next reaction
-
-                # Remove the reaction so the player can re-use the same emoji
-                try:
-                    await self.message.remove_reaction(reaction.emoji, user)
-                except Exception:
-                    pass
 
                 if emoji == HIT_EMOJI:
                     await self._player_hit()
@@ -324,22 +330,14 @@ class BlackjackGame:
                     break
 
     async def _player_hit(self) -> None:
-        try:
-            embed = await self._build_embed(animate_side="player")
-            await self.message.edit(embed=embed)
-            await asyncio.sleep(0.35)
-        except Exception:
-            pass
-
         self.player_hand.append(draw_card())
         p_score = calc_score(self.player_hand)
 
         if p_score > 21:
-            # Player busted → still run dealer turn to determine final result
+            # Player busted → run dealer turn to determine final result
             self.is_over = True
             await self.dealer_turn()
         else:
-            # Update display; player continues (even if 21 — must press Stand)
             try:
                 embed = await self._build_embed()
                 await self.message.edit(embed=embed)
@@ -347,40 +345,22 @@ class BlackjackGame:
                 pass
 
     async def dealer_turn(self) -> None:
+        """Draw all dealer cards at once, then display everything together."""
         self.is_over = True
 
+        # Draw all needed dealer cards without any animation
+        while True:
+            d_score = calc_score(self.dealer_hand)
+            if d_score > 21 or d_score >= 16:
+                break
+            self.dealer_hand.append(draw_card())
+
+        # Reveal all dealer cards in a single edit
         try:
             embed = await self._build_embed(dealer_reveal=True)
             await self.message.edit(embed=embed)
-            await asyncio.sleep(0.6)
         except Exception:
             pass
-
-        # Dealer stands on 14+ — draws while score < 14
-        while True:
-            d_score = calc_score(self.dealer_hand)
-
-            if d_score > 21:
-                break   # dealer busted
-            if d_score >= 16:
-                break   # stand on 14+
-
-            # Dealer must draw → animate the deal
-            try:
-                embed = await self._build_embed(dealer_reveal=True, animate_side="dealer")
-                await self.message.edit(embed=embed)
-                await asyncio.sleep(0.4)
-            except Exception:
-                pass
-
-            self.dealer_hand.append(draw_card())
-
-            try:
-                embed = await self._build_embed(dealer_reveal=True)
-                await self.message.edit(embed=embed)
-                await asyncio.sleep(0.4)
-            except Exception:
-                pass
 
         await self.end_game()
 
@@ -399,7 +379,6 @@ class BlackjackGame:
         except Exception:
             pass
 
-        # FIX #7: Always pop — moved here as authoritative cleanup point
         active_games.pop(self.ctx.author.id, None)
 
     async def _timeout_forfeit(self) -> None:
@@ -407,7 +386,6 @@ class BlackjackGame:
         self.is_over = True
         await self._resolve_payout(timed_out=True)
 
-        # FIX #8: Do NOT reveal dealer hand on timeout
         try:
             embed = await self._build_embed(dealer_reveal=False)
             await self.message.edit(embed=embed)
@@ -428,7 +406,6 @@ class BlackjackGame:
         except Exception:
             pass
 
-        # FIX #7: Always release session lock
         active_games.pop(self.ctx.author.id, None)
 
 
@@ -440,11 +417,10 @@ class BlackjackCog(commands.Cog, name="Blackjack"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    # FIX #10: Cooldown — 1 use per 3 seconds per user, prevents command spam
     @commands.cooldown(1, 3, commands.BucketType.user)
     @commands.command(name="bj", aliases=["blackjack"])
     async def blackjack(self, ctx: commands.Context, bet: str):
-        """Play a game of Blackjack.  Usage: dtn bj <amount> | dtn bj all"""
+        """Play a game of Blackjack.  Usage: dtn bj <amount> | dtn bj all | dtn bj al"""
         user_id = ctx.author.id
 
         # ── Guard: existing session ──────────────────────────────────────────
@@ -460,10 +436,16 @@ class BlackjackCog(commands.Cog, name="Blackjack"):
         # ── Parse bet ─────────────────────────────────────────────────────────
         bet_clean = bet.strip().lower()
 
-        if bet_clean == "all":
+        if bet_clean == "al":
+            # [YC3] "al" (1 chữ l) → đặt đúng 1 coin
+            bet_amount = 1
+
+        elif bet_clean == "all":
             if balance <= 0:
                 return await ctx.send("❌ You have no coins to bet!", delete_after=6)
-            bet_amount = balance
+            # Cap "all" at MAX_BET
+            bet_amount = min(balance, MAX_BET)
+
         else:
             bet_clean = bet_clean.replace(",", "").replace(".", "")
             if not bet_clean.isdigit():
@@ -474,11 +456,23 @@ class BlackjackCog(commands.Cog, name="Blackjack"):
             bet_amount = int(bet_clean)
             if bet_amount <= 0:
                 return await ctx.send("❌ Bet must be greater than 0!", delete_after=6)
+
+            # [YC2] Nếu đặt > MAX_BET → tự clamp xuống MAX_BET, không báo lỗi
+            if bet_amount > MAX_BET:
+                bet_amount = MAX_BET
+
             if balance < bet_amount:
                 return await ctx.send(
                     f"❌ | Không đủ số cược! Túi tiền hiện có: **{balance:,}** coins.",
                     delete_after=8,
                 )
+
+        # Guard: balance phải đủ để đặt (kể cả sau khi clamp)
+        if balance < bet_amount:
+            return await ctx.send(
+                f"❌ | Không đủ số cược! Túi tiền hiện có: **{balance:,}** coins.",
+                delete_after=8,
+            )
 
         # ── Register session before game starts ───────────────────────────────
         game = BlackjackGame(ctx, bet_amount)
@@ -488,9 +482,8 @@ class BlackjackCog(commands.Cog, name="Blackjack"):
             await game.start()
         except Exception as exc:
             print(f"[Blackjack] Unhandled error for {ctx.author}: {exc}")
-            # Safety: refund bet on unexpected crash
             try:
-                await safe_update_balance_safe(user_id, bet_amount)
+                await update_balance_safe(user_id, bet_amount)
             except Exception:
                 pass
             try:
@@ -502,7 +495,6 @@ class BlackjackCog(commands.Cog, name="Blackjack"):
             except Exception:
                 pass
         finally:
-            # FIX #7: Always clean up session — even if end_game already did it
             active_games.pop(user_id, None)
 
     @blackjack.error
