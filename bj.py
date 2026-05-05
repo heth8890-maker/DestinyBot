@@ -145,8 +145,8 @@ class BlackjackGame:
         color_map = {
             "win":     COLOR_WIN,
             "lose":    COLOR_LOSE,
-            "push":    COLOR_PUSH,
-            "timeout": COLOR_LOSE,
+            "push":    None,
+            "timeout": None,
         }
         color = color_map.get(self._outcome, COLOR_ACTIVE)  # type: ignore[arg-type]
 
