@@ -408,7 +408,7 @@ class BlackjackCog(commands.Cog, name="Blackjack"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @commands.cooldown(1, 15, commands.BucketType.user)
+    @commands.cooldown(1, 12, commands.BucketType.user)
     @commands.command(name="bj", aliases=["blackjack"])
     async def blackjack(self, ctx: commands.Context, bet: str):
         """Play a game of Blackjack.  Usage: dtn bj <amount> | dtn bj all | dtn bj al"""
