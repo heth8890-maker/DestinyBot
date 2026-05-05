@@ -31,7 +31,7 @@ VALUES = {
 
 RANKS = list(VALUES.keys())
 
-HIDDEN_CARD = "<:Hidden:1501231444956287026>"
+HIDDEN_CARD = "<:Hidden:1501252466446958683>"
 
 HIT_EMOJI   = "👊"
 STAND_EMOJI = "🛑"
@@ -326,7 +326,7 @@ class BlackjackGame:
                     await self._player_hit()
                 elif emoji == STAND_EMOJI:
                     self.is_over = True
-                    await self.dealer_turn()
+                    await self.end_game()
                     break
 
     async def _player_hit(self) -> None:
@@ -334,9 +334,9 @@ class BlackjackGame:
         p_score = calc_score(self.player_hand)
 
         if p_score > 21:
-            # Player busted → run dealer turn to determine final result
+            # Player busted → go straight to end_game (draws dealer + resolves in one edit)
             self.is_over = True
-            await self.dealer_turn()
+            await self.end_game()
         else:
             try:
                 embed = await self._build_embed()
@@ -344,30 +344,21 @@ class BlackjackGame:
             except Exception:
                 pass
 
-    async def dealer_turn(self) -> None:
-        """Draw all dealer cards at once, then display everything together."""
+    async def end_game(self) -> None:
+        """Draw remaining dealer cards, resolve payout, then do ONE final embed edit."""
         self.is_over = True
 
-        # Draw all needed dealer cards without any animation
+        # Draw all needed dealer cards
         while True:
             d_score = calc_score(self.dealer_hand)
             if d_score > 21 or d_score >= 16:
                 break
             self.dealer_hand.append(draw_card())
 
-        # Reveal all dealer cards in a single edit
-        try:
-            embed = await self._build_embed(dealer_reveal=True)
-            await self.message.edit(embed=embed)
-        except Exception:
-            pass
-
-        await self.end_game()
-
-    async def end_game(self) -> None:
-        self.is_over = True
+        # Resolve payout first so embed gets the correct color + status text
         await self._resolve_payout()
 
+        # Single edit with full reveal + outcome
         try:
             embed = await self._build_embed(dealer_reveal=True)
             await self.message.edit(embed=embed)
@@ -417,7 +408,7 @@ class BlackjackCog(commands.Cog, name="Blackjack"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @commands.cooldown(1, 3, commands.BucketType.user)
+    @commands.cooldown(1, 15, commands.BucketType.user)
     @commands.command(name="bj", aliases=["blackjack"])
     async def blackjack(self, ctx: commands.Context, bet: str):
         """Play a game of Blackjack.  Usage: dtn bj <amount> | dtn bj all | dtn bj al"""
