@@ -17,6 +17,7 @@ from discord.ext import commands
 from rpg_core import (
     get_weapon_by_id,
     ITEMS, WEAPONS, CRATES, RARITY_COLOR,
+    add_weapon,
 )
 from rpg_database import get_user, save_user
 from rpg_weapon import (
@@ -30,7 +31,6 @@ from rpg_addon import (
     get_shop_slot,
     fmt_effect_val,
     mark_shop_slot_sold,
-    add_weapon,
 )
 from rpg_game import (
     COIN_EMOJI,
