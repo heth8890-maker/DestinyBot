@@ -70,7 +70,6 @@ class RPGQuestion(commands.Cog):
             else:
                 status = f"🔄 {q['progress']}/{q['target']} ({pct}%)"
 
-            # ✅ SỬA DUY NHẤT Ở ĐÂY
             icon = "<:Tick:1495466684520206528>" if q["completed"] else ("🏆" if q["claimed"] else "🔲")
 
             embed.add_field(

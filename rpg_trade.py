@@ -43,6 +43,7 @@ from discord.ext import commands
 
 from rpg_core import (
     load_data, save_data, get_user,
+    get_user_lock,
     get_item_by_id,
     add_item, remove_item,
     add_weapon, remove_weapon_from_bag,
@@ -182,13 +183,9 @@ async def _execute_trade(ctx, session: dict) -> str:
     uid_b = session["uid_b"]
     sa    = session["side_a"]
     sb    = session["side_b"]
+    notes = []
 
-    data   = load_data()
-    user_a = get_user(uid_a, data)
-    user_b = get_user(uid_b, data)
-    notes  = []
-
-    # ── Kiểm tra & chuyển tiền ──
+    # ── Kiểm tra & chuyển tiền (cash.py độc lập, không cần lock rpg_core) ──
     if sa["gold"] > 0 and get_balance(int(uid_a)) < sa["gold"]:
         notes.append(f"⚠️ <@{uid_a}> không đủ tiền → bỏ qua phần tiền.")
         sa["gold"] = 0
@@ -196,71 +193,132 @@ async def _execute_trade(ctx, session: dict) -> str:
         notes.append(f"⚠️ <@{uid_b}> không đủ tiền → bỏ qua phần tiền.")
         sb["gold"] = 0
     if sa["gold"] > 0:
-        update_balance_safe(int(uid_a), -sa["gold"])
-        update_balance_safe(int(uid_b), +sa["gold"])
+        await update_balance_safe(int(uid_a), -sa["gold"])
+        await update_balance_safe(int(uid_b), +sa["gold"])
     if sb["gold"] > 0:
-        update_balance_safe(int(uid_b), -sb["gold"])
-        update_balance_safe(int(uid_a), +sb["gold"])
+        await update_balance_safe(int(uid_b), -sb["gold"])
+        await update_balance_safe(int(uid_a), +sb["gold"])
 
-    # ── Chuyển weapon ──
-    def _xfer_weapon(from_user, to_user, wid, from_uid):
-        bag = from_user.get("weapons", [])
-        if wid not in bag:
-            notes.append(f"⚠️ <@{from_uid}> không có vũ khí `{wid}` → bỏ qua.")
-            return False
-        remove_weapon_from_bag(from_user, wid)
-        add_weapon(to_user, wid)
-        # Nếu là upgraded weapon, chuyển cả entry nâng cấp
-        if "-" in wid:
-            uw = get_upgraded_weapon(from_user, wid)
-            if uw:
-                from_user.setdefault("upgraded_weapons", [])
-                to_user.setdefault("upgraded_weapons", [])
-                if uw in from_user["upgraded_weapons"]:
-                    from_user["upgraded_weapons"].remove(uw)
-                to_user["upgraded_weapons"].append(uw)
-        return True
+    # ── Phase 1: Load A → remove tất cả thứ A cho đi → save A ──────────────
+    # pending_*_to_b: danh sách đã remove thành công khỏi A, chờ add vào B
+    pending_weapons_to_b: list[tuple[str, dict | None]] = []
+    pending_items_to_b:   list[dict] = []
+    pending_crates_to_b:  list[dict] = []
 
-    for wid in sa["weapons"]:
-        _xfer_weapon(user_a, user_b, wid, uid_a)
-    for wid in sb["weapons"]:
-        _xfer_weapon(user_b, user_a, wid, uid_b)
+    async with get_user_lock(uid_a):
+        data_a = load_data(uid_a)
+        user_a = get_user(uid_a, data_a)
 
-    # ── Chuyển item ──
-    for entry in sa["items"]:
-        if not remove_item(user_a, entry["id"], entry["qty"]):
-            notes.append(f"⚠️ <@{uid_a}> không đủ `{entry['id']}` → bỏ qua.")
-        else:
+        for wid in sa["weapons"]:
+            if wid not in user_a.get("weapons", []):
+                notes.append(f"⚠️ <@{uid_a}> không có vũ khí `{wid}` → bỏ qua.")
+                continue
+            remove_weapon_from_bag(user_a, wid)
+            uw_entry = None
+            if "-" in wid:
+                uw_entry = get_upgraded_weapon(user_a, wid)
+                if uw_entry and uw_entry in user_a.get("upgraded_weapons", []):
+                    user_a["upgraded_weapons"].remove(uw_entry)
+            pending_weapons_to_b.append((wid, uw_entry))
+
+        for entry in sa["items"]:
+            if not remove_item(user_a, entry["id"], entry["qty"]):
+                notes.append(f"⚠️ <@{uid_a}> không đủ `{entry['id']}` → bỏ qua.")
+            else:
+                pending_items_to_b.append(entry)
+
+        for entry in sa.get("crates", []):
+            cid   = str(entry["id"])
+            qty   = entry["qty"]
+            inv_a = user_a.setdefault("crates", {})
+            owned = inv_a.get(cid, 0)
+            if owned < qty:
+                notes.append(
+                    f"⚠️ <@{uid_a}> không đủ crate `{cid}` ({owned}/{qty}) → bỏ qua."
+                )
+            else:
+                inv_a[cid] = owned - qty
+                if inv_a[cid] == 0:
+                    del inv_a[cid]
+                pending_crates_to_b.append({"id": cid, "qty": qty})
+
+        await save_data(data_a, uid_a)
+
+    # ── Phase 2: Load B → add received từ A + remove thứ B cho đi → save B ──
+    # received_*_from_b: danh sách đã remove thành công khỏi B, chờ add vào A
+    received_weapons_from_b: list[tuple[str, dict | None]] = []
+    received_items_from_b:   list[dict] = []
+    received_crates_from_b:  list[dict] = []
+
+    async with get_user_lock(uid_b):
+        data_b = load_data(uid_b)
+        user_b = get_user(uid_b, data_b)
+
+        # Add nhận từ A
+        for wid, uw_entry in pending_weapons_to_b:
+            add_weapon(user_b, wid)
+            if uw_entry:
+                user_b.setdefault("upgraded_weapons", []).append(uw_entry)
+        for entry in pending_items_to_b:
             add_item(user_b, entry["id"], entry["qty"])
-    for entry in sb["items"]:
-        if not remove_item(user_b, entry["id"], entry["qty"]):
-            notes.append(f"⚠️ <@{uid_b}> không đủ `{entry['id']}` → bỏ qua.")
-        else:
+        for entry in pending_crates_to_b:
+            inv_b = user_b.setdefault("crates", {})
+            inv_b[entry["id"]] = inv_b.get(entry["id"], 0) + entry["qty"]
+
+        # Remove thứ B cho đi
+        for wid in sb["weapons"]:
+            if wid not in user_b.get("weapons", []):
+                notes.append(f"⚠️ <@{uid_b}> không có vũ khí `{wid}` → bỏ qua.")
+                continue
+            remove_weapon_from_bag(user_b, wid)
+            uw_entry = None
+            if "-" in wid:
+                uw_entry = get_upgraded_weapon(user_b, wid)
+                if uw_entry and uw_entry in user_b.get("upgraded_weapons", []):
+                    user_b["upgraded_weapons"].remove(uw_entry)
+            received_weapons_from_b.append((wid, uw_entry))
+
+        for entry in sb["items"]:
+            if not remove_item(user_b, entry["id"], entry["qty"]):
+                notes.append(f"⚠️ <@{uid_b}> không đủ `{entry['id']}` → bỏ qua.")
+            else:
+                received_items_from_b.append(entry)
+
+        for entry in sb.get("crates", []):
+            cid   = str(entry["id"])
+            qty   = entry["qty"]
+            inv_b = user_b.setdefault("crates", {})
+            owned = inv_b.get(cid, 0)
+            if owned < qty:
+                notes.append(
+                    f"⚠️ <@{uid_b}> không đủ crate `{cid}` ({owned}/{qty}) → bỏ qua."
+                )
+            else:
+                inv_b[cid] = owned - qty
+                if inv_b[cid] == 0:
+                    del inv_b[cid]
+                received_crates_from_b.append({"id": cid, "qty": qty})
+
+        await save_data(data_b, uid_b)
+
+    # ── Phase 3: Load lại A → add received từ B → save A lần 2 ─────────────
+    async with get_user_lock(uid_a):
+        data_a = load_data(uid_a)
+        user_a = get_user(uid_a, data_a)
+
+        for wid, uw_entry in received_weapons_from_b:
+            add_weapon(user_a, wid)
+            if uw_entry:
+                user_a.setdefault("upgraded_weapons", []).append(uw_entry)
+        for entry in received_items_from_b:
             add_item(user_a, entry["id"], entry["qty"])
+        for entry in received_crates_from_b:
+            inv_a = user_a.setdefault("crates", {})
+            inv_a[entry["id"]] = inv_a.get(entry["id"], 0) + entry["qty"]
 
-    # ── NEW-1: Chuyển crate ──
-    def _xfer_crate(from_user, to_user, cid, qty, from_uid):
-        inv   = from_user.setdefault("crates", {})
-        owned = inv.get(str(cid), 0)
-        if owned < qty:
-            notes.append(
-                f"⚠️ <@{from_uid}> không đủ crate `{cid}` ({owned}/{qty}) → bỏ qua."
-            )
-            return
-        inv[str(cid)] = owned - qty
-        if inv[str(cid)] == 0:
-            del inv[str(cid)]
-        to_inv        = to_user.setdefault("crates", {})
-        to_inv[str(cid)] = to_inv.get(str(cid), 0) + qty
+        await save_data(data_a, uid_a)
 
-    for entry in sa.get("crates", []):
-        _xfer_crate(user_a, user_b, entry["id"], entry["qty"], uid_a)
-    for entry in sb.get("crates", []):
-        _xfer_crate(user_b, user_a, entry["id"], entry["qty"], uid_b)
-
-    # FIX-1: Thêm await — bản cũ thiếu await nên data không bao giờ được lưu!
-    await save_data(data)
-
+    # ── Quest progress ────────────────────────────────────────────────────────
     add_quest_progress(uid_a, "trades_done")
     add_quest_progress(uid_b, "trades_done")
 
@@ -488,7 +546,7 @@ class RPGTrade(commands.Cog):
         # ── Weapon ──────────────────────────────────────────
         if cat == "weapon":
             wid  = item_id
-            data = load_data()
+            data = load_data(uid)
             user = get_user(uid, data)
             bag  = user.get("weapons", [])
 
@@ -518,7 +576,7 @@ class RPGTrade(commands.Cog):
             if not _find_item(item_id):
                 return await ctx.send(f"{ERR} | Item `{item_id}` không tồn tại.")
 
-            data      = load_data()
+            data      = load_data(uid)
             user      = get_user(uid, data)
             owned_qty = user["inv"].get(item_id, 0)
             already   = sum(e["qty"] for e in side["items"] if e["id"] == item_id)
@@ -551,7 +609,7 @@ class RPGTrade(commands.Cog):
             except (ValueError, AssertionError):
                 return await ctx.send(f"{ERR} | Số lượng không hợp lệ.")
 
-            data      = load_data()
+            data      = load_data(uid)
             user      = get_user(uid, data)
             owned_qty = user.get("crates", {}).get(str(item_id), 0)
             already   = sum(e["qty"] for e in side.get("crates", []) if e["id"] == item_id)
