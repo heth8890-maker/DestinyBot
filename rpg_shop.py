@@ -7,7 +7,9 @@ COMMAND MAP
   dtn shop crate
   dtn shop item
   dtn shop weapon                      — ★ weapon shop (reset 6h, 10 slot)
-  dtn shopbuy <slot>                   — ★ mua weapon từ shop
+  dtn shop buy <slot>                  — ★ mua weapon từ weapon shop
+  dtn shop event                       — xem shop event (Soul Crate)
+  dtn ebuy 004 [amount]               — mua Soul Crate bằng Linh hoả (MongoDB)
 ──────────────────────────────────────────────────────────
 """
 
@@ -18,7 +20,9 @@ from rpg_core import (
     get_weapon_by_id,
     ITEMS, WEAPONS, CRATES, RARITY_COLOR,
     add_weapon,
+    add_item,
 )
+from database_helper import load_core_data, save_core_data
 from rpg_database import get_user, save_user
 from rpg_weapon import (
     RARE_CRATE_WEAPONS,
@@ -175,29 +179,34 @@ class CrateShopView(discord.ui.View):
 
 
 # ═══════════════════════════════════════════════════════════
-# COG: SHOP  (crate + item + ★ weapon shop)
+# COG: SHOP  (crate + item + weapon shop + event shop)
 # ═══════════════════════════════════════════════════════════
 
 class RPGShop(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    # ─── HELP ───
     @commands.group(name="shop", invoke_without_command=True)
     async def shop(self, ctx):
         await ctx.send(
             "<:Shop:1495464183037165763> **Shop:**\n"
-            "• `dtn shop crate`  — mua crate / xem drop rate\n"
-            "• `dtn shop item`   — danh sách vật phẩm & giá bán\n"
-            "• `dtn shop weapon` — ★ weapon shop (reset 6h, 10 slot ngẫu nhiên)\n"
-            "• `dtn shopbuy <slot>` — ★ mua weapon từ slot"
+            "• `dtn shop crate`        — mua crate / xem drop rate\n"
+            "• `dtn shop item`         — danh sách vật phẩm & giá bán\n"
+            "• `dtn shop weapon`       — ★ weapon shop (reset 6h, 10 slot)\n"
+            "• `dtn shop buy <slot>`   — ★ mua weapon từ slot\n"
+            "• `dtn shop event`        — shop event Soul Crate\n"
+            "• `dtn ebuy 004 [số]`     — mua Soul Crate bằng Linh hoả"
         )
 
+    # ─── CRATE ───
     @shop.command(name="crate")
     async def shop_crate(self, ctx):
         view  = CrateShopView(page=0)
         embed = _build_crate_page_embed(0)
         await ctx.send(embed=embed, view=view)
 
+    # ─── ITEM ───
     @shop.command(name="item")
     async def shop_item(self, ctx):
         rarity_order = ["common", "uncommon", "rare", "epic", "legendary", "legend"]
@@ -230,6 +239,7 @@ class RPGShop(commands.Cog):
         embeds = _paginate_fields(fields, title=title, description=desc, color=0x5865F2, footer=footer)
         await _send_paged(ctx, embeds)
 
+    # ─── WEAPON SHOP ───
     @shop.command(name="weapon")
     async def shop_weapon(self, ctx):
         """Xem 10 weapon đang bán (reset mỗi 6 tiếng)."""
@@ -238,17 +248,15 @@ class RPGShop(commands.Cog):
         h, m      = divmod(remaining // 60, 60)
 
         desc = (
-            f"⏳️ |  Reset sau **{h}h {m}m**  •  Dùng `dtn shopbuy <slot>` để mua.\n"
+            f"⏳️ |  Reset sau **{h}h {m}m**  •  Dùng `dtn shop buy <slot>` để mua.\n"
             f"<:Coin:1495831576397742241> |  Giá = base × (100% − drop rate) × 80%"
         )
         title = "<:Hamer:1495462570469888069> |  Weapon Shop"
 
-        # Build all slot fields (logic cũ giữ nguyên)
         slot_fields: list[tuple] = []
         for s in shop["slots"]:
             w             = get_weapon_by_id(s["weapon_id"])
             effects       = w.get("effects", {}) if w else {}
-            # ─ FIX: Lấy emoji từ WEAPONS thay vì emoji lưu cũ trong shop ─
             current_emoji = w.get("emoji", s['emoji']) if w else s['emoji']
             eff_str       = " | ".join(
                 fmt_effect_val(k, v) for k, v in effects.items()
@@ -262,10 +270,9 @@ class RPGShop(commands.Cog):
                     f"ID: `{s['weapon_id']}`\n"
                     f"<:Effect:1495466103047061679> {eff_str}"
                 ),
-                True,   # inline=True giữ nguyên layout 2 cột
+                True,
             ))
 
-        # Phân trang: 6 slot mỗi trang (số chẵn giữ đẹp layout inline 2 cột)
         _SLOTS_PER_PAGE = 6
         chunks = [
             slot_fields[i : i + _SLOTS_PER_PAGE]
@@ -286,18 +293,10 @@ class RPGShop(commands.Cog):
 
         await _send_paged(ctx, embeds)
 
-
-# ═══════════════════════════════════════════════════════════
-# COG: SHOP BUY
-# ═══════════════════════════════════════════════════════════
-
-class RPGShopBuy(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-
-    @commands.command(name="shopbuy")
-    async def shopbuy(self, ctx, slot: int):
-        """Mua weapon từ slot trong Weapon Shop. `dtn shopbuy <slot>`"""
+    # ─── BUY (weapon shop) ───
+    @shop.command(name="buy")
+    async def shop_buy(self, ctx, slot: int):
+        """Mua weapon từ slot trong Weapon Shop. `dtn shop buy <slot>`"""
         slot_data = get_shop_slot(slot)
         if not slot_data:
             return await ctx.send(f"{ERR} | Slot `{slot}` không tồn tại. Xem `dtn shop weapon`.")
@@ -322,12 +321,11 @@ class RPGShopBuy(commands.Cog):
 
         w     = get_weapon_by_id(slot_data["weapon_id"])
         color = RARITY_COLOR.get(slot_data["rarity"], 0x5865F2)
-        # ─ FIX: Lấy emoji từ WEAPONS thay vì emoji lưu cũ trong slot_data ─
         current_emoji = w.get("emoji", slot_data['emoji']) if w else slot_data['emoji']
         embed = discord.Embed(title="🛒 Mua weapon Thành Công!", color=color)
         embed.add_field(name="Vũ Khí", value=f"{current_emoji} **{slot_data['name']}**", inline=True)
-        embed.add_field(name="ID",     value=f"`{slot_data['weapon_id']}`",                   inline=True)
-        embed.add_field(name="Đã trả", value=f"{price:,} {COIN_EMOJI}",                       inline=True)
+        embed.add_field(name="ID",     value=f"`{slot_data['weapon_id']}`",               inline=True)
+        embed.add_field(name="Đã trả", value=f"{price:,} {COIN_EMOJI}",                   inline=True)
         if w:
             eff_str = " | ".join(
                 fmt_effect_val(k, v) for k, v in w.get("effects", {}).items()
@@ -339,6 +337,80 @@ class RPGShopBuy(commands.Cog):
         embed.set_footer(text=f"Số dư: {get_balance(ctx.author.id):,} {COIN_EMOJI}")
         await ctx.send(embed=embed)
 
+    # ─── EVENT SHOP (xem) ───
+    @shop.command(name="event")
+    async def shop_event(self, ctx):
+        """Xem shop event Soul Crate. `dtn shop event`"""
+        embed = discord.Embed(
+            title="<:Shop:1495464183037165763> Shop Event",
+            description=(
+                "Dùng Linh hoả để đổi Soul Crate hiếm!\n"
+                "Ma Hỏa Thống Soái 0.3% | Linh Diệm Sát Thần 0.3% | "
+                "Hồn Giáp Bất Diệt 0.3% | Linh Hoả 35% | 64.4% 2000–6000 Coin"
+            ),
+            color=0xCCFFCC,
+        )
+        embed.add_field(
+            name="<:Soulcrate:1498617031501807646> | Soul Crate (ID: 004)",
+            value=(
+                "**Giá:** 25x <:Linh_hoa:1498614127386562601> Linh hoả\n"
+                "**Lệnh mua:** `dtn ebuy 004 [số lượng]`"
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
+
+# ═══════════════════════════════════════════════════════════
+# COG: EVENT BUY  (ebuy / eventbuy)  — MongoDB
+# ═══════════════════════════════════════════════════════════
+
+class RPGEventBuy(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    @commands.command(name="eventbuy", aliases=["ebuy"])
+    async def event_buy(self, ctx, item_id: str = None, amount: int = 1):
+        """Mua Soul Crate bằng Linh hoả. `dtn ebuy 004 [số lượng]`"""
+        if not item_id or item_id != "004":
+            return await ctx.send(
+                f"{ERR} | ID vật phẩm không đúng. Sử dụng: `dtn ebuy 004 [số lượng]`"
+            )
+        if amount <= 0:
+            return await ctx.send(f"{ERR} | Số lượng không hợp lệ.")
+
+        uid           = str(ctx.author.id)
+        currency_id   = "5200"   # Linh hoả
+        crate_id      = "004"    # Soul Crate
+        cost_per_unit = 25
+        total_cost    = cost_per_unit * amount
+
+        # ── Tải user từ MongoDB ──
+        data = load_core_data(uid)
+        user = data["user"]
+
+        user_inv = user.get("inv", {})
+        if user_inv.get(currency_id, 0) < total_cost:
+            missing = total_cost - user_inv.get(currency_id, 0)
+            return await ctx.send(
+                f"{ERR} | Bạn thiếu **{missing}** "
+                f"<:Linh_hoa:1498614127386562601> Linh hoả (ID: 5200) "
+                f"để thực hiện giao dịch này."
+            )
+
+        # ── Trừ Linh hoả, thêm Soul Crate ──
+        user["inv"][currency_id] -= total_cost
+        add_item(user, f"crate_{crate_id}", amount)
+
+        # ── Lưu lên MongoDB ──
+        if not save_core_data(uid, user):
+            return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
+
+        await ctx.send(
+            f"{OK} | Chúc mừng bạn đã đổi thành công **{total_cost}** Linh hoả "
+            f"lấy **{amount}x** <:Soulcrate:1498617031501807646> **Soul Crate**!"
+        )
+
 
 # ═══════════════════════════════════════════════════════════
 # SETUP
@@ -346,4 +418,4 @@ class RPGShopBuy(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(RPGShop(bot))
-    await bot.add_cog(RPGShopBuy(bot))
+    await bot.add_cog(RPGEventBuy(bot))

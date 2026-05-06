@@ -236,63 +236,6 @@ class RPGCrate(commands.Cog):
 
         await msg.edit(content=None, embed=embed)
 
-    # ─── LỆNH XEM SHOP EVENT ───
-    @commands.command(name="eshop")
-    async def event_shop(self, ctx):
-        embed = discord.Embed(
-            title="<:Shop:1495464183037165763> Shop event",
-            description=(
-                "Dùng Linh hoả để đổi Soul Crate hiếm!\n"
-                "Ma Hỏa Thống Soái 0.3% | Linh Diệm Sát Thần 0.3% | "
-                "Hồn Giáp Bất Diệt 0.3% | Linh Hoả 35% | 64.4% 2000 6000 Coin"
-            ),
-            color=0xCCFFCC
-        )
-
-        embed.add_field(
-            name="<:Soulcrate:1498617031501807646> | Soul Crate (ID: 004)",
-            value=(
-                "**Giá:** 25x <:Linh_hoa:1498614127386562601> Linh hoả\n"
-                "**Lệnh mua:** `dtn ebuy 004 [số lượng]`"
-            ),
-            inline=False
-        )
-
-        await ctx.send(embed=embed)
-
-    # ─── LỆNH MUA (ebuy / eventbuy) ───
-    @commands.command(name="eventbuy", aliases=["ebuy"])
-    async def event_buy(self, ctx, item_id: str = None, amount: int = 1):
-        if not item_id or item_id != "004":
-            return await ctx.send(f"{ERR} | ID vật phẩm không đúng. Sử dụng: `dtn ebuy 004 [số lượng]`")
-
-        if amount <= 0:
-            return await ctx.send(f"{ERR} | Số lượng không hợp lệ.")
-
-        uid = str(ctx.author.id)
-        # ✅ Tải user từ MongoDB
-        user, _ = get_user(uid)
-
-        # Cấu hình ID
-        currency_id = "5200"  # ID Linh hoả
-        crate_id = "004"     # ID Soul Crate
-        cost_per_unit = 25
-        total_cost = cost_per_unit * amount
-
-        # Kiểm tra Linh hoả (5200) trong kho
-        user_inv = user.get("inv", {})
-        if user_inv.get(currency_id, 0) < total_cost:
-            missing = total_cost - user_inv.get(currency_id, 0)
-            return await ctx.send(f"{ERR} | Bạn thiếu **{missing}** <:Linh_hoa:1498614127386562601> Linh hoả (ID: 5200) để thực hiện giao dịch này.")
-
-        # Trừ Linh hoả và thêm Soul Crate
-        from rpg_core import add_item
-        user["inv"][currency_id] -= total_cost
-        add_item(user, f"crate_{crate_id}", amount)
-
-        # ✅ Lưu lên MongoDB
-        save_user(uid, user)
-        await ctx.send(f"{OK} | Chúc mừng bạn đã đổi thành công **{total_cost}** Linh hoả lấy **{amount}x** <:Soulcrate:1498617031501807646> **Soul Crate**!")
 
 
 async def setup(bot):
