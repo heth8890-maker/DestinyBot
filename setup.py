@@ -1,23 +1,12 @@
 import discord
 from discord.ext import commands
-import json
 import os
 
 from exp import load_exp
-
-# ───────────────────────────────────────────
-# HÀM LOAD DỮ LIỆU (Đồng bộ với cash.py và exp.py)
-# ───────────────────────────────────────────
-def load_json(path):
-    if not os.path.exists(path):
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        try:
-            return json.load(f)
-        except:
-            return {}
+from database_helper import _get_collections, _with_retry
 
 ICON_COIN = "<:Coin:1495831576397742241>"
+
 
 # ───────────────────────────────────────────
 # VIEW CHUYỂN TRANG TOP
@@ -30,31 +19,55 @@ class TopView(discord.ui.View):
         self.mode = "money"
 
     def get_top_money_embed(self):
-        data = load_json("economy.json")
-        users = []
+        """
+        Query MongoDB trực tiếp, sort theo cash DESC, lấy top 10 thật sự.
+        Bất kỳ ai có cash cao nhất đều được xét — không bị giới hạn cứng.
+        """
+        try:
+            economy_col, _ = _get_collections()
 
-        for uid, val in data.items():
-            if "_" not in uid and isinstance(val, int):
-                users.append((uid, val))
+            # Sort server-side theo cash giảm dần, lấy top 10
+            cursor = _with_retry(
+                economy_col.find,
+                {},
+                {"_id": 1, "cash": 1},
+            )
+            # Lọc bỏ document không có cash hợp lệ, sort tại client
+            # (dùng sort() của pymongo để chắc chắn đúng thứ tự)
+            cursor = cursor.sort("cash", -1).limit(10)
+            top_10 = list(cursor)
 
-        users.sort(key=lambda x: x[1], reverse=True)
-        top_10 = users[:10]
+        except Exception as e:
+            embed = discord.Embed(
+                title="🏆 | BẢNG XẾP HẠNG BAL",
+                description=f"❌ Không thể tải dữ liệu: {e}",
+                color=0xf1c40f,
+            )
+            return embed
 
         embed = discord.Embed(
-            title=" 🏆 | BẢNG XẾP HẠNG BAL",
-            color=0xf1c40f
+            title="🏆 | BẢNG XẾP HẠNG BAL",
+            color=0xf1c40f,
         )
 
-        description = ""
-        for i, (uid, bal) in enumerate(top_10, 1):
-            user_obj = self.bot.get_user(int(uid))
-            name = user_obj.name if user_obj else f"User ID: {uid}"
-            description += f"**#{i}. {name}** — `{bal:,}` {ICON_COIN}\n"
+        if not top_10:
+            embed.description = "Chưa có dữ liệu."
+        else:
+            description = ""
+            for i, doc in enumerate(top_10, 1):
+                uid = doc["_id"]
+                bal = doc.get("cash", 0) or 0
+                try:
+                    user_obj = self.bot.get_user(int(uid))
+                except (ValueError, TypeError):
+                    user_obj = None
+                name = user_obj.name if user_obj else f"User ID: {uid}"
+                description += f"**#{i}. {name}** — `{bal:,}` {ICON_COIN}\n"
+            embed.description = description
 
-        embed.description = description if description else "Chưa có dữ liệu."
         embed.set_footer(
             text=f"Yêu cầu bởi {self.ctx.author.name}",
-            icon_url=self.ctx.author.display_avatar.url
+            icon_url=self.ctx.author.display_avatar.url,
         )
         return embed
 
@@ -72,8 +85,8 @@ class TopView(discord.ui.View):
         top_10 = users[:10]
 
         embed = discord.Embed(
-            title=" 🏆 | BẢNG XẾP HẠNG LEVEL",
-            color=0x3498db
+            title="🏆 | BẢNG XẾP HẠNG LEVEL",
+            color=0x3498DB,
         )
 
         description = ""
@@ -85,7 +98,7 @@ class TopView(discord.ui.View):
         embed.description = description if description else "Chưa có dữ liệu."
         embed.set_footer(
             text=f"Yêu cầu bởi {self.ctx.author.name}",
-            icon_url=self.ctx.author.display_avatar.url
+            icon_url=self.ctx.author.display_avatar.url,
         )
         return embed
 
@@ -94,7 +107,7 @@ class TopView(discord.ui.View):
         if interaction.user != self.ctx.author:
             return await interaction.response.send_message(
                 "❌ Đây không phải bảng của bạn!",
-                ephemeral=True
+                ephemeral=True,
             )
 
         if self.mode == "money":
@@ -106,11 +119,11 @@ class TopView(discord.ui.View):
             button.label = "Xem Level"
             embed = self.get_top_money_embed()
 
-        await interaction.response.edit_message(embed=embed, view=self)  # FIX 1: Added missing closing parenthesis
+        await interaction.response.edit_message(embed=embed, view=self)
 
 
 # ───────────────────────────────────────────
-# COG RELOAD (FIX 2: Properly defined as a Cog class)
+# COG RELOAD
 # ───────────────────────────────────────────
 class ReloadCog(commands.Cog):
     def __init__(self, bot):
@@ -123,13 +136,9 @@ class ReloadCog(commands.Cog):
         dtn reload <file>
         dtn reload all
         """
-
         if not target:
             return await ctx.send("❌ | Dùng: `dtn reload <file>` hoặc `dtn reload all`")
 
-        # ─────────────────────────────
-        # RELOAD ALL
-        # ─────────────────────────────
         if target.lower() == "all":
             success = []
             failed = []
@@ -141,49 +150,26 @@ class ReloadCog(commands.Cog):
                 except Exception as e:
                     failed.append(f"{ext} → {e}")
 
-            embed = discord.Embed(
-                title="🔄 Reload All Extensions",
-                color=0x00ffcc
-            )
-
-            embed.add_field(
-                name="✅ Success",
-                value="\n".join(success) if success else "None",
-                inline=False
-            )
-
-            embed.add_field(
-                name="❌ Failed",
-                value="\n".join(failed) if failed else "None",
-                inline=False
-            )
-
+            embed = discord.Embed(title="🔄 Reload All Extensions", color=0x00FFCC)
+            embed.add_field(name="✅ Success", value="\n".join(success) if success else "None", inline=False)
+            embed.add_field(name="❌ Failed", value="\n".join(failed) if failed else "None", inline=False)
             return await ctx.send(embed=embed)
 
-        # ─────────────────────────────
-        # RELOAD SINGLE FILE
-        # ─────────────────────────────
         try:
             await self.bot.reload_extension(target)
-
             embed = discord.Embed(
                 title="🔄 Reload Success",
                 description=f"Đã reload `{target}` thành công.",
-                color=0x2ecc71
+                color=0x2ECC71,
             )
             await ctx.send(embed=embed)
-
         except Exception as e:
             embed = discord.Embed(
                 title="❌ Reload Failed",
                 description=f"Không thể reload `{target}`",
-                color=0xe74c3c
+                color=0xE74C3C,
             )
-            embed.add_field(
-                name="Error",
-                value=str(e),
-                inline=False
-            )
+            embed.add_field(name="Error", value=str(e), inline=False)
             await ctx.send(embed=embed)
 
 
@@ -203,7 +189,7 @@ class RPG(commands.Cog):
 
 
 # ───────────────────────────────────────────
-# SETUP (FIX 3: Single setup() registering both Cogs)
+# SETUP
 # ───────────────────────────────────────────
 async def setup(bot):
     await bot.add_cog(RPG(bot))
