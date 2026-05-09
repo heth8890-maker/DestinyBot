@@ -1,7 +1,6 @@
 """
 ===== FILE: rpg_addon.py =====
 Quản lý Weapon Shop (10 slot, reset mỗi SHOP_RESET_SEC giây)
-+ Upgrade System (Lv 30, effect_value_at_level, passives, EFFECT_CAPS).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ★  REFACTOR v3 – Weighted Spawn System (Logic Fix + Legend Split)
@@ -19,7 +18,6 @@ Quản lý Weapon Shop (10 slot, reset mỗi SHOP_RESET_SEC giây)
 
 import random
 import time
-import uuid as _uuid
 
 from rpg_weapon import WEAPONS, RARE_CRATE_WEAPONS
 from database_helper import load_shop_data, save_shop_data
@@ -61,31 +59,10 @@ _RARITY_SLOT_CAP: dict[str, int] = {
 _LEGENDARY_COMBINED_CAP: int       = 1
 _LEGENDARY_TIERS:         frozenset = frozenset({"legendary", "legend"})
 
-
-# ═══════════════════════════════════════════════════════════════
-# CONSTANTS — UPGRADE SYSTEM
-# ═══════════════════════════════════════════════════════════════
-
-UPGRADE_MAX_LEVEL: int = 30
-
-RARITY_MULT: dict[str, float] = {
-    "common":    0.10,
-    "uncommon":  0.20,
-    "rare":      0.45,
-    "epic":      0.80,
-    "legendary": 1.70,
-    "legend":    2.00,
-}
-
 EFFECT_CAPS: dict[str, float] = {
     "sell_bonus":      1.0,
     "reduce_cooldown": 0.8,
     "double_drop":     0.5,
-}
-
-_PASSIVE_UNLOCKS: dict[str, dict] = {
-    "sell_bonus":      {"lv": 20, "passive": "x2_sell_chance",  "desc": "+5% cơ hội nhân đôi tiền bán"},
-    "reduce_cooldown": {"lv": 20, "passive": "flat_cd_reduce",  "desc": "-1s cooldown cố định"},
 }
 
 
@@ -257,162 +234,55 @@ def fmt_effect_val(key: str, val) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-# UPGRADE SYSTEM
+# PARSE EFFECTS
 # ═══════════════════════════════════════════════════════════════
-
-def effect_value_at_level(base, lv: int, key: str = ""):
-    """
-    Tính giá trị của 1 effect tại level lv.
-    Đây là công thức DUY NHẤT — không dùng công thức nào khác.
-
-    Scaling tuyến tính:
-        Value = base × (1 + (lv − 1) / 29)
-        → Lv 1 = 1× base (không tăng)
-        → Lv 30 = đúng 2× base (tăng 100%)
-
-    Clamp lv vào [1, UPGRADE_MAX_LEVEL].
-    Nếu key có trong EFFECT_CAPS → kết quả bị cap.
-    """
-    lv    = min(max(1, lv), UPGRADE_MAX_LEVEL)
-    value = float(base) * (1.0 + (lv - 1) / 29.0)
-    if key and key in EFFECT_CAPS:
-        value = min(value, EFFECT_CAPS[key])
-    return value
-
-
-def upgrade_cost(base_max: int, current_lv: int,
-                 rarity: str = "common",
-                 effects: dict | None = None) -> int:
-    """
-    Chi phí nâng từ current_lv → current_lv+1.
-
-    Nội suy tuyến tính từng đoạn (Legend làm chuẩn):
-      Lv  1→10 :  3,000 → 16,000   (+1,444/lv)
-      Lv 10→20 : 16,000 → 30,000   (+1,400/lv)
-      Lv 20→30 : 30,000 → 120,000  (+9,000/lv)
-
-    Các rarity khác nhân theo RARITY_MULT (legend = 1.0).
-    base_max và effects được giữ lại trong signature để tương thích ngược,
-    nhưng không ảnh hưởng đến kết quả tính toán.
-    """
-    lv = min(max(1, current_lv), UPGRADE_MAX_LEVEL - 1)
-
-    if lv < 10:
-        base_cost = 3000 + (lv - 1) * 1444
-    elif lv < 20:
-        base_cost = 16000 + (lv - 10) * 1400
-    else:
-        base_cost = 30000 + (lv - 20) * 9000
-
-    r_mult = RARITY_MULT.get(rarity.lower(), 0.10)
-    return max(100, int(base_cost * r_mult))
-
-
-def create_upgrade_entry(user: dict, base_id: str) -> str | None:
-    """
-    Tạo upgraded_weapon entry mới từ base_id.
-
-    1. Xác nhận weapon tồn tại.
-    2. Sinh unique ID dạng "<base_id>-<6 hex>".
-    3. Xóa base_id khỏi user["weapons"]  ← FIX duplication bug.
-    4. Thêm uid vào user["weapons"].
-    5. Append entry vào user["upgraded_weapons"].
-
-    Trả về uid nếu thành công, None nếu không tìm thấy weapon data.
-    """
-    all_w = {w["id"]: w for w in WEAPONS + RARE_CRATE_WEAPONS}
-    w     = all_w.get(base_id)
-    if not w:
-        return None
-
-    uid           = f"{base_id}-{_uuid.uuid4().hex[:6].upper()}"
-    effect_levels = {k: 1 for k in w.get("effects", {})}
-
-    weapons = user.setdefault("weapons", [])
-    if base_id in weapons:
-        weapons.remove(base_id)
-
-    entry = {
-        "uid":           uid,
-        "base_id":       base_id,
-        "effect_levels": effect_levels,
-        "passives":      {},
-    }
-    user.setdefault("upgraded_weapons", []).append(entry)
-    weapons.append(uid)
-    return uid
-
-
-def _update_passives(uw: dict, w: dict) -> None:
-    """Unlock passive vào uw["passives"] khi effect đạt lv 20."""
-    for eff_key, info in _PASSIVE_UNLOCKS.items():
-        lv = uw.get("effect_levels", {}).get(eff_key, 0)
-        if lv >= info["lv"] and info["passive"] not in uw.get("passives", {}):
-            uw.setdefault("passives", {})[info["passive"]] = info["desc"]
-
-
-def get_upgraded_weapon(user: dict, uid: str) -> dict | None:
-    """Tìm upgraded weapon trong user["upgraded_weapons"] theo uid."""
-    for uw in user.get("upgraded_weapons", []):
-        if uw.get("uid") == uid:
-            return uw
-    return None
-
 
 def parse_effects_upgraded(equipped: list, user: dict) -> dict:
     """
-    Tổng hợp effects từ danh sách equipped, áp dụng upgrade bonus.
-
-    Với upgraded weapon → dùng effect_value_at_level(base, lv, key).
-    Với base weapon → dùng giá trị gốc.
-
-    Effect Stacking (Rule #1) — áp dụng cho STACKABLE_EFFECTS:
-        final = max_contribution + (sum_others × 0.4)
-    Các effect không thuộc STACKABLE_EFFECTS → cộng thẳng (hoặc take max).
-    Sau cùng → apply EFFECT_CAPS lên totals.
-
-    Backward-compat: user cũ không có upgraded_weapons → không crash.
-
-    ⚡ v5.5-fix: Dùng get_base_id() — KHÔNG dùng str(wid).split("-")[0] trực tiếp.
+    Tổng hợp effects từ equipped weapons, scale theo weapon level.
+    Level 1 = 0.60x base, mỗi level +2.857%, Level 50 = 2.00x base.
+    Formula: effect = base * (0.60 + (level - 1) * 0.02857)
     """
     from rpg_core import get_weapon_by_id, get_base_id
+    from rpg_weapon import WEAPONS, RARE_CRATE_WEAPONS
 
-    _STACKABLE: frozenset = frozenset({
+    _STACKABLE = frozenset({
         "sell_bonus", "rare_bias", "reduce_fail",
         "reduce_cooldown", "double_value",
     })
 
-    _all_weapons: dict[str, dict] = {w["id"]: w for w in WEAPONS + RARE_CRATE_WEAPONS}
-    uw_map: dict[str, dict]       = {
-        uw["uid"]: uw for uw in user.get("upgraded_weapons", [])
+    _all_weapons = {w["id"]: w for w in WEAPONS + RARE_CRATE_WEAPONS}
+    wi_map = {
+        wi["uid"]: wi
+        for wi in user.get("weapon_instances", [])
+        if isinstance(wi, dict) and "uid" in wi
     }
 
     raw_contribs: dict[str, list[float]] = {}
-    non_stack: dict[str, float]          = {}
+    non_stack: dict[str, float] = {}
 
     for wid in equipped:
         if wid is None:
             continue
-
         base_id = get_base_id(str(wid))
         if not base_id:
             continue
-
         w = _all_weapons.get(base_id) or get_weapon_by_id(base_id)
         if not w:
             continue
 
-        effects: dict = dict(w.get("effects", {}))
+        effects = dict(w.get("effects", {}))
 
-        if wid in uw_map:
-            uw         = uw_map[wid]
-            eff_levels = uw.get("effect_levels", {})
-            for eff_key in list(effects.keys()):
-                if isinstance(effects[eff_key], (int, float)):
-                    lv = min(max(1, eff_levels.get(eff_key, 1)), UPGRADE_MAX_LEVEL)
-                    effects[eff_key] = effect_value_at_level(
-                        effects[eff_key], lv, eff_key
-                    )
+        if wid in wi_map:
+            level = max(1, min(50, wi_map[wid].get("level", 1)))
+            for k in list(effects.keys()):
+                if isinstance(effects[k], (int, float)):
+                    effects[k] = effects[k] * (0.60 + (level - 1) * 0.02857)
+        else:
+            # Base weapon chưa có instance → scale 0.60x
+            for k in list(effects.keys()):
+                if isinstance(effects[k], (int, float)):
+                    effects[k] = effects[k] * 0.60
 
         for k, v in effects.items():
             if not isinstance(v, (int, float)):
@@ -423,16 +293,14 @@ def parse_effects_upgraded(equipped: list, user: dict) -> dict:
             else:
                 non_stack[k] = non_stack.get(k, 0.0) + v
 
-    # Apply stacking formula: max + sum_others × 0.4
-    totals: dict[str, float] = dict(non_stack)
+    totals = dict(non_stack)
     for key, contribs in raw_contribs.items():
         if len(contribs) == 1:
             totals[key] = contribs[0]
         else:
-            contribs_sorted = sorted(contribs, reverse=True)
-            totals[key] = contribs_sorted[0] + sum(contribs_sorted[1:]) * 0.4
+            cs = sorted(contribs, reverse=True)
+            totals[key] = cs[0] + sum(cs[1:]) * 0.4
 
-    # Global caps
     for key, cap in EFFECT_CAPS.items():
         if key in totals:
             totals[key] = min(totals[key], cap)

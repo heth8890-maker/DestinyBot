@@ -332,8 +332,7 @@ class WeaponEntity:
 
             if self.upgrade_data and lv > 1:
                 try:
-                    from rpg_addon import effect_value_at_level
-                    v = effect_value_at_level(bv, lv, k)
+                    v = bv * (0.60 + (lv - 1) * 0.02857)
                 except Exception:
                     v = bv
             else:
@@ -1159,7 +1158,7 @@ def _make_default_user() -> dict:
     return {
         "inv":              {},
         "weapons":          [],
-        "upgraded_weapons": [],
+        "weapon_instances": [],
         "equipped":         [None, None, None],
         "coins":            0,
         "passives":         {},
@@ -1345,48 +1344,8 @@ def remove_weapon_from_bag(user: dict, weapon_id: str) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def ensure_upgrade_entry(user: dict, uid: str, base_id: str | None = None) -> None:
-    """
-    Lazily create an upgraded_weapons entry for uid if one does not exist.
-    Idempotent — safe to call multiple times on the same uid.
-
-    WHEN TO CALL:
-        Call this from the upgrade command, AFTER ensure_weapon_uid() has
-        guaranteed the UID exists in the bag.  Never call it during weapon
-        acquisition or equip — upgrade data must only be created when an
-        upgrade is actually about to happen.
-
-    Args:
-        user     : user dict from get_user()
-        uid      : the weapon's UID (must already be in the bag)
-        base_id  : optional — if omitted, resolved automatically via get_base_id()
-    """
-    # FIX: guard against bare base_id ("467") being written as an upgrade key.
-    # upgrade entries keyed on base_id are invisible to parse_effects (needs "-")
-    # and will never match a UID lookup.  The caller must call ensure_weapon_uid()
-    # first to obtain a proper UID before passing it here.
-    if "-" not in uid:
-        logger.warning(
-            f"ensure_upgrade_entry: called with bare base_id '{uid}' — "
-            f"a UID (containing '-') is required.  "
-            f"Call ensure_weapon_uid() first.  Skipping."
-        )
-        return
-
-    resolved_base = base_id if base_id else get_base_id(uid)
-
-    uw_list: list = user.setdefault("upgraded_weapons", [])
-    for entry in uw_list:
-        if isinstance(entry, dict) and entry.get("uid") == uid:
-            return   # already exists — idempotent
-
-    base_data = get_weapon_by_id(resolved_base) or {}
-    effects   = base_data.get("effects") or {}
-    uw_list.append({
-        "uid":           uid,
-        "base_id":       resolved_base,
-        "effect_levels": {k: 1 for k in effects},
-    })
-    logger.debug(f"ensure_upgrade_entry: created entry for UID '{uid}'")
+    """Deprecated: upgrade system đã được thay bằng weapon level system."""
+    pass
 
 
 def ensure_weapon_uid(user: dict, weapon_id: str) -> str | None:
@@ -1452,6 +1411,20 @@ def ensure_weapon_uid(user: dict, weapon_id: str) -> str | None:
         new_uid = f"{base_id}-{suffix}"
 
     weapons[idx] = new_uid   # promote in-place (bag entry updated)
+
+    # Tạo weapon_instance cho uid mới nếu chưa tồn tại
+    existing_wi_uids = {
+        wi["uid"] for wi in user.get("weapon_instances", [])
+        if isinstance(wi, dict) and "uid" in wi
+    }
+    if new_uid not in existing_wi_uids:
+        user.setdefault("weapon_instances", []).append({
+            "uid":         new_uid,
+            "base_id":     base_id,
+            "level":       1,
+            "exp":         0,
+            "exp_to_next": 120,
+        })
 
     logger.info(
         f"ensure_weapon_uid: promoted '{stored_id}' → '{new_uid}'"
@@ -1584,12 +1557,12 @@ def parse_effects(equipped: list, user: dict | None = None) -> dict:
     }
 
     # Build O(1) upgrade map once — avoids repeated list scans inside the loop
-    uw_map: dict[str, dict] = {}
+    wi_map: dict[str, dict] = {}
     if user is not None:
-        uw_map = {
-            uw["uid"]: uw
-            for uw in user.get("upgraded_weapons", [])
-            if isinstance(uw, dict) and "uid" in uw
+        wi_map = {
+            wi["uid"]: wi
+            for wi in user.get("weapon_instances", [])
+            if isinstance(wi, dict) and "uid" in wi
         }
 
     for wid in equipped:
@@ -1617,27 +1590,25 @@ def parse_effects(equipped: list, user: dict | None = None) -> dict:
 
             effects: dict = dict(base_data.get("effects", {}))
 
-            # ── Step 3: apply upgrade scaling when wid is a UID ───────────────
+            # ── Step 3: scale effect theo weapon level ────────────────────────
             is_uid = "-" in wid
-            if is_uid and uw_map:
-                uw = uw_map.get(wid)
-                if uw:
-                    eff_levels: dict = uw.get("effect_levels", {})
-                    try:
-                        from rpg_addon import effect_value_at_level
-                        for k in list(effects.keys()):
-                            if isinstance(effects[k], (int, float)):
-                                lv = max(1, eff_levels.get(k, 1))
-                                effects[k] = effect_value_at_level(effects[k], lv, k)
-                    except ImportError:
-                        logger.warning(
-                            "parse_effects: rpg_addon unavailable — using base stats"
-                        )
-                    except Exception as scale_err:
-                        logger.error(
-                            f"parse_effects: effect_value_at_level failed for '{wid}': {scale_err}"
-                            " — using base stats for this weapon"
-                        )
+            if is_uid and user is not None:
+                wi = wi_map.get(wid)
+                if wi:
+                    level = max(1, min(50, wi.get("level", 1)))
+                    for k in list(effects.keys()):
+                        if isinstance(effects[k], (int, float)):
+                            effects[k] = effects[k] * (0.60 + (level - 1) * 0.02857)
+                else:
+                    # UID chưa có instance → scale 0.60x (chưa kích hoạt leveling)
+                    for k in list(effects.keys()):
+                        if isinstance(effects[k], (int, float)):
+                            effects[k] = effects[k] * 0.60
+            elif not is_uid:
+                # Base weapon (chưa enchant) → scale 0.60x
+                for k in list(effects.keys()):
+                    if isinstance(effects[k], (int, float)):
+                        effects[k] = effects[k] * 0.60
 
             # ── Step 4: accumulate into aggregate ─────────────────────────────
             for key in agg:

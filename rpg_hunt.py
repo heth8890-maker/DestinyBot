@@ -28,7 +28,7 @@ from rpg_core import (
     add_item, calc_hunt_cooldown, parse_effects,
     CRATES,
 )
-from rpg_database import get_user, save_user
+from rpg_database import get_user, save_user, calc_hunt_exp, grant_weapon_exp
 from rpg_addon import parse_effects_upgraded
 from rpg_quest import add_quest_progress
 from cash import get_balance, update_balance_safe
@@ -123,20 +123,18 @@ def _equipped_display(equipped: list, user: dict | None = None) -> str:
     """Display 3 equipped slots with support for upgraded weapons."""
     lines   = []
     slots   = list(equipped) + [None] * (3 - len(equipped))
-    uw_map  = {uw["uid"]: uw for uw in (user or {}).get("upgraded_weapons", [])}
+    wi_map  = {wi["uid"]: wi for wi in (user or {}).get("weapon_instances", []) if isinstance(wi, dict) and "uid" in wi}
 
     for i, wid in enumerate(slots[:3], 1):
         if wid is None:
             lines.append(f"  `[{i}]` — trống")
-        elif wid in uw_map:
-            uw     = uw_map[wid]
-            w      = get_weapon_by_id(uw["base_id"])
-            nm     = w["name"] if w else wid
-            em     = w["emoji"] if w else "<:Effect:1495466103047061679>"
-            max_lv = max(uw["effect_levels"].values()) if uw["effect_levels"] else 1
-            lines.append(
-                f"  `[{i}]` <:Effect:1495466103047061679>{em} **{nm}** _(lv{max_lv})_"
-            )
+        elif wid in wi_map:
+            wi = wi_map[wid]
+            w  = get_weapon_by_id(wi["base_id"])
+            nm = w["name"]  if w else wid
+            em = w["emoji"] if w else "⚔️"
+            lv = wi.get("level", 1)
+            lines.append(f"  `[{i}]` {em} **{nm}** _(Lv {lv})_")
         else:
             w = get_weapon_by_id(wid)
             if w:
@@ -145,6 +143,25 @@ def _equipped_display(equipped: list, user: dict | None = None) -> str:
                 lines.append(f"  `[{i}]` `{wid}`")
 
     return "\n".join(lines)
+
+
+def _grant_exp_to_equipped(user: dict, found: list, equipped: list) -> None:
+    """
+    Tính EXP từ items tìm được, chia đều cho tất cả equipped weapon có UID.
+    Base weapon (không có dấu "-") không nhận EXP.
+    Mutate user["weapon_instances"] in-place. Không trả về gì.
+    """
+    active = [w for w in equipped if w is not None and "-" in str(w)]
+    if not active or not found:
+        return
+
+    total_exp = calc_hunt_exp(found)
+    if total_exp <= 0:
+        return
+
+    exp_each = max(1, total_exp // len(active))
+    for wid in active:
+        grant_weapon_exp(user, wid, exp_each)
 
 
 # ─────────────────────────────────────────────────────────
@@ -215,6 +232,12 @@ class RPGHunt(commands.Cog):
             except Exception as e:
                 await ctx.send(f"{ERR} | Failed to roll hunt items: `{e}`")
                 raise e
+
+            try:
+                if found:
+                    _grant_exp_to_equipped(user, found, equipped)
+            except Exception as e:
+                print(f"⚠️  Warning: weapon exp grant failed: {e}")
 
             # ─────────────────────────────────────────────────────────
             # BUILD RESPONSE EMBED

@@ -22,7 +22,7 @@ log = logging.getLogger("db_helper")
 RPG_JSON_FILE      = "rpg_data.json"       # {uid: {inv, weapons, equipped, ...}}
 ECONOMY_JSON_FILE  = "economy.json"        # flat: {uid: cash, uid_daily_date: ..., uid_daily_streak: ...}
 DB_NAME            = "rpg_bot_db"
-DEFAULT_USER       = {"cash": 0, "exp": 0, "equipped": [None, None, None], "upgraded_weapons": []}
+DEFAULT_USER       = {"cash": 0, "exp": 0, "equipped": [None, None, None], "weapons": [], "weapon_instances": []}
 MAX_RETRIES        = 2
 RETRY_DELAY        = 1          # giây
 MONGO_TIMEOUT_MS   = 10_000     # 10 giây cho mỗi thao tác
@@ -138,7 +138,7 @@ def _migrate_from_json(uid_str: str, economy_col) -> Optional[dict]:
         "inv":              rpg_user.get("inv", {}),
         "weapons":          rpg_user.get("weapons", []),
         "equipped":         rpg_user.get("equipped", [None, None, None]),
-        "upgraded_weapons": rpg_user.get("upgraded_weapons", []),
+        "weapon_instances": rpg_user.get("upgraded_weapons", []),
         "cooldown":         rpg_user.get("cooldown", 0),
         "hunt_cd":          rpg_user.get("hunt_cd", 0),
         "crate_cd":         rpg_user.get("crate_cd", 0),

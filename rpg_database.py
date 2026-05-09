@@ -32,16 +32,138 @@ WEAPONS = [
 
 
 # ─────────────────────────────────────────────
+#  WEAPON LEVELING CONSTANTS & HELPERS
+# ─────────────────────────────────────────────
+
+WEAPON_LEVEL_CAP = 50
+
+RARITY_EXP_WEIGHT = {
+    "common":    1,
+    "uncommon":  3,
+    "rare":      6,
+    "epic":      15,
+    "legendary": 30,
+}
+
+
+def exp_to_next(level: int) -> int:
+    """EXP cần để lên level tiếp theo. Công thức: level * 80 + 40."""
+    level = min(max(1, level), WEAPON_LEVEL_CAP)
+    return level * 80 + 40
+
+
+def calc_hunt_exp(found_items: list) -> int:
+    """
+    Tính tổng EXP từ danh sách item nhặt được khi hunt.
+    Mỗi item có field 'rarity'. Dùng RARITY_EXP_WEIGHT.
+    Item không có rarity hoặc không khớp → weight = 1.
+    """
+    total = 0
+    for item in found_items:
+        rarity = item.get("rarity", "common") if isinstance(item, dict) else "common"
+        total += RARITY_EXP_WEIGHT.get(rarity, 1)
+    return total
+
+
+def make_weapon_instance(base_id: str, uid: str, level: int = 1) -> dict:
+    """Tạo weapon instance mới với uid, base_id và level cho trước."""
+    lvl = min(max(1, level), WEAPON_LEVEL_CAP)
+    return {
+        "uid":         uid,
+        "base_id":     base_id,
+        "level":       lvl,
+        "exp":         0,
+        "exp_to_next": exp_to_next(lvl),
+    }
+
+
+def grant_weapon_exp(user: dict, uid: str, exp_amount: int) -> dict:
+    """
+    Cộng exp_amount vào weapon instance có uid trong user["weapon_instances"].
+    Tự động level-up nếu exp >= exp_to_next (lặp đến khi hết hoặc đạt cap).
+    KHÔNG save DB — chỉ mutate user dict in-place.
+
+    Trả về:
+        {"leveled_up": bool, "old_level": int, "new_level": int, "uid": uid}
+    Nếu không tìm thấy uid:
+        {"leveled_up": False, "old_level": 0, "new_level": 0, "uid": uid}
+    """
+    wi = next(
+        (w for w in user.get("weapon_instances", [])
+         if isinstance(w, dict) and w.get("uid") == uid),
+        None,
+    )
+    if wi is None:
+        return {"leveled_up": False, "old_level": 0, "new_level": 0, "uid": uid}
+
+    old_level = wi.get("level", 1)
+    wi["exp"]  = wi.get("exp", 0) + exp_amount
+
+    leveled_up = False
+    while wi["level"] < WEAPON_LEVEL_CAP and wi["exp"] >= wi["exp_to_next"]:
+        wi["exp"]         -= wi["exp_to_next"]
+        wi["level"]       += 1
+        wi["exp_to_next"]  = exp_to_next(wi["level"])
+        leveled_up = True
+
+    if wi["level"] >= WEAPON_LEVEL_CAP:
+        wi["exp"] = 0
+
+    return {
+        "leveled_up": leveled_up,
+        "old_level":  old_level,
+        "new_level":  wi["level"],
+        "uid":        uid,
+    }
+
+
+def migrate_upgraded_weapons(user: dict) -> bool:
+    """
+    Chuyển đổi user["upgraded_weapons"] (format cũ) sang user["weapon_instances"].
+    Chỉ chạy nếu upgraded_weapons không rỗng.
+    Trả về True nếu đã migrate, False nếu không cần.
+    """
+    old_list = user.get("upgraded_weapons", [])
+    if not old_list:
+        return False
+
+    existing_uids = {
+        wi["uid"] for wi in user.get("weapon_instances", [])
+        if isinstance(wi, dict) and "uid" in wi
+    }
+
+    for entry in old_list:
+        if not isinstance(entry, dict):
+            continue
+        uid     = entry.get("uid")
+        base_id = entry.get("base_id")
+        if not uid or not base_id:
+            continue
+        if uid in existing_uids:
+            continue
+        eff_levels = entry.get("effect_levels", {})
+        level = max(eff_levels.values(), default=1) if eff_levels else 1
+        level = min(max(1, level), WEAPON_LEVEL_CAP)
+        user.setdefault("weapon_instances", []).append(
+            make_weapon_instance(base_id, uid, level)
+        )
+        existing_uids.add(uid)
+
+    user["upgraded_weapons"] = []
+    return True
+
+
+# ─────────────────────────────────────────────
 #  USER ACCESS
 # ─────────────────────────────────────────────
 
 # Các field bắt buộc phải có trong user doc — dùng để "fix cứng" user cũ
 _USER_DEFAULTS = {
-    "inv":               {},
-    "weapons":           [],
-    "equipped":          [],
-    "cooldown":          0,
-    "upgraded_weapons":  [],
+    "inv":              {},
+    "weapons":          [],
+    "equipped":         [],
+    "cooldown":         0,
+    "weapon_instances": [],
 }
 
 
@@ -60,13 +182,15 @@ def get_user(user_id) -> tuple[dict, list]:
     """
     core = load_core_data(user_id)          # gọi helper thay vì đọc JSON
 
-    user            = core["user"]
+    user             = core["user"]
     upgraded_weapons = core["upgraded_weapons"]
 
     # Vá key còn thiếu (user cũ migrate từ JSON hoặc schema thay đổi)
     for key, default in _USER_DEFAULTS.items():
         if key not in user:
             user[key] = default
+
+    migrate_upgraded_weapons(user)
 
     return user, upgraded_weapons
 
