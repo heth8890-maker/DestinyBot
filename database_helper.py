@@ -1,3 +1,4 @@
+import copy
 import pymongo
 import pymongo.errors
 import os
@@ -26,6 +27,11 @@ DEFAULT_USER       = {"cash": 0, "exp": 0, "equipped": [None, None, None], "weap
 MAX_RETRIES        = 2
 RETRY_DELAY        = 1          # giây
 MONGO_TIMEOUT_MS   = 10_000     # 10 giây cho mỗi thao tác
+
+
+def _default_user(uid_str: str) -> dict:
+    return {"_id": uid_str, **copy.deepcopy(DEFAULT_USER)}
+
 
 # ─────────────────────────────────────────────
 #  KẾT NỐI MONGODB  (singleton, lazy-init)
@@ -138,7 +144,8 @@ def _migrate_from_json(uid_str: str, economy_col) -> Optional[dict]:
         "inv":              rpg_user.get("inv", {}),
         "weapons":          rpg_user.get("weapons", []),
         "equipped":         rpg_user.get("equipped", [None, None, None]),
-        "weapon_instances": rpg_user.get("upgraded_weapons", []),
+        "weapon_instances": [],
+        "upgraded_weapons": rpg_user.get("upgraded_weapons", []),
         "cooldown":         rpg_user.get("cooldown", 0),
         "hunt_cd":          rpg_user.get("hunt_cd", 0),
         "crate_cd":         rpg_user.get("crate_cd", 0),
@@ -174,7 +181,7 @@ def load_core_data(user_id) -> dict:
             user = _migrate_from_json(uid_str, economy_col)
 
         if not user:
-            user = {"_id": uid_str, **DEFAULT_USER}
+            user = _default_user(uid_str)
             try:
                 _with_retry(economy_col.insert_one, user.copy())
                 log.info(f"🆕 Đã tạo user mới: {uid_str}")
@@ -188,7 +195,7 @@ def load_core_data(user_id) -> dict:
     except Exception as e:
         log.error(f"❌ load_core_data thất bại cho {uid_str}: {e}")
         return {
-            "user": {"_id": uid_str, **DEFAULT_USER},
+            "user": _default_user(uid_str),
             "upgraded_weapons": [],
         }
 

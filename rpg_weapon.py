@@ -63,7 +63,7 @@ WEAPON_EFFECTS = {
     "466": {
         "double_drop": 0.1,           # 15% nhân đôi item khi hunt
         "rare_bias":   0.03,          # +2.5% rare/epic/legendary
-        "sell_boost":  0.32,           # tăng 35% giá bán
+        "sell_bonus":  0.32,           # FIX 1: sell_boost → sell_bonus
     },
 
     # ── RARE CRATE: Dâu tây ──
@@ -114,7 +114,7 @@ WEAPON_EFFECTS = {
     "247": {
         "extra_slot": 2,               # +2 slot hunt  (FIX 1: was "extra_slots" — parse_effects uses "extra_slot")
         "rare_bias":  0.03,            # +3% tỉ lệ ra rare legend
-        "sell_boost": 0.10,            # +10% sell_bonus
+        "sell_bonus": 0.10,            # FIX 1: sell_boost → sell_bonus
     },
     # ── SOUL SPECIAL: Tam hoả thống soái ──
     "5001": {
@@ -321,7 +321,7 @@ SPECIAL_WEAPONS = [
     {
         "id": "247",
         "name": "Con Bò",
-        "description": "Con bò ăn cỏ, bò hư. Một người bạn đồng hành đầy 'thái độ'. +2 slot, +3% rare_bias, +10% sell_boost",
+        "description": "Con bò ăn cỏ, bò hư. Một người bạn đồng hành đầy 'thái độ'. +2 slot, +3% rare_bias, +10% sell_bonus",
         "rarity": "special",
         "min": 35000,
         "max": 35000,
@@ -558,6 +558,7 @@ def roll_rare_crate_weapon() -> dict:
         if roll <= cumulative:
             return w
     return RARE_CRATE_WEAPONS[0]   # fallback
+
 def roll_dark_crate_weapon() -> dict:
     """
     Roll ngẫu nhiên 1 weapon từ Dark Crate dựa trên weighted chance.
@@ -589,313 +590,313 @@ def _rarity_tier(rarity: str) -> str:
     return RARITY_LABEL.get(rarity, rarity)
 
 
-def _equipped_display(equipped: list, user: dict | None = None) -> str:
-    """Hiển thị 3 ô trang bị. Hỗ trợ unique upgrade IDs. Hiện ID + gợi ý upgrade."""
-    lines   = []
-    slots   = list(equipped) + [None] * (3 - len(equipped))
-    uw_map  = {uw["uid"]: uw for uw in (user or {}).get("upgraded_weapons", [])}
-
-    for i, wid in enumerate(slots[:3], 1):
-        if wid is None:
-            lines.append(f"  `[{i}]` — trống")
-        elif wid in uw_map:
-            uw     = uw_map[wid]
-            w      = get_weapon_by_id(uw["base_id"])
-            nm     = w["name"] if w else wid
-            em     = w["emoji"] if w else "<:Effect:1495466103047061679>"
-            max_lv = max(uw["effect_levels"].values()) if uw["effect_levels"] else 1
-            lines.append(
-                f"  `[{i}]` <:Effect:1495466103047061679>{em} **{nm}** _(lv{max_lv})_\n"
-                f"       `{wid}` • `dtn up {wid} <effect>`"
-            )
-        else:
-            # FIX 3: wid may be a UID ("467-ABC12") with no upgraded_weapons entry.
-            # get_weapon_by_id("467-ABC12") always returns None because UIDs are not
-            # database keys.  Resolve base_id first via get_base_id() before lookup.
-            from rpg_core import get_base_id as _get_base_id
-            resolved = _get_base_id(wid)
-            w = get_weapon_by_id(resolved)
-            if w:
-                lines.append(
-                    f"  `[{i}]` {w['emoji']} **{w['name']}**\n"
-                    f"       `{wid}` • `dtn up {wid} <effect>`"
-                )
-            else:
-                lines.append(f"  `[{i}]` `{wid}`")
-
-    return "\n".join(lines)
-
-
 # ═══════════════════════════════════════════════════════════
-# COG: WEAPON  (+status +upgrade)
+# COG: WEAPON
 # ═══════════════════════════════════════════════════════════
 
 class RPGWeapon(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    # ─────────────────────────────────────────────────────────
+    # HELPER: build weapon line cho list
+    # ─────────────────────────────────────────────────────────
+    @staticmethod
+    def _weapon_line(wid: str, wi_map: dict, equipped_set: set,
+                     get_base_id_fn, get_weapon_by_id_fn) -> str:
+        base_id = get_base_id_fn(str(wid)) or str(wid)
+        w       = get_weapon_by_id_fn(base_id)
+        nm      = w["name"]  if w else base_id
+        em      = w["emoji"] if w else "⚔️"
+        wi      = wi_map.get(wid)
+        lv      = wi.get("level", 1) if wi else 1
+        eq_tag  = " **[E]**" if wid in equipped_set else ""
+        return f"{em} **{nm}**{eq_tag} • Lv {lv}\n`{wid}`"
+
+    # ─────────────────────────────────────────────────────────
+    # MAIN: dtn weapon / dtn weapon <uid>
+    # ─────────────────────────────────────────────────────────
     @commands.group(name="weapon", aliases=["w"], invoke_without_command=True)
     async def weapon(self, ctx, *, weapon_id: str = None):
-        from rpg_core import WeaponID, get_weapon_entity
-        from rpg_addon import get_upgraded_weapon
+        from rpg_core import WeaponID, get_weapon_entity, get_base_id
         from rpg_database import get_user
 
-        uid  = str(ctx.author.id)
-        user, upgraded = get_user(uid)
+        author_uid = str(ctx.author.id)
+        user, _    = get_user(author_uid)
 
+        wi_map = {
+            wi["uid"]: wi
+            for wi in user.get("weapon_instances", [])
+            if isinstance(wi, dict) and "uid" in wi
+        }
+
+        # ── dtn weapon <uid> — chi tiết ──────────────────────────────
         if weapon_id:
-            # ── dtn weapon <id> ── chi tiết vũ khí
-            w = get_weapon_by_id(weapon_id)
-            if not w:
-                # Thử là unique ID (vũ khí đã nâng cấp)
-                uw = get_upgraded_weapon(user, weapon_id)
-                if uw:
-                    # Dùng WeaponEntity.build_embed() — single source cho UI
-                    entity = get_weapon_entity(user, weapon_id)
-                    if entity:
-                        embed = entity.build_embed()
-                        embed.add_field(
-                            name="📋 Lệnh nhanh",
-                            value=(
-                                f"`dtn weapon equip {uw['uid']}`\n"
-                                f"`dtn upgrade {uw['uid']} <effect>`"
-                            ),
-                            inline=False,
-                        )
-                        return await ctx.send(embed=embed)
-                return await ctx.send(f"{ERR} | Không tìm thấy vũ khí ID `{weapon_id}`.")
+            base_id = get_base_id(weapon_id) or weapon_id
+            w       = get_weapon_by_id(base_id)
+            entity  = get_weapon_entity(user, weapon_id)
 
-            # Weapon bình thường — dùng entity.build_embed()
-            entity = get_weapon_entity(user, weapon_id)
-            if entity:
-                embed = entity.build_embed()
-                rarity = w.get("rarity", "common")
-                if rarity == "special":
-                    chance_text = "**???**"
-                else:
-                    chance_text = f"**{w['chance']}%**"
-                embed.add_field(
-                    name="<:Key:1496098633395998740> | Tỉ lệ crate",
-                    value=chance_text,
-                    inline=True,
+            if not entity and not w:
+                return await ctx.send(
+                    f"{ERR} | Không tìm thấy vũ khí `{weapon_id}`."
                 )
-                if w.get("no_upgrade"):
-                    embed.add_field(name="⚠️ Nâng cấp", value="Không thể nâng cấp.", inline=False)
+
+            embed = entity.build_embed() if entity else discord.Embed(
+                title=f"⚔️ {weapon_id}",
+                color=0xE91E63,
+            )
+
+            # Trạng thái equip
+            equipped     = user.get("equipped", [])
+            equip_status = "—"
+            for i, wid in enumerate(equipped, 1):
+                if wid == weapon_id:
+                    equip_status = f"Ô **[{i}]**"
+                    break
+            embed.add_field(
+                name="🗂️ Trạng thái",
+                value=equip_status,
+                inline=True,
+            )
+
+            # Level / EXP
+            wi = wi_map.get(weapon_id)
+            if wi:
+                level    = wi.get("level", 1)
+                exp      = wi.get("exp", 0)
+                exp_next = wi.get("exp_to_next", 120)
+                filled   = int(exp / max(exp_next, 1) * 20)
+                bar      = "█" * filled + "░" * (20 - filled)
+                pct      = int(exp / max(exp_next, 1) * 100)
+                scale    = round(0.60 + (level - 1) * 0.02857, 3)
+                cap_note = " _(Max!)_" if level >= 50 else ""
                 embed.add_field(
-                    name="📋 Lệnh nhanh",
+                    name="📈 Level & EXP",
                     value=(
-                        f"`dtn weapon equip {w['id']}`\n"
-                        f"`dtn status {w['id']}`"
+                        f"**Lv {level}** / 50{cap_note}\n"
+                        f"`{bar}` {exp:,} / {exp_next:,} ({pct}%)\n"
+                        f"⚡ Effect: **{scale:.0%}** base"
                     ),
                     inline=False,
                 )
-                embed.set_footer(text=f"ID: {w['id']}")
-                return await ctx.send(embed=embed)
-            return  # entity ký không tồn tại — thoát im lặng
 
-        # ── dtn weapon (no id) ── kho
-        embed = discord.Embed(
-            title=f" <:Hamer:1495462570469888069> Weapon của {ctx.author.display_name}",
-            color=0xE91E63,
-        )
-        embed.add_field(
-            name="<:2913:1495252023912956025>️ Đang trang bị (3 ô)",
-            value=_equipped_display(user.get("equipped", []), user),
-            inline=False,
-        )
-
-        # FIX 5: Regular weapons (base ID) + track UID weapons with no upgrade entry.
-        # Under v1.7, a UID without an upgrade record is valid.  Old code skipped
-        # them in both sections (is_unique gate + no entry to iterate) → invisible.
-        uw_uids: set[str] = {
-            uw["uid"] for uw in user.get("upgraded_weapons", [])
-            if isinstance(uw, dict) and "uid" in uw
-        }
-        weapon_counts: dict[str, int] = {}
-        uid_no_upgrade: list[str]     = []   # UIDs with no upgrade entry yet
-
-        for wid in user.get("weapons", []):
-            if not WeaponID.is_unique(str(wid)):
-                weapon_counts[wid] = weapon_counts.get(wid, 0) + 1
-            elif wid not in uw_uids:
-                uid_no_upgrade.append(wid)
-
-        if weapon_counts or uid_no_upgrade:
-            bag_lines = []
-            for wid, cnt in weapon_counts.items():
-                entity = get_weapon_entity(user, wid)
-                if entity:
-                    stats_str = entity.fmt_stats().replace("• ", "").replace("\n", ", ")
-                    bag_lines.append(
-                        f"{entity.base_data['emoji']} `{wid}` **{entity.base_data['name']}** x{cnt}\n"
-                        f"  ↳ {_rarity_tier(entity.base_data['rarity'])}  |  {stats_str}"
-                    )
-            # FIX 5: render UID weapons that have no upgrade entry (were invisible before)
-            for wid in uid_no_upgrade:
-                entity = get_weapon_entity(user, wid)
-                if entity:
-                    bag_lines.append(
-                        f"{entity.base_data['emoji']} `{wid}` **{entity.base_data['name']}** _(chưa nâng cấp)_\n"
-                        f"  ↳ {_rarity_tier(entity.base_data['rarity'])}"
-                    )
+            # UID + lệnh nhanh
             embed.add_field(
-                name="<:Hamer:1495462570469888069> Kho vũ khí",
-                value="\n\n".join(bag_lines), inline=False,
+                name="🪪 UID",
+                value=f"`{weapon_id}`",
+                inline=False,
             )
-        else:
             embed.add_field(
-                name="<:Hamer:1495462570469888069> Kho vũ khí",
-                value="_Trống_", inline=False,
+                name="📋 Lệnh nhanh",
+                value=(
+                    f"`dtn weapon equip {weapon_id}`\n"
+                    f"`dtn weapon unequip <slot>`"
+                ),
+                inline=False,
             )
-
-        if user.get("upgraded_weapons"):
-            up_lines = []
-            for uw in user["upgraded_weapons"]:
-                entity = get_weapon_entity(user, uw["uid"])
-                if entity:
-                    max_lv = max(uw["effect_levels"].values()) if uw["effect_levels"] else 1
-                    up_lines.append(
-                        f"<:Effect:1495466103047061679> | {entity.fmt_name()} "
-                        f"`{uw['uid']}` _(max lv{max_lv}/30)_"
-                    )
-            if up_lines:
+            if w and w.get("rarity") != "special":
                 embed.add_field(
-                    name="<:3057:1495466091319918714> | Vũ Khí Nâng Cấp",
-                    value="\n".join(up_lines), inline=False,
+                    name="<:Key:1496098633395998740> Tỉ lệ crate",
+                    value=f"**{w['chance']}%**",
+                    inline=True,
+                )
+            embed.set_footer(text=f"UID: {weapon_id}")
+            return await ctx.send(embed=embed)
+
+        # ── dtn weapon (no args) — danh sách tất cả ─────────────────
+        equipped     = user.get("equipped", [None, None, None])
+        equipped_set = {w for w in equipped if w}
+        all_weapons  = list(equipped_set) + [
+            w for w in user.get("weapons", [])
+            if w not in equipped_set
+        ]
+
+        if not all_weapons:
+            return await ctx.send(
+                f"<:Hamer:1495462570469888069> **{ctx.author.display_name}** "
+                f"chưa có vũ khí nào."
+            )
+
+        # Build lines
+        lines = []
+        for wid in all_weapons:
+            lines.append(
+                self._weapon_line(
+                    wid, wi_map, equipped_set,
+                    get_base_id, get_weapon_by_id,
+                )
+            )
+
+        # Pagination — 5 weapon/trang
+        PAGE_SIZE   = 5
+        pages       = [lines[i:i+PAGE_SIZE] for i in range(0, len(lines), PAGE_SIZE)]
+        total_pages = len(pages)
+
+        def build_embed(page_idx: int) -> discord.Embed:
+            e = discord.Embed(
+                title=(
+                    f"<:Hamer:1495462570469888069> "
+                    f"Weapon của {ctx.author.display_name}"
+                ),
+                description="\n\n".join(pages[page_idx]),
+                color=0xE91E63,
+            )
+            e.set_footer(
+                text=(
+                    f"Trang {page_idx+1}/{total_pages}  │  "
+                    f"[E] = đang trang bị  │  "
+                    f"dtn weapon <uid> để xem chi tiết"
+                )
+            )
+            return e
+
+        if total_pages == 1:
+            return await ctx.send(embed=build_embed(0))
+
+        # Multi-page
+        class WeaponPages(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=60)
+                self.page = 0
+                self.message = None  # FIX 2: lưu message ref để disable khi timeout
+
+            async def on_timeout(self):  # FIX 2: disable buttons khi timeout
+                for child in self.children:
+                    child.disabled = True
+                try:
+                    await self.message.edit(view=self)
+                except Exception:
+                    pass
+
+            @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+            async def prev(self, interaction: discord.Interaction,
+                           button: discord.ui.Button):
+                if interaction.user.id != ctx.author.id:
+                    return await interaction.response.send_message(
+                        "Đây không phải danh sách của bạn.", ephemeral=True
+                    )  # FIX 2: ephemeral thay vì silent defer
+                self.page = (self.page - 1) % total_pages
+                await interaction.response.edit_message(
+                    embed=build_embed(self.page)
                 )
 
-        embed.set_footer(
-            text="dtn weapon <id>  │  dtn weapon equip <id>  │  dtn upgrade <uid> <effect>"
-        )
-        await ctx.send(embed=embed)
+            @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+            async def next(self, interaction: discord.Interaction,
+                           button: discord.ui.Button):
+                if interaction.user.id != ctx.author.id:
+                    return await interaction.response.send_message(
+                        "Đây không phải danh sách của bạn.", ephemeral=True
+                    )  # FIX 2: ephemeral thay vì silent defer
+                self.page = (self.page + 1) % total_pages
+                await interaction.response.edit_message(
+                    embed=build_embed(self.page)
+                )
 
+        view = WeaponPages()  # FIX 2: lưu view để gán message ref
+        view.message = await ctx.send(embed=build_embed(0), view=view)
+
+    # ─────────────────────────────────────────────────────────
+    # EQUIP
+    # ─────────────────────────────────────────────────────────
     @weapon.command(name="equip")
     async def weapon_equip(self, ctx, weapon_id: str, slot: int = None):
-        from rpg_core import equip_weapon, unequip_weapon, WeaponID
+        from rpg_core import equip_weapon, WeaponID
         from rpg_quest import add_quest_progress
         from rpg_database import get_user, save_user
 
-        uid  = str(ctx.author.id)
-        user, upgraded = get_user(uid)
+        author_uid = str(ctx.author.id)
+        user, _    = get_user(author_uid)
 
-        # ── Resolve base_id (dùng WeaponID.parse() — KHÔNG dùng .split("-")) ─
-        target_base_id, _ = WeaponID.parse(weapon_id)
-        w_new      = get_weapon_by_id(target_base_id)
-        new_rarity = w_new.get("rarity", "common") if w_new else "common"
+        base_id, _ = WeaponID.parse(weapon_id)
+        w_new      = get_weapon_by_id(base_id)
 
-        # ── Upgrade-based base_id conflict validation ─────────────────────────
-        # Rule: An UPGRADED weapon (UID-based, has upgrade entry) must not share
-        #       base_id with ANY currently equipped weapon (upgraded or not).
-        #       A NON-UPGRADED weapon may stack freely UNLESS an upgraded weapon
-        #       with the same base_id is already equipped.
-        #       DO NOT compare UID — ONLY compare base_id.
-        new_is_upgraded = WeaponID.is_unique(weapon_id)
-        uw_uid_set: set[str] = {
-            uw["uid"] for uw in user.get("upgraded_weapons", [])
-            if isinstance(uw, dict) and "uid" in uw
-        }
-
-        for i, wid in enumerate(user.get("equipped", [])):
+        # Chặn equip trùng base_id
+        for i, wid in enumerate(user.get("equipped", []), 1):
             if wid is None:
                 continue
-            existing_base_id, _ = WeaponID.parse(str(wid))
-            if existing_base_id != target_base_id:
-                continue  # different base_id — no conflict possible
-
-            existing_is_upgraded = WeaponID.is_unique(str(wid)) and str(wid) in uw_uid_set
-
-            if new_is_upgraded:
-                # Upgraded weapon: any same-base_id equipped weapon → block
+            existing_base, _ = WeaponID.parse(str(wid))
+            if existing_base == base_id:
                 return await ctx.send(
-                    f"{ERR} | Vũ khí nâng cấp không thể trang bị cùng **base_id** với "
-                    f"vũ khí đang ở ô **[{i + 1}]** (`{wid}`)."
+                    f"{ERR} | Đã có **{w_new['name'] if w_new else base_id}** "
+                    f"ở ô [{i}]. Dùng `dtn weapon unequip {i}` trước."
                 )
-            else:
-                # Non-upgraded: only block if the conflicting slot holds an upgraded weapon
-                if existing_is_upgraded:
-                    return await ctx.send(
-                        f"{ERR} | Ô **[{i + 1}]** đã có vũ khí nâng cấp `{wid}` "
-                        f"cùng base_id — không thể trang bị thêm."
-                    )
 
         ok, msg = equip_weapon(user, weapon_id, slot)
         if ok:
-            save_user(uid, user, upgraded)
-            # Dùng WeaponID.parse() — KHÔNG dùng .split("-")
-            base_id, _ = WeaponID.parse(weapon_id)
-            w         = get_weapon_by_id(base_id)
-            name      = w["name"] if w else weapon_id
+            if not save_user(author_uid, user):  # FIX 3: check return value
+                return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu. Thử lại.")
             slot_used = next(
-                (i + 1 for i, wid in enumerate(user["equipped"]) if wid == weapon_id), "?",
+                (i+1 for i, wid in enumerate(user["equipped"])
+                 if wid == weapon_id), "?"
             )
+            name = w_new["name"] if w_new else weapon_id
             add_quest_progress(ctx.author.id, "weapons_equipped")
-            await ctx.send(f"{OK} | Đã trang bị **{name}** vào ô **[{slot_used}]**.")
+            await ctx.send(
+                f"{OK} | Đã trang bị **{name}** vào ô **[{slot_used}]**.\n"
+                f"-# `{weapon_id}`"
+            )
         else:
             await ctx.send(f"{ERR} | {msg}")
 
+    # ─────────────────────────────────────────────────────────
+    # UNEQUIP
+    # ─────────────────────────────────────────────────────────
     @weapon.command(name="unequip")
     async def weapon_unequip(self, ctx, slot: int):
         from rpg_core import unequip_weapon, WeaponID
         from rpg_database import get_user, save_user
 
-        uid  = str(ctx.author.id)
-        user, upgraded = get_user(uid)
+        author_uid = str(ctx.author.id)
+        user, _    = get_user(author_uid)
 
         ok, result = unequip_weapon(user, slot)
         if ok:
-            save_user(uid, user, upgraded)
-            # Dùng WeaponID.parse() — KHÔNG dùng .split("-")
+            if not save_user(author_uid, user):  # FIX 3: check return value
+                return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu. Thử lại.")
             base_id, _ = WeaponID.parse(result)
             w    = get_weapon_by_id(base_id)
             name = w["name"] if w else result
-            await ctx.send(f"{OK} | Đã bỏ trang bị ô **[{slot}]**: trả **{name}** về kho.")
+            await ctx.send(
+                f"{OK} | Đã bỏ trang bị ô **[{slot}]**: "
+                f"**{name}** về kho.\n-# `{result}`"
+            )
         else:
             await ctx.send(f"{ERR} | {result}")
 
+    # ─────────────────────────────────────────────────────────
+    # GIVE WEAPON (admin)
+    # ─────────────────────────────────────────────────────────
     @commands.command(name="givew")
     @commands.is_owner()
     async def give_weapon(self, ctx, member: discord.Member, weapon_id: str):
-        """
-        Admin command: dtn givew @user <base_weapon_id>
-
-        Gives a stack weapon (base_id). The recipient can enchant it to get a UID.
-        Per project rule: only rpg_enchant is allowed to call make_unique=True.
-        """
         from rpg_core import add_weapon, get_weapon_entity
         from rpg_database import get_user, save_user
 
-        # ── 1. Validate weapon exists in the database ─────────────────────────
         w = get_weapon_by_id(weapon_id)
         if not w:
-            return await ctx.send(f"{ERR} | Không tìm thấy vũ khí ID `{weapon_id}`.")
+            return await ctx.send(
+                f"{ERR} | Không tìm thấy vũ khí ID `{weapon_id}`."
+            )
 
-        # ── 2. Load user data ─────────────────────────────────────────────────
-        user, upgraded = get_user(str(member.id))
+        user, _ = get_user(str(member.id))
+        new_uid = add_weapon(user, weapon_id)
+        save_user(str(member.id), user)
 
-        # ── 3. Add weapon to bag (stack weapon — admin gives base_id) ─────────
-        new_id = add_weapon(user, weapon_id)
-
-        # ── 4. Persist ────────────────────────────────────────────────────────
-        save_user(str(member.id), user, upgraded)
-
-        # ── 5. Build display via WeaponEntity — single source of truth ────────
-        entity       = get_weapon_entity(user, new_id)
+        entity       = get_weapon_entity(user, new_uid)
         rarity_color = RARITY_COLOR.get(w.get("rarity", "common"), 0xFFFFFF)
-
-        display_name = entity.fmt_name() if entity else f"`{new_id}`"
+        display_name = entity.fmt_name() if entity else f"`{new_uid}`"
         stats_value  = entity.fmt_stats() if entity else "—"
 
-        # ── 6. Build confirmation embed ───────────────────────────────────────
         embed = discord.Embed(
-            title=f"{OK} | Xác nhận trao tặng vũ khí",
+            title=f"{OK} | Trao tặng vũ khí",
             description=(
-                f"**Creator** đã trao tặng cho {member.mention} vũ khí:\n"
+                f"**Creator** đã trao cho {member.mention}:\n"
                 f"{display_name}"
             ),
             color=rarity_color,
         )
         embed.add_field(
-            name="<:Effect:1495466103047061679> | Chỉ số",
+            name="<:Effect:1495466103047061679> Chỉ số",
             value=stats_value,
             inline=False,
         )
@@ -905,98 +906,61 @@ class RPGWeapon(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="<:Key:1496098633395998740> | Độ hiếm",
+            name="<:Key:1496098633395998740> Độ hiếm",
             value=_rarity_tier(w.get("rarity", "common")),
             inline=True,
         )
         embed.add_field(
-            name=f"{COIN_EMOJI} Giá trị",
-            value=f"**{w.get('min', 0):,}**",
-            inline=True,
-        )
-        embed.add_field(
-            name="📋 ID (tap để copy)",
-            value=(
-                f"**ID:** `{new_id}`\n"
-                f"**Người nhận:** `{member.id}`"
-            ),
+            name="🪪 UID",
+            value=f"`{new_uid}`",
             inline=False,
         )
-        embed.set_footer(text=f"Trao tặng bởi {ctx.author} | Identity Layer v5.5")
-
+        embed.set_footer(text=f"Trao bởi {ctx.author}")
         await ctx.send(embed=embed)
+
+    # ─────────────────────────────────────────────────────────
+    # WID — danh sách text để copy ID
+    # ─────────────────────────────────────────────────────────
     @commands.command(name="wid")
     async def weapon_id_list(self, ctx):
-        """
-        Hiển thị danh sách vũ khí dưới dạng text thuần để dễ copy ID.
-        """
-        from rpg_core import get_weapon_entity
+        from rpg_core import get_base_id
         from rpg_database import get_user
-        
-        uid  = str(ctx.author.id)
-        user, upgraded = get_user(uid)
-        
-        lines = []
-        lines.append(f"**=== DANH SÁCH VŨ KHÍ CỦA {ctx.author.display_name.upper()} ===**")
-        
-        # 1. Phần đang trang bị
-        lines.append("\n**[ ĐANG TRANG BỊ ]**")
-        equipped = user.get("equipped", [])
-        for i, wid in enumerate(equipped):
-            slot_num = i + 1
-            if not wid:
-                lines.append(f"Slot {slot_num}: (Trống)")
-                continue
-            
-            entity = get_weapon_entity(user, wid)
-            if entity:
-                # Lấy level cao nhất của các effect (nếu có)
-                uw_data = next((item for item in user.get("upgraded_weapons", []) if item["uid"] == wid), None)
-                lv_str = f"| Lv.{max(uw_data['effect_levels'].values())}" if uw_data and uw_data.get("effect_levels") else ""
-                
-                lines.append(f"Slot {slot_num}: {entity.base_data['emoji']} **{entity.base_data['name']}** {lv_str}")
-                lines.append(f"`{wid}`") # Để ID ở dòng riêng cho dễ nhấn giữ copy
 
-        # 2. Kho vũ khí (Hàng nâng cấp - Upgraded)
-        upgraded = user.get("upgraded_weapons", [])
-        if upgraded:
-            lines.append("\n**[ VŨ KHÍ NÂNG CẤP ]**")
-            for uw in upgraded:
-                wid = uw["uid"]
-                entity = get_weapon_entity(user, wid)
-                if entity:
-                    lv = max(uw["effect_levels"].values()) if uw["effect_levels"] else 1
-                    stats = entity.fmt_stats().replace('\n', ', ')
-                    lines.append(f"● {entity.base_data['emoji']} **{entity.base_data['name']}** (Lv.{lv})")
-                    lines.append(f"ID: `{wid}`")
-                    lines.append(f"↳ *{stats}*")
+        author_uid = str(ctx.author.id)
+        user, _    = get_user(author_uid)
 
-        # 3. Kho vũ khí thường (Base items)
-        weapon_counts = {}
-        for wid in user.get("weapons", []):
-            # Chỉ đếm những món không phải unique ID (hàng thường)
-            if "-" not in str(wid):
-                weapon_counts[wid] = weapon_counts.get(wid, 0) + 1
-        
-        if weapon_counts:
-            lines.append("\n**[ KHO ĐỒ THƯỜNG ]**")
-            for wid, count in weapon_counts.items():
-                w_base = get_weapon_by_id(wid)
-                if w_base:
-                    lines.append(f"○ {w_base['emoji']} **{w_base['name']}** (x{count})")
-                    lines.append(f"ID: `{wid}`")
+        wi_map       = {
+            wi["uid"]: wi
+            for wi in user.get("weapon_instances", [])
+            if isinstance(wi, dict) and "uid" in wi
+        }
+        equipped     = user.get("equipped", [])
+        equipped_set = {w for w in equipped if w}
 
-        # Phân trang nếu text quá dài (Discord giới hạn 2000 ký tự)
-        full_text = "\n".join(lines)
-        if len(full_text) > 1900:
-            # Chia đôi nếu cần, hoặc gửi thành các đoạn nhỏ
-            parts = [full_text[i:i+1900] for i in range(0, len(full_text), 1900)]
-            for part in parts:
-                await ctx.send(part)
+        lines = [f"**=== VŨ KHÍ CỦA {ctx.author.display_name.upper()} ===**"]
+
+        all_weapons = list(equipped_set) + [
+            w for w in user.get("weapons", []) if w not in equipped_set
+        ]
+
+        if not all_weapons:
+            lines.append("_(Không có vũ khí)_")
         else:
-            await ctx.send(full_text)
+            for wid in all_weapons:
+                base_id = get_base_id(str(wid)) or str(wid)
+                w       = get_weapon_by_id(base_id)
+                nm      = w["name"]  if w else base_id
+                em      = w["emoji"] if w else "⚔️"
+                wi      = wi_map.get(wid)
+                lv      = wi.get("level", 1) if wi else 1
+                eq_tag  = " [EQUIPPED]" if wid in equipped_set else ""
+                lines.append(f"{em} **{nm}** Lv{lv}{eq_tag}")
+                lines.append(f"`{wid}`")
 
-
+        full_text = "\n".join(lines)
+        parts = [full_text[i:i+1900] for i in range(0, len(full_text), 1900)]
+        for part in parts:
+            await ctx.send(part)
 
 
 # ═══════════════════════════════════════════════════════════

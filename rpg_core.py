@@ -298,10 +298,13 @@ class WeaponEntity:
                        None is the normal state for unupgraded weapons — it is NOT an error.
     """
 
-    def __init__(self, uid: str, base_data: dict, upgrade_data: dict | None):
-        self.uid          = uid
-        self.base_data    = base_data
-        self.upgrade_data = upgrade_data
+    def __init__(self, uid: str, base_data: dict,
+                 upgrade_data: dict | None = None,
+                 instance_data: dict | None = None):
+        self.uid           = uid
+        self.base_data     = base_data
+        self.upgrade_data  = upgrade_data   # backward compat, sẽ bỏ dần
+        self.instance_data = instance_data  # hệ thống mới
 
     # ── Display helpers ────────────────────────────────────────────────────────
 
@@ -322,31 +325,21 @@ class WeaponEntity:
         if not effects:
             return "Không có hiệu ứng."
 
-        eff_levels: dict = {}
-        if self.upgrade_data:
-            eff_levels = self.upgrade_data.get("effect_levels", {})
+        wi_level = 1
+        if self.instance_data:
+            wi_level = max(1, min(50, self.instance_data.get("level", 1)))
 
         lines = []
         for k, bv in effects.items():
-            lv = eff_levels.get(k, 1)
-
-            if self.upgrade_data and lv > 1:
-                try:
-                    v = bv * (0.60 + (lv - 1) * 0.02857)
-                except Exception:
-                    v = bv
-            else:
-                v = bv
-
-            lv_tag = f" _(lv{lv})_" if lv > 1 else ""
-
+            if not isinstance(bv, (int, float)):
+                lines.append(f"• `{k}`: {bv}")
+                continue
+            v      = bv * (0.60 + (wi_level - 1) * 0.02857)
+            lv_tag = f" _(lv{wi_level})_" if wi_level > 1 else ""
             if k == "extra_slot":
                 lines.append(f"• `{k}`: +{int(v)} ô{lv_tag}")
-            elif isinstance(v, float):
-                lines.append(f"• `{k}`: +{round(v * 100, 1)}%{lv_tag}")
             else:
-                lines.append(f"• `{k}`: {v}{lv_tag}")
-
+                lines.append(f"• `{k}`: +{round(v * 100, 1)}%{lv_tag}")
         return "\n".join(lines)
 
     def get_price(self) -> int:
@@ -412,6 +405,13 @@ class WeaponEntity:
             title = f"{emoji} **{name}**"
             desc  = f"{label}  |  ID: `{self.uid}`"
 
+        wi_level = 1
+        if self.instance_data:
+            wi_level = max(1, min(50, self.instance_data.get("level", 1)))
+
+        if wi_level > 1:
+            title = f"{title} <:Effect:1495466103047061679> _(Lv{wi_level}/50)_"
+
         _COIN = "<:Coin:1495831576397742241>"
         embed = _discord.Embed(title=title, description=desc, color=color)
         embed.add_field(
@@ -468,7 +468,15 @@ def get_weapon_entity(user: dict, uid: str) -> "WeaponEntity | None":
     }
     upgrade_data = upgraded_dict.get(uid)
 
-    return WeaponEntity(uid, base_data, upgrade_data)
+    wi_map = {
+        wi["uid"]: wi
+        for wi in user.get("weapon_instances", [])
+        if isinstance(wi, dict) and "uid" in wi
+    }
+    instance_data = wi_map.get(uid)
+
+    return WeaponEntity(uid, base_data, upgrade_data,
+                        instance_data=instance_data)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -959,6 +967,25 @@ def _validate_user(user_data: dict) -> dict:
     if not isinstance(user_data.get("hunt_log"), list):
         user_data["hunt_log"] = []
 
+    # ── weapon_instances → list[dict] với 'uid' + 'base_id' ──────────────────
+    raw_wi = user_data.get("weapon_instances")
+    if not isinstance(raw_wi, list):
+        logger.warning(
+            "[VALIDATE] uid=%s: 'weapon_instances' không phải list → reset []", uid
+        )
+        user_data["weapon_instances"] = []
+    else:
+        valid_wi = [
+            e for e in raw_wi
+            if isinstance(e, dict) and "uid" in e and "base_id" in e
+        ]
+        if len(valid_wi) != len(raw_wi):
+            logger.warning(
+                "[VALIDATE] uid=%s: loại bỏ %d weapon_instance không hợp lệ",
+                uid, len(raw_wi) - len(valid_wi),
+            )
+        user_data["weapon_instances"] = valid_wi
+
     return user_data
 
 
@@ -1112,7 +1139,7 @@ async def save_data(data: dict, user_id=None) -> bool:
 
     async with _data_lock:   # Một save tại một thời điểm — tránh torn writes
         try:
-            _with_retry(save_core_data, uid_str, user_data, global_uw)
+            _with_retry(save_core_data, uid_str, user_data)
             logger.debug("[SAVE] ✅ uid=%s lưu thành công.", uid_str)
 
             # Commit RAM snapshot sau khi DB xác nhận
@@ -1224,6 +1251,25 @@ def get_user(uid, data: dict) -> dict:
     _salvage_passives(user, uid)
     _salvage_hunt_log(user, uid)
 
+    if not isinstance(user.get("weapon_instances"), list):
+        user["weapon_instances"] = []
+    else:
+        user["weapon_instances"] = [
+            wi for wi in user["weapon_instances"]
+            if isinstance(wi, dict)
+            and "uid" in wi
+            and "base_id" in wi
+        ]
+
+    # Gọi migration để đảm bảo weapon_instances nhất quán
+    # (phòng trường hợp file cũ vẫn dùng load_data → get_user pattern)
+    from rpg_database import (
+        migrate_upgraded_weapons,
+        migrate_all_weapons_to_uid,
+    )
+    migrate_upgraded_weapons(user)
+    migrate_all_weapons_to_uid(user)
+
     return user
 
 
@@ -1250,7 +1296,7 @@ def remove_item(user: dict, item_id: str, amount: int = 1) -> bool:
 #  v5.5: add_weapon — FIXED (was appending raw base ID; now generates proper UID)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def add_weapon(user: dict, base_id: str, make_unique: bool = False) -> str:
+def add_weapon(user: dict, base_id: str, make_unique: bool = True) -> str:
     """
     Add a weapon to the bag.
 
@@ -1291,6 +1337,20 @@ def add_weapon(user: dict, base_id: str, make_unique: bool = False) -> str:
         new_uid = f"{base_id}-{suffix}"
 
     user["weapons"].append(new_uid)
+
+    existing_wi_uids = {
+        wi["uid"] for wi in user.get("weapon_instances", [])
+        if isinstance(wi, dict) and "uid" in wi
+    }
+    if new_uid not in existing_wi_uids:
+        user.setdefault("weapon_instances", []).append({
+            "uid":         new_uid,
+            "base_id":     get_base_id(new_uid) or base_id,
+            "level":       1,
+            "exp":         0,
+            "exp_to_next": 120,
+        })
+
     return new_uid
 
 

@@ -31,7 +31,7 @@ from rpg_core import (
 from rpg_database import get_user, save_user, calc_hunt_exp, grant_weapon_exp
 from rpg_addon import parse_effects_upgraded
 from rpg_quest import add_quest_progress
-from cash import get_balance, update_balance_safe
+from cash import update_balance_safe
 
 # ─────────────────────────────────────────────────────────
 # COSMETICS
@@ -130,7 +130,7 @@ def _equipped_display(equipped: list, user: dict | None = None) -> str:
             lines.append(f"  `[{i}]` — trống")
         elif wid in wi_map:
             wi = wi_map[wid]
-            w  = get_weapon_by_id(wi["base_id"])
+            w  = get_weapon_by_id(wi.get("base_id", ""))
             nm = w["name"]  if w else wid
             em = w["emoji"] if w else "⚔️"
             lv = wi.get("level", 1)
@@ -147,12 +147,25 @@ def _equipped_display(equipped: list, user: dict | None = None) -> str:
 
 def _grant_exp_to_equipped(user: dict, found: list, equipped: list) -> None:
     """
-    Tính EXP từ items tìm được, chia đều cho tất cả equipped weapon có UID.
-    Base weapon (không có dấu "-") không nhận EXP.
-    Mutate user["weapon_instances"] in-place. Không trả về gì.
+    Grant EXP cho tất cả weapon đang equipped.
+    Toàn bộ equipped đã là UID (đảm bảo bởi migrate_all_weapons_to_uid).
+    Chỉ grant cho UID có dấu "-".
+    Mutate user in-place. Không trả về gì.
     """
-    active = [w for w in equipped if w is not None and "-" in str(w)]
-    if not active or not found:
+    if not found:
+        return
+
+    # FIX 1: dùng param equipped thay vì user.get("equipped", [])
+    active = []
+    for w in equipped:
+        if w is None:
+            continue
+        if "-" not in str(w):
+            print(f"⚠️  equipped weapon '{w}' is not a UID — skipping EXP")
+            continue
+        active.append(w)
+
+    if not active:
         return
 
     total_exp = calc_hunt_exp(found)
@@ -187,7 +200,7 @@ class RPGHunt(commands.Cog):
                 user, _    = get_user(uid)
             except Exception as e:
                 await ctx.send(f"{ERR} | Failed to get user data: `{e}`")
-                raise e
+                return
 
             try:
                 equipped = user.get("equipped", [])
@@ -196,7 +209,7 @@ class RPGHunt(commands.Cog):
                     user["equipped"] = equipped
             except Exception as e:
                 await ctx.send(f"{ERR} | Invalid equipped weapons data: `{e}`")
-                raise e
+                return
 
             # ─────────────────────────────────────────────────────────
             # COOLDOWN CHECK
@@ -216,7 +229,7 @@ class RPGHunt(commands.Cog):
                     return await ctx.send(f"{ERR} | Hồi chiêu còn **{remaining}s**.")
             except Exception as e:
                 await ctx.send(f"{ERR} | Failed to check cooldown: `{e}`")
-                raise e
+                return
 
             # ─────────────────────────────────────────────────────────
             # PARSE EFFECTS & ROLL ITEMS
@@ -231,7 +244,7 @@ class RPGHunt(commands.Cog):
                 found = roll_hunt_items(equipped, user)
             except Exception as e:
                 await ctx.send(f"{ERR} | Failed to roll hunt items: `{e}`")
-                raise e
+                return
 
             try:
                 if found:
@@ -303,7 +316,7 @@ class RPGHunt(commands.Cog):
 
             except Exception as e:
                 await ctx.send(f"{ERR} | Failed to build response: `{e}`")
-                raise e
+                return
 
             # ─────────────────────────────────────────────────────────
             # UPDATE HUNT LOG & COOLDOWN
@@ -376,10 +389,10 @@ class RPGHunt(commands.Cog):
                 ok = save_user(uid, user)
                 if not ok:
                     await ctx.send(f"{ERR} | Failed to save data.")
-                    raise RuntimeError("save_user returned False")
+                    return
             except Exception as e:
                 await ctx.send(f"{ERR} | Failed to save data: `{e}`")
-                raise e
+                return
 
             # ─────────────────────────────────────────────────────────
             # UPDATE QUEST PROGRESS
@@ -404,7 +417,7 @@ class RPGHunt(commands.Cog):
                 await ctx.send(embed=embed)
             except Exception as e:
                 await ctx.send(f"{ERR} | Failed to send response: `{e}`")
-                raise e
+                return
 
             # Gửi tin nhắn bonus RIÊNG (không dính vào embed)
             if bonus_msg:
@@ -419,7 +432,6 @@ class RPGHunt(commands.Cog):
                 await ctx.send(f"❌ **Critical Error**: `{e}`\nPlease contact the bot owner.")
             except Exception as send_err:
                 print(f"❌ Failed to send error message: {send_err}")
-            raise e
 
     @hunt.command(name="log")
     async def hunt_log(self, ctx, amount: int = 10):
@@ -462,7 +474,6 @@ class RPGHunt(commands.Cog):
         except Exception as e:
             print(f"❌ Error in hunt_log: {type(e).__name__}: {e}")
             await ctx.send(f"❌ Error: `{e}`")
-            raise e
 
     @hunt.command(name="bonus")
     async def hunt_bonus(self, ctx):
@@ -472,11 +483,21 @@ class RPGHunt(commands.Cog):
             user, _    = get_user(uid)
             now  = int(time.time())
 
-            bonus        = _get_bonus_data(user, now)
+            # FIX 3: dùng lại _get_bonus_data() thay vì duplicate reset logic
+            old_reset  = user.get("hunt_bonus", {}).get("reset_at", 0)
+            bonus      = _get_bonus_data(user, now)
+            needs_save = (bonus["reset_at"] != old_reset)
+
             remaining    = BONUS_MAX - bonus["count"]
             reset_in_sec = max(0, bonus["reset_at"] - now)
             h, rem       = divmod(reset_in_sec, 3600)
             m            = rem // 60
+
+            if needs_save:
+                try:
+                    save_user(uid, user)
+                except Exception as e:
+                    print(f"⚠️  Warning: hunt_bonus save failed: {e}")
 
             await ctx.send(
                 f"🎁 **Bonus hunt của {ctx.author.display_name}**\n"
@@ -487,7 +508,6 @@ class RPGHunt(commands.Cog):
         except Exception as e:
             print(f"❌ Error in hunt_bonus: {type(e).__name__}: {e}")
             await ctx.send(f"❌ Error: `{e}`")
-            raise e
 
 
 async def setup(bot):

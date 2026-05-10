@@ -8,6 +8,9 @@ từ database_helper (MongoDB).  Phần còn lại của hệ thống chỉ cầ
 gọi get_user() và save_user() — không cần biết gì về DB.
 """
 
+import copy
+import uuid as _uuid
+
 from database_helper import load_core_data, save_core_data
 from typing import Optional
 
@@ -96,6 +99,10 @@ def grant_weapon_exp(user: dict, uid: str, exp_amount: int) -> dict:
     if wi is None:
         return {"leveled_up": False, "old_level": 0, "new_level": 0, "uid": uid}
 
+    wi.setdefault("level", 1)
+    wi.setdefault("exp", 0)
+    wi.setdefault("exp_to_next", exp_to_next(wi["level"]))
+
     old_level = wi.get("level", 1)
     wi["exp"]  = wi.get("exp", 0) + exp_amount
 
@@ -142,7 +149,8 @@ def migrate_upgraded_weapons(user: dict) -> bool:
         if uid in existing_uids:
             continue
         eff_levels = entry.get("effect_levels", {})
-        level = max(eff_levels.values(), default=1) if eff_levels else 1
+        raw_values = [v for v in eff_levels.values() if isinstance(v, (int, float))]
+        level = int(max(raw_values)) if raw_values else 1
         level = min(max(1, level), WEAPON_LEVEL_CAP)
         user.setdefault("weapon_instances", []).append(
             make_weapon_instance(base_id, uid, level)
@@ -153,6 +161,71 @@ def migrate_upgraded_weapons(user: dict) -> bool:
     return True
 
 
+def migrate_all_weapons_to_uid(user: dict) -> bool:
+    """
+    Đảm bảo toàn bộ weapons[] và equipped[] đều là UID (có dấu "-").
+    Với mỗi bare base_id tìm thấy:
+      - Tạo UID mới (format: base_id-XXXXX)
+      - Tạo weapon_instance tương ứng
+      - Replace in-place
+    Trả về True nếu có thay đổi, False nếu không cần.
+    """
+    changed = False
+
+    # Thu thập tất cả UID đang tồn tại để tránh trùng
+    existing_uids: set[str] = set()
+    for w in user.get("weapons", []):
+        if isinstance(w, str) and "-" in w:
+            existing_uids.add(w)
+    for w in user.get("equipped", []):
+        if isinstance(w, str) and w and "-" in w:
+            existing_uids.add(w)
+    for wi in user.get("weapon_instances", []):
+        if isinstance(wi, dict) and "uid" in wi:
+            existing_uids.add(wi["uid"])
+
+    existing_wi_uids: set[str] = {
+        wi["uid"] for wi in user.get("weapon_instances", [])
+        if isinstance(wi, dict) and "uid" in wi
+    }
+
+    def _make_uid(base_id: str) -> str:
+        suffix = _uuid.uuid4().hex[:5].upper()
+        uid = f"{base_id}-{suffix}"
+        while uid in existing_uids:
+            suffix = _uuid.uuid4().hex[:5].upper()
+            uid = f"{base_id}-{suffix}"
+        existing_uids.add(uid)
+        return uid
+
+    def _ensure_instance(uid: str, base_id: str) -> None:
+        if uid not in existing_wi_uids:
+            user.setdefault("weapon_instances", []).append(
+                make_weapon_instance(base_id, uid, level=1)
+            )
+            existing_wi_uids.add(uid)
+
+    # Convert weapons[] (bag)
+    for i, wid in enumerate(user.get("weapons", [])):
+        if not isinstance(wid, str) or "-" in wid:
+            continue
+        new_uid = _make_uid(wid)
+        user["weapons"][i] = new_uid
+        _ensure_instance(new_uid, wid)
+        changed = True
+
+    # Convert equipped[]
+    for i, wid in enumerate(user.get("equipped", [])):
+        if not isinstance(wid, str) or not wid or "-" in wid:
+            continue
+        new_uid = _make_uid(wid)
+        user["equipped"][i] = new_uid
+        _ensure_instance(new_uid, wid)
+        changed = True
+
+    return changed
+
+
 # ─────────────────────────────────────────────
 #  USER ACCESS
 # ─────────────────────────────────────────────
@@ -161,7 +234,7 @@ def migrate_upgraded_weapons(user: dict) -> bool:
 _USER_DEFAULTS = {
     "inv":              {},
     "weapons":          [],
-    "equipped":         [],
+    "equipped":         [None, None, None],
     "cooldown":         0,
     "weapon_instances": [],
 }
@@ -188,9 +261,12 @@ def get_user(user_id) -> tuple[dict, list]:
     # Vá key còn thiếu (user cũ migrate từ JSON hoặc schema thay đổi)
     for key, default in _USER_DEFAULTS.items():
         if key not in user:
-            user[key] = default
+            user[key] = copy.deepcopy(default)
 
-    migrate_upgraded_weapons(user)
+    dirty  = migrate_upgraded_weapons(user)
+    dirty |= migrate_all_weapons_to_uid(user)
+    if dirty:
+        save_user(user_id, user)
 
     return user, upgraded_weapons
 
