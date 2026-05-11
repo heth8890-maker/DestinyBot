@@ -342,6 +342,7 @@ class RPGHunt(commands.Cog):
             # BONUS ROLL — crate hoặc coin (1 roll duy nhất)
             # ─────────────────────────────────────────────────────────
             bonus_msg = None  # tin nhắn sẽ gửi riêng sau embed
+            coins     = None  # set nếu bonus_type == "coin"
 
             try:
                 bonus      = _get_bonus_data(user, now)
@@ -367,7 +368,6 @@ class RPGHunt(commands.Cog):
 
                     elif bonus_type == "coin":
                         coins = random.randint(2000, 6500)
-                        await update_balance_safe(ctx.author.id, coins)
                         bonus["count"] += 1
 
                         remaining    = BONUS_MAX - bonus["count"]
@@ -393,6 +393,13 @@ class RPGHunt(commands.Cog):
             except Exception as e:
                 await ctx.send(f"{ERR} | Failed to save data: `{e}`")
                 return
+
+            # Cộng coin bonus SAU khi save_user để tránh bị ghi đè
+            if coins is not None:
+                try:
+                    await update_balance_safe(ctx.author.id, coins)
+                except Exception as e:
+                    print(f"⚠️  Warning: update_balance_safe (bonus coin) failed: {e}")
 
             # ─────────────────────────────────────────────────────────
             # UPDATE QUEST PROGRESS
