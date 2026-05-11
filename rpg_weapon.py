@@ -324,7 +324,6 @@ SPECIAL_WEAPONS = [
         "description": "Sự chi phối. +3 slot hunt, giảm 8% fail, +5% giá bán, +11% luck_up.",
         "min": 23000,
         "max": 27000,
-        "no_upgrade": True,
     },
     {
         "id": "247",
@@ -346,7 +345,6 @@ SPECIAL_WEAPONS = [
         "description": "Thống soái hoả linh. Năng lượng rực cháy tăng mạnh hiệu quả kinh tế và hunt.",
         "min": 50000,
         "max": 65000,
-        "no_upgrade": True, # Theo logic các món Special thường không nâng cấp
     },
     {
         "id": "5002",
@@ -358,7 +356,6 @@ SPECIAL_WEAPONS = [
         "description": "Cự nham hoả linh. Một bộ giáp linh hồn vững chãi giúp mở rộng khả năng chứa đựng.",
         "min": 45000,
         "max": 55000,
-        "no_upgrade": True,
     },
     {
         "id": "5003",
@@ -370,7 +367,6 @@ SPECIAL_WEAPONS = [
         "description": "Linh hoả ngút trời, phá thời hủy địa. Sức mạnh tuyệt đối để tìm kiếm bảo vật.",
         "min": 75000,
         "max": 90000,
-        "no_upgrade": True,
     },
 ]
 
@@ -1015,7 +1011,7 @@ class RPGWeapon(commands.Cog):
     # ─────────────────────────────────────────────────────────
     # EQUIP
     # ─────────────────────────────────────────────────────────
-    @weapon.command(name="equip")
+    @weapon.command(name="equip", aliases=["e","eq"])
     async def weapon_equip(self, ctx, weapon_id: str, slot: int = None):
         from rpg_core import equip_weapon, WeaponID
         from rpg_quest import add_quest_progress
@@ -1058,7 +1054,7 @@ class RPGWeapon(commands.Cog):
     # ─────────────────────────────────────────────────────────
     # UNEQUIP
     # ─────────────────────────────────────────────────────────
-    @weapon.command(name="unequip")
+    @weapon.command(name="unequip", aliases=["ue", "une"])
     async def weapon_unequip(self, ctx, slot: int):
         from rpg_core import unequip_weapon, WeaponID
         from rpg_database import get_user, save_user
@@ -1086,7 +1082,7 @@ class RPGWeapon(commands.Cog):
     #   dtn weapon sell <base_id> [<amount>|all]
     #   dtn weapon sell <rarity>  (vd: r, rare, legend, l, epic)
     # ─────────────────────────────────────────────────────────
-    @weapon.command(name="sell")
+    @weapon.command(name="sell", aliases=["s"])
     async def weapon_sell(self, ctx, arg1: str = None, arg2: str = None):
         from rpg_database import get_user, save_user
 
@@ -1318,7 +1314,7 @@ class RPGWeapon(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="📖 Mô tả",
+            name=" Mô tả",
             value=w.get("description", "—"),
             inline=False,
         )
@@ -1328,7 +1324,7 @@ class RPGWeapon(commands.Cog):
             inline=True,
         )
         embed.add_field(
-            name="🪪 UID",
+            name="UID",
             value=f"`{new_uid}`",
             inline=False,
         )
@@ -1383,7 +1379,7 @@ class RPGWeapon(commands.Cog):
     # PATCH C — DWI / DWE: Hiển thị 3 weapon đang equip
     #           + combined effects
     # ─────────────────────────────────────────────────────────
-    @commands.command(name="dwi", aliases=["dwe"])
+    @commands.command(name="wi", aliases=["we", "myw", "myweapon"])
     async def display_weapon_info(self, ctx):
         from rpg_core import get_base_id, get_weapon_entity
         from rpg_database import get_user
@@ -1419,7 +1415,7 @@ class RPGWeapon(commands.Cog):
             if not uid:
                 embed.add_field(
                     name=slot_header,
-                    value="🔲 None",
+                    value="`🔲 None`",
                     inline=False,
                 )
                 continue

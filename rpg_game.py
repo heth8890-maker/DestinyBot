@@ -458,7 +458,7 @@ class RPGSell(commands.Cog):
             f"→ nhận **{total:,}** {COIN_EMOJI}"
         )
 
-    @sell.command(name="weapon")
+    @sell.command(name="weapon", aliases=["w"])
     async def sell_weapon(self, ctx, weapon_arg: str, amount: str = "1"):
         """
         Bán vũ khí trong kho.
