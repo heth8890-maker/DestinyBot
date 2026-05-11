@@ -20,6 +20,14 @@ Không phụ thuộc vào bất kỳ module nào trong project.
   - FIX 3: _equipped_display else-branch resolves base_id before get_weapon_by_id
   - FIX 4: give_weapon double-await removed; new_uid → new_id (stack weapon)
   - FIX 5: RPGWeapon.weapon Cog bag display — uid_no_upgrade section added
+
+⚡ Thay đổi v4 (Bulk Sell + DWI):
+  - ★ PATCH A: Helpers — _EFFECT_LABEL, _EFFECT_INT_KEYS, _RARITY_ALIAS,
+               parse_rarity_alias, get_weapon_sell_price, get_sell_candidates,
+               build_bulk_sell_embed, calculate_combined_effects,
+               _fmt_effects_scaled, _fmt_combined_effects
+  - ★ PATCH B: weapon sell — bulk sell theo base_id hoặc rarity (có confirm View)
+  - ★ PATCH C: dwi/dwe — hiển thị 3 weapon equip + combined effects
 """
 
 import random
@@ -591,6 +599,215 @@ def _rarity_tier(rarity: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════
+# PATCH A — BULK SELL + DWI HELPERS
+# ═══════════════════════════════════════════════════════════
+
+# ── Effect key → nhãn hiển thị ──────────────────────────
+_EFFECT_LABEL: dict[str, str] = {
+    "sell_bonus":      "sell_bonus",
+    "extra_slot":      "extra_slot",
+    "rare_bias":       "rare_bias",
+    "luck_up":         "luck_up",
+    "reduce_fail":     "reduce_fail",
+    "reduce_cooldown": "reduce_cooldown",
+    "double_drop":     "double_drop",
+    "double_value":    "double_value",
+    "reduce_uncommon": "reduce_uncommon",
+    "passive_oneiroi": "passive_oneiroi",
+}
+
+# Effect dạng số nguyên — không scale, không format %
+_EFFECT_INT_KEYS: frozenset = frozenset({"extra_slot"})
+
+# ── Rarity alias map (1 nơi duy nhất, dùng cả T1 lẫn T2) ──
+_RARITY_ALIAS: dict[str, str] = {
+    "c": "common",    "co": "common",    "common": "common",
+    "u": "uncommon",  "uc": "uncommon",  "uncommon": "uncommon",
+    "r": "rare",      "ra": "rare",      "rare": "rare",
+    "e": "epic",      "ep": "epic",      "epic": "epic",
+    "l": "legendary", "le": "legendary", "lend": "legendary",
+    "legend": "legendary", "legendary": "legendary",
+    "m": "mythical",  "myth": "mythical", "mythical": "mythical",
+    "s": "special",   "sp": "special",   "special": "special",
+}
+
+
+def parse_rarity_alias(s: str) -> str | None:
+    """Alias → rarity chuẩn. Trả None nếu không hợp lệ."""
+    return _RARITY_ALIAS.get(s.lower().strip())
+
+
+def get_weapon_sell_price(base_id: str, level: int = 1) -> int:
+    """
+    Tính giá bán theo base_id + level.
+    Scale tuyến tính: min (Lv1) → max (Lv50).
+    """
+    w = get_weapon_by_id(base_id)
+    if not w:
+        return 0
+    min_p = w.get("min", 0)
+    max_p = w.get("max", min_p)
+    level = max(1, min(level, 50))
+    return int(min_p + (max_p - min_p) * (level - 1) / 49)
+
+
+def get_sell_candidates(
+    user: dict,
+    *,
+    base_id: str | None = None,
+    rarity:  str | None = None,
+) -> list[dict]:
+    """
+    Trả về danh sách weapon CÓ THỂ BÁN (không equip).
+    Filter bằng base_id hoặc rarity (không dùng cả hai).
+
+    Mỗi phần tử: {"uid", "base_id", "level", "rarity", "price", "name", "emoji"}
+    """
+    from rpg_core import get_base_id  # lazy import
+
+    equipped_set = {w for w in user.get("equipped", []) if w}
+    wi_map = {
+        wi["uid"]: wi
+        for wi in user.get("weapon_instances", [])
+        if isinstance(wi, dict) and "uid" in wi
+    }
+
+    def _norm_rarity(r: str) -> str:
+        """Coi "legend" và "legendary" là một."""
+        return "legendary" if r == "legend" else r
+
+    candidates = []
+    for uid in user.get("weapons", []):
+        if uid in equipped_set:
+            continue
+
+        b_id = get_base_id(str(uid)) or str(uid)
+        w    = get_weapon_by_id(b_id)
+        if not w:
+            continue
+
+        if base_id is not None and b_id != str(base_id):
+            continue
+
+        if rarity is not None:
+            if _norm_rarity(w.get("rarity", "common")) != _norm_rarity(rarity):
+                continue
+
+        wi    = wi_map.get(uid, {})
+        level = wi.get("level", 1)
+        candidates.append({
+            "uid":     uid,
+            "base_id": b_id,
+            "level":   level,
+            "rarity":  w.get("rarity", "common"),
+            "price":   get_weapon_sell_price(b_id, level),
+            "name":    w.get("name", b_id),
+            "emoji":   w.get("emoji", "⚔️"),
+        })
+
+    return candidates
+
+
+def build_bulk_sell_embed(
+    candidates: list[dict],
+    *,
+    title_extra: str = "",
+    color: int = 0xFFA500,
+) -> discord.Embed:
+    """
+    Embed preview danh sách weapon sắp bán.
+    Dùng chung cho bulk sell by base_id và by rarity.
+    Hiển thị tối đa 15 dòng để tránh vượt giới hạn Discord.
+    """
+    total   = sum(c["price"] for c in candidates)
+    display = candidates[:15]
+    hidden  = len(candidates) - len(display)
+
+    lines = []
+    for c in display:
+        rlabel = RARITY_LABEL.get(c["rarity"], c["rarity"])
+        lines.append(
+            f"{c['emoji']} **{c['name']}** │ Lv **{c['level']}** │ {rlabel}\n"
+            f"-# `{c['uid']}` │ **{c['price']:,}** {COIN_EMOJI}"
+        )
+
+    desc = "\n\n".join(lines)
+    if hidden > 0:
+        desc += f"\n\n-# _... và {hidden} weapon khác_"
+
+    embed = discord.Embed(
+        title=f"Xác nhận Bulk Sell{title_extra}",
+        description=desc,
+        color=color,
+    )
+    embed.add_field(name="Số lượng", value=f"**{len(candidates)}** weapon", inline=True)
+    embed.add_field(name=f"Tổng {COIN_EMOJI}", value=f"**{total:,}** coins", inline=True)
+    embed.set_footer(text="Hết hạn sau 30 giây")
+    return embed
+
+
+def calculate_combined_effects(
+    equipped_uids: list,
+    wi_map: dict,
+    get_base_id_fn,
+) -> dict[str, float | int]:
+    """
+    Tính tổng effect của tất cả weapon đang equip (có scale theo level).
+    - float effect: nhân scale = 0.60 + (level-1) * 0.02857
+    - int effect (extra_slot): cộng trực tiếp, không scale
+    """
+    combined: dict[str, float | int] = {}
+    for uid in equipped_uids:
+        if not uid:
+            continue
+        b_id    = get_base_id_fn(str(uid)) or str(uid)
+        w       = get_weapon_by_id(b_id)
+        if not w:
+            continue
+        effects = w.get("effects", {})
+        wi      = wi_map.get(uid, {})
+        level   = wi.get("level", 1)
+        scale   = round(0.60 + (level - 1) * 0.02857, 3)
+
+        for key, val in effects.items():
+            if key in _EFFECT_INT_KEYS:
+                combined[key] = int(combined.get(key, 0)) + int(val)
+            elif isinstance(val, (int, float)):
+                combined[key] = combined.get(key, 0.0) + float(val) * scale
+
+    return combined
+
+
+def _fmt_effects_scaled(effects: dict, level: int) -> list[str]:
+    """Format từng effect có scale theo level — dùng trong DWI cho từng weapon."""
+    scale = round(0.60 + (level - 1) * 0.02857, 3)
+    lines = []
+    for key, val in effects.items():
+        label = _EFFECT_LABEL.get(key, key)
+        if key in _EFFECT_INT_KEYS:
+            lines.append(f"-# {label}: **+{int(val)}**")
+        elif isinstance(val, float):
+            lines.append(f"-# {label}: **+{val * scale:.1%}**")
+        else:
+            lines.append(f"-# {label}: **+{val}**")
+    return lines
+
+
+def _fmt_combined_effects(combined: dict) -> list[str]:
+    """Format combined effects — style nhỏ, dùng cho phần cuối DWI."""
+    lines = []
+    for key, val in combined.items():
+        label = _EFFECT_LABEL.get(key, key)
+        if key in _EFFECT_INT_KEYS:
+            lines.append(f"-# {label}: **+{int(val)}**")
+        elif isinstance(val, float):
+            lines.append(f"-# {label}: **+{val:.1%}**")
+        else:
+            lines.append(f"-# {label}: **+{val}**")
+    return lines
+
+
+# ═══════════════════════════════════════════════════════════
 # COG: WEAPON
 # ═══════════════════════════════════════════════════════════
 
@@ -654,7 +871,7 @@ class RPGWeapon(commands.Cog):
                     equip_status = f"Ô **[{i}]**"
                     break
             embed.add_field(
-                name="🗂️ Trạng thái",
+                name="️ Trạng thái",
                 value=equip_status,
                 inline=True,
             )
@@ -671,23 +888,23 @@ class RPGWeapon(commands.Cog):
                 scale    = round(0.60 + (level - 1) * 0.02857, 3)
                 cap_note = " _(Max!)_" if level >= 50 else ""
                 embed.add_field(
-                    name="📈 Level & EXP",
+                    name=" Level & EXP",
                     value=(
                         f"**Lv {level}** / 50{cap_note}\n"
                         f"`{bar}` {exp:,} / {exp_next:,} ({pct}%)\n"
-                        f"⚡ Effect: **{scale:.0%}** base"
+                        f"Effect: **{scale:.0%}** base"
                     ),
                     inline=False,
                 )
 
             # UID + lệnh nhanh
             embed.add_field(
-                name="🪪 UID",
+                name=" UID",
                 value=f"`{weapon_id}`",
                 inline=False,
             )
             embed.add_field(
-                name="📋 Lệnh nhanh",
+                name=" Lệnh nhanh",
                 value=(
                     f"`dtn weapon equip {weapon_id}`\n"
                     f"`dtn weapon unequip <slot>`"
@@ -728,7 +945,7 @@ class RPGWeapon(commands.Cog):
             )
 
         # Pagination — 5 weapon/trang
-        PAGE_SIZE   = 5
+        PAGE_SIZE   = 16
         pages       = [lines[i:i+PAGE_SIZE] for i in range(0, len(lines), PAGE_SIZE)]
         total_pages = len(pages)
 
@@ -864,6 +1081,206 @@ class RPGWeapon(commands.Cog):
             await ctx.send(f"{ERR} | {result}")
 
     # ─────────────────────────────────────────────────────────
+    # PATCH B — SELL: Bulk sell theo base_id hoặc rarity
+    # Cú pháp:
+    #   dtn weapon sell <base_id> [<amount>|all]
+    #   dtn weapon sell <rarity>  (vd: r, rare, legend, l, epic)
+    # ─────────────────────────────────────────────────────────
+    @weapon.command(name="sell")
+    async def weapon_sell(self, ctx, arg1: str = None, arg2: str = None):
+        from rpg_database import get_user, save_user
+
+        if arg1 is None:
+            return await ctx.send(
+                f"{ERR} | **Cú pháp:**\n"
+                f"`dtn weapon sell <base_id> <số lượng|all>`\n"
+                f"`dtn weapon sell <rarity>`  _(vd: r, rare, legend, l, epic)_"
+            )
+
+        author_uid = str(ctx.author.id)
+        user, _    = get_user(author_uid)
+
+        # ── Parse loại sell ──────────────────────────────────
+        rarity_target  = None
+        base_id_target = None
+        amount         = None   # None = bán tất cả
+
+        parsed_rarity = parse_rarity_alias(arg1)
+
+        if parsed_rarity:
+            # Sell by rarity — không nhận arg2
+            rarity_target = parsed_rarity
+            if arg2 is not None:
+                return await ctx.send(
+                    f"{ERR} | Sell theo rarity không cần thêm tham số. "
+                    f"Dùng `dtn weapon sell {arg1}`."
+                )
+
+        elif arg1.isdigit():
+            # Sell by base_id
+            base_id_target = arg1
+            if arg2 is None or arg2.lower() == "all":
+                amount = None
+            elif arg2.isdigit() and int(arg2) > 0:
+                amount = int(arg2)
+            else:
+                return await ctx.send(
+                    f"{ERR} | Số lượng không hợp lệ: `{arg2}`.\n"
+                    f"Dùng số nguyên dương hoặc `all`."
+                )
+
+        else:
+            return await ctx.send(
+                f"{ERR} | Không nhận ra `{arg1}`.\n"
+                f"Nhập **base_id** _(vd: `463`)_ hoặc "
+                f"**rarity** _(vd: `rare`, `r`, `legend`)_."
+            )
+
+        # ── Lấy candidates (1 lần duy nhất) ─────────────────
+        candidates = get_sell_candidates(
+            user,
+            base_id=base_id_target,
+            rarity=rarity_target,
+        )
+
+        # ── Safety checks ─────────────────────────────────────
+        if not candidates:
+            if base_id_target:
+                w_info = get_weapon_by_id(base_id_target)
+                nm = w_info["name"] if w_info else base_id_target
+                return await ctx.send(
+                    f"{ERR} | Không có **{nm}** (`{base_id_target}`) nào có thể bán.\n"
+                    f"-# _(Có thể đang equip hết hoặc chưa có trong kho)_"
+                )
+            rlabel = RARITY_LABEL.get(rarity_target, rarity_target)
+            return await ctx.send(
+                f"{ERR} | Không có weapon **{rlabel}** nào có thể bán."
+            )
+
+        # Sort: level thấp → cao, tie-break random
+        candidates.sort(key=lambda c: (c["level"], random.random()))
+
+        if amount is not None:
+            if amount > len(candidates):
+                return await ctx.send(
+                    f"{ERR} | Chỉ có **{len(candidates)}** weapon hợp lệ, "
+                    f"không đủ **{amount}** để bán."
+                )
+            candidates = candidates[:amount]
+
+        # ── Build embed preview ──────────────────────────────
+        if base_id_target:
+            w_info   = get_weapon_by_id(base_id_target)
+            nm       = w_info["name"] if w_info else base_id_target
+            color    = RARITY_COLOR.get(
+                w_info.get("rarity", "common"), 0xFFA500
+            ) if w_info else 0xFFA500
+            title_ex = f"\n{nm} (ID: {base_id_target})"
+        else:
+            color    = RARITY_COLOR.get(rarity_target, 0xFFA500)
+            title_ex = f"\n{RARITY_LABEL.get(rarity_target, rarity_target)}"
+
+        embed = build_bulk_sell_embed(candidates, title_extra=title_ex, color=color)
+
+        # ── Confirm View ──────────────────────────────────────
+        class ConfirmSellView(discord.ui.View):
+            def __init__(self_v):
+                super().__init__(timeout=30)
+                self_v.confirmed = None
+                self_v.message   = None
+
+            async def on_timeout(self_v):
+                for child in self_v.children:
+                    child.disabled = True
+                try:
+                    await self_v.message.edit(
+                        content="⏰ Hết thời gian — đã huỷ.",
+                        embed=None, view=self_v,
+                    )
+                except Exception:
+                    pass
+
+            @discord.ui.button(
+                emoji=discord.PartialEmoji.from_str("<:Tick:1495466684520206528>"),
+                label="Xác nhận",
+                style=discord.ButtonStyle.success,
+            )
+            async def btn_confirm(self_v, interaction: discord.Interaction, _btn):
+                if interaction.user.id != ctx.author.id:
+                    return await interaction.response.send_message(
+                        "Đây không phải lệnh của bạn.", ephemeral=True
+                    )
+                self_v.confirmed = True
+                self_v.stop()
+                await interaction.response.defer()
+
+            @discord.ui.button(
+                emoji=discord.PartialEmoji.from_str("<:X_:1495466670616219819>"),
+                label="Huỷ",
+                style=discord.ButtonStyle.danger,
+            )
+            async def btn_cancel(self_v, interaction: discord.Interaction, _btn):
+                if interaction.user.id != ctx.author.id:
+                    return await interaction.response.send_message(
+                        "Đây không phải lệnh của bạn.", ephemeral=True
+                    )
+                self_v.confirmed = False
+                self_v.stop()
+                await interaction.response.defer()
+
+        view         = ConfirmSellView()
+        view.message = await ctx.send(embed=embed, view=view)
+        await view.wait()
+
+        # ── Huỷ ──────────────────────────────────────────────
+        if not view.confirmed:
+            for child in view.children:
+                child.disabled = True
+            return await view.message.edit(
+                content=f"{ERR} | Đã huỷ bán.", embed=None, view=view,
+            )
+
+        # ── Thực hiện bán (re-fetch tránh race condition) ─────
+        user, _ = get_user(author_uid)
+
+        current_bag = set(user.get("weapons", []))
+        sold_uids   = {c["uid"] for c in candidates if c["uid"] in current_bag}
+
+        if not sold_uids:
+            return await view.message.edit(
+                content=f"{ERR} | Weapon đã không còn trong kho.",
+                embed=None, view=None,
+            )
+
+        actual_total = sum(c["price"] for c in candidates if c["uid"] in sold_uids)
+
+        user["weapons"] = [
+            w for w in user.get("weapons", []) if w not in sold_uids
+        ]
+        user["weapon_instances"] = [
+            wi for wi in user.get("weapon_instances", [])
+            if not (isinstance(wi, dict) and wi.get("uid") in sold_uids)
+        ]
+        user["cash"] = user.get("cash", 0) + actual_total
+
+        if not save_user(author_uid, user):
+            return await view.message.edit(
+                content=f"{ERR} | Lỗi lưu dữ liệu — không có gì bị bán.",
+                embed=None, view=None,
+            )
+
+        for child in view.children:
+            child.disabled = True
+
+        await view.message.edit(
+            content=(
+                f"{OK} | Đã bán **{len(sold_uids)}** weapon "
+                f"— nhận **{actual_total:,}** {COIN_EMOJI}"
+            ),
+            embed=None, view=view,
+        )
+
+    # ─────────────────────────────────────────────────────────
     # GIVE WEAPON (admin)
     # ─────────────────────────────────────────────────────────
     @commands.command(name="givew")
@@ -961,6 +1378,108 @@ class RPGWeapon(commands.Cog):
         parts = [full_text[i:i+1900] for i in range(0, len(full_text), 1900)]
         for part in parts:
             await ctx.send(part)
+
+    # ─────────────────────────────────────────────────────────
+    # PATCH C — DWI / DWE: Hiển thị 3 weapon đang equip
+    #           + combined effects
+    # ─────────────────────────────────────────────────────────
+    @commands.command(name="dwi", aliases=["dwe"])
+    async def display_weapon_info(self, ctx):
+        from rpg_core import get_base_id, get_weapon_entity
+        from rpg_database import get_user
+
+        author_uid   = str(ctx.author.id)
+        user, _      = get_user(author_uid)
+        equipped_raw = user.get("equipped", [None, None, None])
+
+        if not any(equipped_raw):
+            return await ctx.send(
+                f"<:Hamer:1495462570469888069> "
+                f"**{ctx.author.display_name}** chưa trang bị weapon nào.\n"
+                f"-# Dùng `dtn weapon equip <uid>` để trang bị."
+            )
+
+        wi_map = {
+            wi["uid"]: wi
+            for wi in user.get("weapon_instances", [])
+            if isinstance(wi, dict) and "uid" in wi
+        }
+
+        embed = discord.Embed(
+            title=(
+                f"<:Hamer:1495462570469888069> "
+                f"Weapon trang bị — {ctx.author.display_name}"
+            ),
+            color=0xE91E63,
+        )
+
+        for slot_idx, uid in enumerate(equipped_raw[:3], 1):
+            slot_header = f"Ô [{slot_idx}]"
+
+            if not uid:
+                embed.add_field(
+                    name=slot_header,
+                    value="🔲 None",
+                    inline=False,
+                )
+                continue
+
+            b_id  = get_base_id(str(uid)) or str(uid)
+            w     = get_weapon_by_id(b_id)
+            wi    = wi_map.get(uid, {})
+            level = wi.get("level", 1)
+
+            if not w:
+                embed.add_field(
+                    name=slot_header,
+                    value=f"`{uid}`\n-# Không tìm thấy dữ liệu weapon",
+                    inline=False,
+                )
+                continue
+
+            rarity       = w.get("rarity", "common")
+            rlabel       = RARITY_LABEL.get(rarity, rarity)
+            em           = w.get("emoji", "⚔️")
+            nm           = w.get("name", b_id)
+            effects      = w.get("effects", {})
+            effect_lines = _fmt_effects_scaled(effects, level)
+
+            exp      = wi.get("exp", 0)
+            exp_next = wi.get("exp_to_next", 120)
+            filled   = int(exp / max(exp_next, 1) * 10)
+            bar      = "█" * filled + "░" * (10 - filled)
+
+            field_parts = [
+                f"{em} **{nm}** — {rlabel}",
+                f"Lv **{level}** / 50 │ `{bar}` {exp}/{exp_next} EXP",
+                f"-# `{uid}`",
+            ]
+            if effect_lines:
+                field_parts.extend(effect_lines)
+
+            embed.add_field(
+                name=slot_header,
+                value="\n".join(field_parts),
+                inline=False,
+            )
+
+        # ── Combined Effects ──────────────────────────────────
+        combined = calculate_combined_effects(equipped_raw, wi_map, get_base_id)
+        if combined:
+            combined_lines = _fmt_combined_effects(combined)
+            embed.add_field(
+                name="Tổng hiệu ứng",
+                value="\n".join(combined_lines),
+                inline=False,
+            )
+
+        embed.set_footer(
+            text=(
+                "dtn weapon <uid> để xem chi tiết  •  "
+                "dtn weapon equip/unequip"
+            )
+        )
+        await ctx.send(embed=embed)
 
 
 # ═══════════════════════════════════════════════════════════
