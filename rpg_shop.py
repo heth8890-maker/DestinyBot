@@ -81,9 +81,9 @@ _CRATE_POOL: dict[str, list] = {
 # Crate có bảng drop đặc biệt (không dùng weapon pool)
 _CUSTOM_DROPS: dict[str, str] = {
     "004": (
-        "  <a:4467:1498612536470409328> **Tam Hoả Thống Soái** — 0.3%  _★ Special_\n"
-        "  <a:Hongiapbatdiet:1498612522272686101> **Hồn Giáp Bất Diệt** — 0.3%  _★ Special_\n"
-        "  <a:Linhdiemsathan:1498612530094805123> **Linh Diệm Sát Thần** — 0.3%  _★ Special_\n"
+        "  <a:4574:1499013628672610334> **Tam Hoả Thống Soái** — 0.3%  _★ Special_\n"
+        "  <a:4572:1499013638319505530> **Hồn Giáp Bất Diệt** — 0.3%  _★ Special_\n"
+        "  <a:4573:1499013635555463198> **Linh Diệm Sát Thần** — 0.3%  _★ Special_\n"
         "  <:Linh_hoa:1498614127386562601> **Linh Hoả** (x4–18) — 35%\n"
         "  <:Coin:1495831576397742241> **Coin** (2,000–6,000) — 64.4%"
     ),
