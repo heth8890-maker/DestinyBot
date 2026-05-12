@@ -34,8 +34,6 @@ import random
 
 import discord
 from discord.ext import commands
-from rpg_instance import fmt_instance_info
-
 # ═══════════════════════════════════════════════════════════
 # WEAPON EFFECTS
 # Mỗi key tương ứng với 1 hiệu ứng trong game logic (rpg_core.py).
@@ -876,6 +874,7 @@ class RPGWeapon(commands.Cog):
             # Level / EXP
             wi = wi_map.get(weapon_id)
             if wi:
+                from rpg_instance import fmt_instance_info
                 level    = wi.get("level", 1)
                 exp      = wi.get("exp", 0)
                 exp_next = wi.get("exp_to_next", 40)
@@ -1391,6 +1390,7 @@ class RPGWeapon(commands.Cog):
     async def display_weapon_info(self, ctx):
         from rpg_core import get_base_id, get_weapon_entity
         from rpg_database import get_user
+        from rpg_instance import fmt_instance_info
 
         author_uid   = str(ctx.author.id)
         user, _      = get_user(author_uid)
