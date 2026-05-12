@@ -137,7 +137,7 @@ class RPGForge(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name="repair", aliases=["r", "re"])
+    @commands.command(name="repair", aliases=["re"])
     async def repair(self, ctx):
         from rpg_core     import get_base_id
         from rpg_weapon   import get_weapon_by_id

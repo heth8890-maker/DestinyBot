@@ -291,8 +291,16 @@ def migrate_weapon_instance_fields(user: dict) -> bool:
     for wi in user["weapon_instances"]:
         if not isinstance(wi, dict):
             continue
-        if "quality" in wi and "durability" in wi and "passive" in wi:
-            continue  # đã đầy đủ
+        # FIX: phải kiểm tra đủ 5 field VÀ durability > 0
+        # Nếu durability == 0 mà durability_max chưa có → vẫn cần back-fill
+        if (
+            "quality"        in wi
+            and "durability"     in wi and wi.get("durability", 0) > 0
+            and "durability_max" in wi
+            and "passive"        in wi
+            and "broken"         in wi
+        ):
+            continue  # đã đầy đủ, bỏ qua
 
         try:
             w_data  = get_weapon_by_id(wi.get("base_id", "")) or {}
@@ -372,8 +380,8 @@ def fmt_instance_info(wi: dict) -> str:
 
     quality = wi.get("quality", "medium")
     q_label = QUALITY_TIERS.get(quality, {}).get("label", quality)
-    dur     = wi.get("durability", 0)
     dur_max = wi.get("durability_max", 1)
+    dur     = wi.get("durability", dur_max)  # FIX: default = full durability, không phải 0
     broken  = wi.get("broken", False)
     fill    = int(dur / max(dur_max, 1) * 10)
     dur_bar = "█" * fill + "░" * (10 - fill)
