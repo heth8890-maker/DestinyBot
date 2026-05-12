@@ -135,6 +135,18 @@ from rpg_weapon import (
     DARK_CRATE_WEAPON,
 )
 
+from rpg_instance import (
+    roll_quality,
+    roll_passive,
+    resolve_passive,
+    build_weapon_effects,
+    migrate_weapon_instance_fields,
+    decrease_durability,
+    fmt_instance_info,
+    QUALITY_TIERS,
+    DURABILITY_BY_RARITY,
+)
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -312,7 +324,8 @@ class WeaponEntity:
         """Name + emoji + [<:Upgradeeffect:1498218616376524912> if upgraded]. Used in all lists."""
         name  = self.base_data.get("name", self.uid)
         emoji = self.base_data.get("emoji", "")
-        tag   = " <:Upgradeeffect:1498218616376524912>" if self.upgrade_data is not None else ""
+        has_data = self.upgrade_data is not None or self.instance_data is not None
+        tag      = " <:Upgradeeffect:1498218616376524912>" if has_data else ""
         return f"{emoji} **{name}**{tag}"
 
     def fmt_stats(self) -> str:
@@ -322,24 +335,26 @@ class WeaponEntity:
         Used by: inv, status panel, upgrade panel, givew embed.
         """
         effects = self.base_data.get("effects", {})
-        if not effects:
-            return "Không có hiệu ứng."
+        wi      = self.instance_data
 
-        wi_level = 1
-        if self.instance_data:
-            wi_level = max(1, min(50, self.instance_data.get("level", 1)))
+        scaled = build_weapon_effects(effects, wi)
 
         lines = []
-        for k, bv in effects.items():
-            if not isinstance(bv, (int, float)):
-                lines.append(f"• `{k}`: {bv}")
-                continue
-            v      = bv * (0.60 + (wi_level - 1) * 0.02857)
-            lv_tag = f" _(lv{wi_level})_" if wi_level > 1 else ""
+        for k, v in scaled.items():
             if k == "extra_slot":
-                lines.append(f"• `{k}`: +{int(v)} ô{lv_tag}")
-            else:
-                lines.append(f"• `{k}`: +{round(v * 100, 1)}%{lv_tag}")
+                lines.append(f"• `{k}`: +{int(v)} ô")
+            elif isinstance(v, float):
+                lines.append(f"• `{k}`: **{v:+.1%}**")
+            elif isinstance(v, (int, float)):
+                lines.append(f"• `{k}`: **{v:+}**")
+
+        if not lines:
+            lines.append("Không có hiệu ứng.")
+
+        # Quality, durability, passive — dùng fmt_instance_info từ rpg_instance
+        if wi:
+            lines.append(fmt_instance_info(wi))
+
         return "\n".join(lines)
 
     def get_price(self) -> int:
@@ -1139,7 +1154,7 @@ async def save_data(data: dict, user_id=None) -> bool:
 
     async with _data_lock:   # Một save tại một thời điểm — tránh torn writes
         try:
-            _with_retry(save_core_data, uid_str, user_data)
+            _with_retry(save_core_data, uid_str, user_data, global_uw)
             logger.debug("[SAVE] ✅ uid=%s lưu thành công.", uid_str)
 
             # Commit RAM snapshot sau khi DB xác nhận
@@ -1269,6 +1284,7 @@ def get_user(uid, data: dict) -> dict:
     )
     migrate_upgraded_weapons(user)
     migrate_all_weapons_to_uid(user)
+    migrate_weapon_instance_fields(user)
 
     return user
 
@@ -1343,12 +1359,29 @@ def add_weapon(user: dict, base_id: str, make_unique: bool = True) -> str:
         if isinstance(wi, dict) and "uid" in wi
     }
     if new_uid not in existing_wi_uids:
+        try:
+            w_data  = get_weapon_by_id(base_id) or {}
+            rarity  = w_data.get("rarity", "common")
+            quality = roll_quality(rarity)
+            q_multi = QUALITY_TIERS.get(quality, {}).get("multiplier", 1.0)
+            dur_max = int(DURABILITY_BY_RARITY.get(rarity, 30) * q_multi)
+            passive = roll_passive(rarity, quality)
+        except Exception:
+            quality = "medium"
+            dur_max = 30
+            passive = {}
+
         user.setdefault("weapon_instances", []).append({
-            "uid":         new_uid,
-            "base_id":     get_base_id(new_uid) or base_id,
-            "level":       1,
-            "exp":         0,
-            "exp_to_next": 120,
+            "uid":            new_uid,
+            "base_id":        base_id,
+            "level":          1,
+            "exp":            0,
+            "exp_to_next":    30,
+            "quality":        quality,
+            "durability":     dur_max,
+            "durability_max": dur_max,
+            "passive":        passive,
+            "broken":         False,
         })
 
     return new_uid
@@ -1478,12 +1511,29 @@ def ensure_weapon_uid(user: dict, weapon_id: str) -> str | None:
         if isinstance(wi, dict) and "uid" in wi
     }
     if new_uid not in existing_wi_uids:
+        try:
+            w_data  = get_weapon_by_id(base_id) or {}
+            rarity  = w_data.get("rarity", "common")
+            quality = roll_quality(rarity)
+            q_multi = QUALITY_TIERS.get(quality, {}).get("multiplier", 1.0)
+            dur_max = int(DURABILITY_BY_RARITY.get(rarity, 30) * q_multi)
+            passive = roll_passive(rarity, quality)
+        except Exception:
+            quality = "medium"
+            dur_max = 30
+            passive = {}
+
         user.setdefault("weapon_instances", []).append({
-            "uid":         new_uid,
-            "base_id":     base_id,
-            "level":       1,
-            "exp":         0,
-            "exp_to_next": 120,
+            "uid":            new_uid,
+            "base_id":        base_id,
+            "level":          1,
+            "exp":            0,
+            "exp_to_next":    40,
+            "quality":        quality,
+            "durability":     dur_max,
+            "durability_max": dur_max,
+            "passive":        passive,
+            "broken":         False,
         })
 
     logger.info(
@@ -1602,19 +1652,7 @@ def parse_effects(equipped: list, user: dict | None = None) -> dict:
         )
         return {}
 
-    agg: dict = {
-        "extra_slot":      0,
-        "luck_up":         0.0,
-        "rare_bias":       0.0,
-        "reduce_fail":     0.0,
-        "double_drop":     0.0,
-        "reduce_cooldown": 0.0,
-        "sell_bonus":      0.0,
-        "sell_boost":      0.0,
-        "reduce_uncommon": 0.0,
-        "double_value":    0.0,
-        "passive_oneiroi": 0.0,
-    }
+    agg: dict = {}    # dynamic — không hardcode keys
 
     # Build O(1) upgrade map once — avoids repeated list scans inside the loop
     wi_map: dict[str, dict] = {}
@@ -1630,53 +1668,34 @@ def parse_effects(equipped: list, user: dict | None = None) -> dict:
             if wid is None:
                 continue
             if not isinstance(wid, str) or not wid:
-                logger.warning(
-                    f"parse_effects: weapon_id is {type(wid).__name__}"
-                    f"({wid!r}) — skipping"
-                )
+                logger.warning(f"parse_effects: invalid weapon_id {wid!r} — skipping")
                 continue
 
-            # ── Step 1: canonical base-ID resolution ──────────────────────────
-            base_id = get_base_id(wid)
+            base_id   = get_base_id(wid)
             if not base_id:
                 logger.warning(f"parse_effects: empty base_id from '{wid}' — skipping")
                 continue
 
-            # ── Step 2: base stats from WEAPON_DATABASE ───────────────────────
             base_data = get_weapon_by_id(base_id)
             if not base_data:
-                logger.warning(f"parse_effects: no weapon data for base_id='{base_id}' — skipping")
+                logger.warning(f"parse_effects: no weapon data for '{base_id}' — skipping")
                 continue
 
-            effects: dict = dict(base_data.get("effects", {}))
+            wi = wi_map.get(wid) if user is not None else None
 
-            # ── Step 3: scale effect theo weapon level ────────────────────────
-            is_uid = "-" in wid
-            if is_uid and user is not None:
-                wi = wi_map.get(wid)
-                if wi:
-                    level = max(1, min(50, wi.get("level", 1)))
-                    for k in list(effects.keys()):
-                        if isinstance(effects[k], (int, float)):
-                            effects[k] = effects[k] * (0.60 + (level - 1) * 0.02857)
-                else:
-                    # UID chưa có instance → scale 0.60x (chưa kích hoạt leveling)
-                    for k in list(effects.keys()):
-                        if isinstance(effects[k], (int, float)):
-                            effects[k] = effects[k] * 0.60
-            elif not is_uid:
-                # Base weapon (chưa enchant) → scale 0.60x
-                for k in list(effects.keys()):
-                    if isinstance(effects[k], (int, float)):
-                        effects[k] = effects[k] * 0.60
+            # Weapon hỏng → bỏ qua hoàn toàn
+            if wi and wi.get("broken", False):
+                continue
 
-            # ── Step 4: accumulate into aggregate ─────────────────────────────
-            for key in agg:
-                val = effects.get(key)
-                if val is None:
+            # Single source of truth — dùng build_weapon_effects từ rpg_instance
+            effects = build_weapon_effects(base_data.get("effects", {}), wi)
+
+            # Dynamic accumulate — tương thích passive key mới sau này
+            for key, val in effects.items():
+                if not isinstance(val, (int, float)):
                     continue
                 try:
-                    agg[key] += val
+                    agg[key] = agg.get(key, 0) + val
                 except (TypeError, ValueError) as add_err:
                     logger.warning(
                         f"parse_effects: cannot add '{key}'={val!r} from '{wid}': {add_err}"
@@ -1713,7 +1732,7 @@ def _build_rarity_table(effects: dict) -> dict:
         extra          = rare_bias * 100
         rare_gain      = extra * 0.60
         epic_gain      = extra * 0.28
-        legendary_gain = extra * 0.12 * 0.30
+        legendary_gain = extra * 0.12 
 
         taken = 0
         for tier in ("uncommon", "common"):

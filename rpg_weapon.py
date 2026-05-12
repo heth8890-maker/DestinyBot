@@ -34,6 +34,7 @@ import random
 
 import discord
 from discord.ext import commands
+from rpg_instance import fmt_instance_info
 
 # ═══════════════════════════════════════════════════════════
 # WEAPON EFFECTS
@@ -763,7 +764,7 @@ def calculate_combined_effects(
         effects = w.get("effects", {})
         wi      = wi_map.get(uid, {})
         level   = wi.get("level", 1)
-        scale   = round(0.60 + (level - 1) * 0.02857, 3)
+        scale   = round(0.6 + (level - 1) * 0.02857, 3)
 
         for key, val in effects.items():
             if key in _EFFECT_INT_KEYS:
@@ -877,7 +878,7 @@ class RPGWeapon(commands.Cog):
             if wi:
                 level    = wi.get("level", 1)
                 exp      = wi.get("exp", 0)
-                exp_next = wi.get("exp_to_next", 120)
+                exp_next = wi.get("exp_to_next", 40)
                 filled   = int(exp / max(exp_next, 1) * 20)
                 bar      = "█" * filled + "░" * (20 - filled)
                 pct      = int(exp / max(exp_next, 1) * 100)
@@ -892,6 +893,13 @@ class RPGWeapon(commands.Cog):
                     ),
                     inline=False,
                 )
+                instance_text = fmt_instance_info(wi)
+                if instance_text.strip():
+                    embed.add_field(
+                        name="⚙️ Chi tiết",
+                        value=instance_text,
+                        inline=False,
+                    )
 
             # UID + lệnh nhanh
             embed.add_field(
@@ -1379,7 +1387,7 @@ class RPGWeapon(commands.Cog):
     # PATCH C — DWI / DWE: Hiển thị 3 weapon đang equip
     #           + combined effects
     # ─────────────────────────────────────────────────────────
-    @commands.command(name="wi", aliases=["we", "myw", "myweapon"])
+    @commands.command(name="wi", aliases=["myw", "myweapon"])
     async def display_weapon_info(self, ctx):
         from rpg_core import get_base_id, get_weapon_entity
         from rpg_database import get_user
@@ -1441,7 +1449,7 @@ class RPGWeapon(commands.Cog):
             effect_lines = _fmt_effects_scaled(effects, level)
 
             exp      = wi.get("exp", 0)
-            exp_next = wi.get("exp_to_next", 120)
+            exp_next = wi.get("exp_to_next", 40)
             filled   = int(exp / max(exp_next, 1) * 10)
             bar      = "█" * filled + "░" * (10 - filled)
 
@@ -1449,6 +1457,7 @@ class RPGWeapon(commands.Cog):
                 f"{em} **{nm}** — {rlabel}",
                 f"Lv **{level}** / 50 │ `{bar}` {exp}/{exp_next} EXP",
                 f"-# `{uid}`",
+                fmt_instance_info(wi),
             ]
             if effect_lines:
                 field_parts.extend(effect_lines)

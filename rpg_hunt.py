@@ -26,12 +26,13 @@ from rpg_core import (
     get_item_by_id, get_weapon_by_id,
     roll_hunt_items, handle_egg,
     add_item, calc_hunt_cooldown, parse_effects,
-    CRATES,
+    CRATES, get_base_id
 )
 from rpg_database import get_user, save_user, calc_hunt_exp, grant_weapon_exp
 from rpg_addon import parse_effects_upgraded
 from rpg_quest import add_quest_progress
 from cash import update_balance_safe
+from rpg_instance import decrease_durability
 
 # ─────────────────────────────────────────────────────────
 # COSMETICS
@@ -133,10 +134,16 @@ def _equipped_display(equipped: list, user: dict | None = None) -> str:
             w  = get_weapon_by_id(wi.get("base_id", ""))
             nm = w["name"]  if w else wid
             em = w["emoji"] if w else "⚔️"
-            lv = wi.get("level", 1)
-            lines.append(f"  `[{i}]` {em} **{nm}** _(Lv {lv})_")
+            lv     = wi.get("level", 1)
+            broken = wi.get("broken", False)
+            dur    = wi.get("durability", 0)
+            dur_mx = wi.get("durability_max", 1)
+            if broken:
+                lines.append(f"  `[{i}]` {em} ~~**{nm}**~~ _(Lv {lv})_ ⚠️ **HỎng**")
+            else:
+                lines.append(f"  `[{i}]` {em} **{nm}** _(Lv {lv} • {dur}/{dur_mx})_")
         else:
-            w = get_weapon_by_id(wid)
+            w = get_weapon_by_id(get_base_id(wid))
             if w:
                 lines.append(f"  `[{i}]` {w['emoji']} **{w['name']}**")
             else:
@@ -251,6 +258,12 @@ class RPGHunt(commands.Cog):
                     _grant_exp_to_equipped(user, found, equipped)
             except Exception as e:
                 print(f"⚠️  Warning: weapon exp grant failed: {e}")
+
+            try:
+                just_broken = decrease_durability(user, equipped)
+            except Exception as e:
+                just_broken = []
+                print(f"⚠️  Warning: durability decrease failed: {e}")
 
             # ─────────────────────────────────────────────────────────
             # BUILD RESPONSE EMBED

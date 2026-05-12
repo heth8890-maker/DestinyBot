@@ -52,7 +52,7 @@ RARITY_EXP_WEIGHT = {
 def exp_to_next(level: int) -> int:
     """EXP cần để lên level tiếp theo. Công thức: level * 80 + 40."""
     level = min(max(1, level), WEAPON_LEVEL_CAP)
-    return level * 80 + 40
+    return level * 40 + 40
 
 
 def calc_hunt_exp(found_items: list) -> int:
