@@ -322,11 +322,11 @@ ITEMS = [
         "max": 13450,
         "drop_chance": 0.00002, # Ngang vây lưng giao long
     },
-        # ── VẬT PHẨM MỚI THÊM ──
+    # ── VẬT PHẨM MỚI THÊM ──
     {
         "id": "5307",
         "name": "Rong biển",
-        "emoji": "<:5307:1503838774176514179>",
+        "emoji": "<:5326:1503843375412023407>",
         "rarity": "uncommon",
         "min": 8,
         "max": 13,
@@ -335,7 +335,7 @@ ITEMS = [
     {
         "id": "1905",
         "name": "Càng cua biển sâu",
-        "emoji": "<:1905:1492085715344031764>",
+        "emoji": "<:5328:1503843373759332483>",
         "rarity": "rare",
         "min": 24,
         "max": 28,
@@ -344,7 +344,7 @@ ITEMS = [
     {
         "id": "5305",
         "name": "Vỏ ốc biển",
-        "emoji": "<:5305:1503838776089247854>",
+        "emoji": "<:5329:1503843371788275862>",
         "rarity": "rare",
         "min": 15,
         "max": 19,
@@ -353,7 +353,7 @@ ITEMS = [
     {
         "id": "5304",
         "name": "Tinh thể thạch anh xanh",
-        "emoji": "<:5304:1503838772188676096>",
+        "emoji": "<:5330:1503843369187672104>",
         "rarity": "epic",
         "min": 35,
         "max": 52,
