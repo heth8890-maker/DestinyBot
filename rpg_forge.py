@@ -34,20 +34,75 @@ HAMMER_EMOJI     = "<:Hamer:1495462570469888069>"
 
 def _get_quality_label(quality: str) -> str:
     try:
-        from rpg_weapon import QUALITY_TIERS
+        from rpg_instance import QUALITY_TIERS
         return QUALITY_TIERS.get(quality, {}).get("label", quality)
     except Exception:
         return _QUALITY_LABEL_FALLBACK.get(quality, quality)
 
 
-def _calc_repair_cost(wi: dict, w_data: dict) -> int:
+# INTEGRITY: Sentinel returned when an instance fails validation.
+# Callers must check `cost is None` to detect refused repair.
+_CORRUPT = None
+
+
+def _validate_instance(wi: dict) -> str | None:
+    """
+    Verify that a weapon instance has the required durability fields and that
+    their values form a coherent state.
+
+    Returns None if the instance is valid.
+    Returns a non-empty error string describing the problem if it is not.
+
+    Rules:
+    - wi must be a non-empty dict (empty dict == missing instance)
+    - "durability" key must be explicitly present (no fabricated default)
+    - "durability_max" key must be explicitly present (no fabricated default)
+    - durability_max must be an int >= 1
+    - durability must be an int in [0, durability_max]
+    """
+    if not wi:
+        return "instance missing or empty"
+
+    if "durability_max" not in wi:
+        return "durability_max field absent"
+
+    if "durability" not in wi:
+        return "durability field absent"
+
+    dur_max = wi["durability_max"]
+    dur     = wi["durability"]
+
+    if not isinstance(dur_max, int) or dur_max < 1:
+        return f"durability_max invalid ({dur_max!r})"
+
+    if not isinstance(dur, int) or dur < 0:
+        return f"durability invalid ({dur!r})"
+
+    if dur > dur_max:
+        return f"durability ({dur}) exceeds durability_max ({dur_max}) — inverted state"
+
+    return None  # valid
+
+
+def _calc_repair_cost(wi: dict, w_data: dict) -> int | None:
     """
     Tính giá repair 1 weapon instance.
     Trả về 0 nếu không cần repair.
+    Trả về None nếu instance không hợp lệ — caller phải từ chối repair.
+
+    INTEGRITY: We never fabricate durability values.
+    If either durability field is absent or inconsistent, we refuse with None
+    rather than computing a cost from guessed state.
     """
+    err = _validate_instance(wi)
+    if err:
+        # Do NOT fall through with defaults — return sentinel so caller aborts.
+        print(f"[FORGE INTEGRITY] _calc_repair_cost refused: {err} | wi={wi!r}")
+        return _CORRUPT
+
     broken  = wi.get("broken", False)
-    dur     = wi.get("durability", 0)
-    dur_max = wi.get("durability_max", 1)
+    dur     = wi["durability"]      # guaranteed present by _validate_instance
+    dur_max = wi["durability_max"]  # guaranteed present and >= 1
     missing = dur_max - dur
 
     if missing <= 0 and not broken:
@@ -77,8 +132,9 @@ def _build_forge_embed(
             "cost": int,
             "broken": bool,
             "needs_repair": bool,
+            "corrupt": bool,   # NEW — True if instance failed integrity check
         }
-    total_cost: tổng giá repair tất cả
+    total_cost: tổng giá repair tất cả (only from valid instances)
     author_name: display name của user
     """
     embed = discord.Embed(
@@ -95,6 +151,19 @@ def _build_forge_embed(
             embed.add_field(
                 name=slot_header,
                 value="🔲 | _Trống_",
+                inline=False,
+            )
+            continue
+
+        # INTEGRITY: surface corrupt slots visibly so the player knows.
+        if s.get("corrupt"):
+            embed.add_field(
+                name=slot_header,
+                value=(
+                    f"⚠️ **[DỮ LIỆU LỖI]** — `{s['uid']}`\n"
+                    f"_Không thể xác minh trạng thái vũ khí này. "
+                    f"Liên hệ admin._"
+                ),
                 inline=False,
             )
             continue
@@ -140,7 +209,7 @@ class RPGForge(commands.Cog):
     @commands.command(name="repair", aliases=["re"])
     async def repair(self, ctx):
         from rpg_core     import get_base_id
-        from rpg_weapon   import get_weapon_by_id
+        from rpg_weapon_data   import get_weapon_by_id
         from rpg_database import get_user, save_user
 
         author_uid = str(ctx.author.id)
@@ -156,6 +225,8 @@ class RPGForge(commands.Cog):
                 f"{ERR} | Bạn chưa trang bị vũ khí nào."
             )
 
+        # INTEGRITY: Build wi_map from explicit uid keys only.
+        # A missing uid means the instance cannot be addressed — exclude it.
         wi_map = {
             wi["uid"]: wi
             for wi in user.get("weapon_instances", [])
@@ -169,33 +240,83 @@ class RPGForge(commands.Cog):
         for slot_idx, uid in enumerate(equipped, 1):
             if not uid:
                 slots_info.append({
-                    "slot":          slot_idx,
-                    "uid":           None,
-                    "needs_repair":  False,
-                    "cost":          0,
-                    "name":          "",
-                    "emoji":         "",
-                    "level":         1,
-                    "quality_label": "",
-                    "durability":    0,
+                    "slot":           slot_idx,
+                    "uid":            None,
+                    "needs_repair":   False,
+                    "cost":           0,
+                    "name":           "",
+                    "emoji":          "",
+                    "level":          1,
+                    "quality_label":  "",
+                    "durability":     0,
                     "durability_max": 0,
-                    "broken":        False,
+                    "broken":         False,
+                    "corrupt":        False,
+                })
+                continue
+
+            # INTEGRITY: Look up the instance. A missing entry is not a valid
+            # "no damage" state — it is a corrupt/missing instance. We do NOT
+            # fall back to {} and silently continue.
+            wi = wi_map.get(uid)  # None if absent, not {}
+            if wi is None:
+                print(
+                    f"[FORGE INTEGRITY] uid={uid!r} equipped in slot {slot_idx} "
+                    f"but has no weapon_instance record. Marking corrupt."
+                )
+                slots_info.append({
+                    "slot":           slot_idx,
+                    "uid":            uid,
+                    "needs_repair":   False,
+                    "cost":           0,
+                    "name":           uid,
+                    "emoji":          "⚔️",
+                    "level":          1,
+                    "quality_label":  "???",
+                    "durability":     0,
+                    "durability_max": 0,
+                    "broken":         False,
+                    "corrupt":        True,  # surfaced to player in embed
                 })
                 continue
 
             b_id = get_base_id(str(uid)) or str(uid)
             w    = get_weapon_by_id(b_id)
-            wi   = wi_map.get(uid, {})
 
             nm     = w["name"]  if w else b_id
             em     = w["emoji"] if w else "⚔️"
             level  = wi.get("level", 1)
             q_key  = wi.get("quality", "medium")
             q_lbl  = _get_quality_label(q_key)
-            dur    = wi.get("durability", 0)
-            dur_mx = wi.get("durability_max", 1)
+
+            # INTEGRITY: _calc_repair_cost returns None on invalid state.
+            # We must treat None as "refuse this slot", not as cost=0.
+            cost = _calc_repair_cost(wi, w)
+            if cost is _CORRUPT:
+                print(
+                    f"[FORGE INTEGRITY] uid={uid!r} failed durability validation. "
+                    f"Slot {slot_idx} marked corrupt."
+                )
+                slots_info.append({
+                    "slot":           slot_idx,
+                    "uid":            uid,
+                    "needs_repair":   False,
+                    "cost":           0,
+                    "name":           nm,
+                    "emoji":          em,
+                    "level":          level,
+                    "quality_label":  q_lbl,
+                    "durability":     0,
+                    "durability_max": 0,
+                    "broken":         wi.get("broken", False),
+                    "corrupt":        True,
+                })
+                continue
+
+            # Instance is valid — use its real field values only.
+            dur    = wi["durability"]      # guaranteed by _validate_instance
+            dur_mx = wi["durability_max"]  # guaranteed by _validate_instance
             broken = wi.get("broken", False)
-            cost   = _calc_repair_cost(wi, w) if wi else 0
 
             needs_repair = cost > 0
             total_cost  += cost
@@ -212,6 +333,7 @@ class RPGForge(commands.Cog):
                 "cost":           cost,
                 "broken":         broken,
                 "needs_repair":   needs_repair,
+                "corrupt":        False,
             })
 
         # ── Không có gì cần repair ────────────────────────────────────
@@ -224,6 +346,8 @@ class RPGForge(commands.Cog):
                 return await ctx.send(embed=embed)
 
         # ── Không đủ tiền ─────────────────────────────────────────────
+        # INTEGRITY: Read from "cash" only — canonical currency field.
+        # Do not alias "gold", "coins", or any other key.
         balance = user.get("cash", 0)
         if balance < total_cost:
             embed = _build_forge_embed(
@@ -315,6 +439,15 @@ class RPGForge(commands.Cog):
         # ── Re-fetch tránh race condition ─────────────────────────────
         user, _ = get_user(author_uid)
 
+        # INTEGRITY: Re-build wi_map from the freshly fetched user document.
+        # The pre-confirm wi_map is stale — do not reuse it here.
+        wi_map_fresh = {
+            wi["uid"]: wi
+            for wi in user.get("weapon_instances", [])
+            if isinstance(wi, dict) and "uid" in wi
+        }
+
+        # INTEGRITY: Re-validate balance against canonical "cash" field only.
         if user.get("cash", 0) < total_cost:
             for child in view.children:
                 child.disabled = True
@@ -324,21 +457,74 @@ class RPGForge(commands.Cog):
                 view=view,
             )
 
-        # Trừ tiền
-        user["cash"] = user.get("cash", 0) - total_cost
+        # ── Restore durability ────────────────────────────────────────
+        # INTEGRITY: Only charge if repair actually occurs.
+        # Count expected repairs from slots_info (built from validated data),
+        # then confirm each one lands in the fresh instance list before deducting.
+        expected_repairs = [s for s in slots_info if s["needs_repair"] and s["uid"]]
+        repaired_count   = 0
 
-        # Restore durability
-        repaired_count = 0
-        for s in slots_info:
-            if not s["needs_repair"] or not s["uid"]:
+        for s in expected_repairs:
+            uid = s["uid"]
+            wi_live = wi_map_fresh.get(uid)
+
+            if wi_live is None:
+                # Instance vanished between confirm and now — do not repair or charge.
+                print(
+                    f"[FORGE INTEGRITY] uid={uid!r} present in pre-confirm snapshot "
+                    f"but missing after re-fetch. Skipping repair for this slot."
+                )
                 continue
-            for wi in user.get("weapon_instances", []):
-                if not isinstance(wi, dict) or wi.get("uid") != s["uid"]:
-                    continue
-                wi["durability"] = wi.get("durability_max", 30)
-                wi["broken"]     = False
-                repaired_count  += 1
-                break
+
+            # Re-validate the live instance before writing to it.
+            err = _validate_instance(wi_live)
+            if err:
+                print(
+                    f"[FORGE INTEGRITY] uid={uid!r} failed post-confirm validation: "
+                    f"{err}. Skipping repair for this slot."
+                )
+                continue
+
+            # Safe to repair — durability_max is confirmed present and valid.
+            wi_live["durability"] = wi_live["durability_max"]
+            wi_live["broken"]     = False
+            repaired_count       += 1
+
+        # INTEGRITY: Do not charge if no repair actually occurred.
+        if repaired_count == 0:
+            for child in view.children:
+                child.disabled = True
+            print(
+                f"[FORGE INTEGRITY] user={author_uid} confirmed repair but "
+                f"repaired_count=0. Aborting charge."
+            )
+            return await view.message.edit(
+                content=(
+                    f"{ERR} | Không thể repair — dữ liệu vũ khí không hợp lệ. "
+                    f"Không trừ tiền."
+                ),
+                embed=None,
+                view=view,
+            )
+
+        # INTEGRITY: Charge proportionally if only some slots were repairable.
+        # Re-compute cost from the slots that were actually repaired.
+        if repaired_count < len(expected_repairs):
+            repaired_uids    = {s["uid"] for s in expected_repairs[:repaired_count]}
+            actual_cost      = sum(
+                s["cost"] for s in expected_repairs
+                if s["uid"] in repaired_uids
+            )
+            print(
+                f"[FORGE INTEGRITY] user={author_uid} partial repair: "
+                f"expected={len(expected_repairs)} actual={repaired_count}. "
+                f"Charging {actual_cost} instead of {total_cost}."
+            )
+        else:
+            actual_cost = total_cost
+
+        # Deduct canonical currency field only.
+        user["cash"] = user.get("cash", 0) - actual_cost
 
         if not save_user(author_uid, user):
             for child in view.children:
@@ -355,7 +541,7 @@ class RPGForge(commands.Cog):
         await view.message.edit(
             content=(
                 f"{OK} | Đã repair **{repaired_count}** vũ khí "
-                f"— mất **{total_cost:,}** {COIN_EMOJI}"
+                f"— mất **{actual_cost:,}** {COIN_EMOJI}"
             ),
             embed=None,
             view=view,

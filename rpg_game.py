@@ -4,7 +4,7 @@ Discord Cog chính. Các cog đã tách ra file riêng:
   rpg_crate.py    → dtn crate
   rpg_question.py → dtn quest
   rpg_trade.py    → dtn trade / dtn add / dtn remove
-  rpg_weapon.py   → dtn weapon (tất cả subcommand)
+  .py   → dtn weapon (tất cả subcommand)
   rpg_item.py     → dtn item / dtn item use
   rpg_shop.py     → dtn shop / dtn shopbuy   ← TÁCH RIÊNG
 
@@ -20,7 +20,7 @@ COMMAND MAP
   - sell weapon : dùng get_weapon_entity() — fix UID mismatch khi bán unique weapon
   - inv         : dùng WeaponID.is_unique() thay vì "-" not in (chuẩn hoá logic)
   - inv equipped: dùng entity.fmt_name() — thống nhất hiển thị với status/upgrade
-  - Xoá duplicate _equipped_display (đã có trong rpg_weapon.py, import từ đó)
+  - Xoá duplicate _equipped_display (đã có trong rpg_weapo.py, import từ đó)
 """
 
 import time
@@ -43,7 +43,7 @@ from rpg_core import (
     get_base_id,
 )
 from rpg_database import get_user, save_user
-from rpg_weapon import (
+from rpg_weapon_data import (
     RARE_CRATE_WEAPONS,
     DARK_CRATE_WEAPON,
     _rarity_tier,
@@ -277,7 +277,7 @@ class RPGInventory(commands.Cog):
 
         # ── Upgraded weapons — dùng entity.fmt_name() → thống nhất với status ─
         # TODO: get_weapon_entity() vẫn đọc user["upgraded_weapons"] (list cũ từ rpg_core).
-        # fmt_name() có thể không hiển thị upgrade decorators cho đến khi rpg_weapon.py
+        # fmt_name() có thể không hiển thị upgrade decorators cho đến khi rpg_weapn.py
         # được refactor sang MongoDB pattern. max_lv ở đây đọc trực tiếp từ upgraded_weapons
         # dict nên vẫn đúng.
         for uw_data in upgraded_weapons:

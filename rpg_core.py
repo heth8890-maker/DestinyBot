@@ -1,103 +1,3 @@
-"""
-===== FILE: rpg_core.py (REFACTORED v1.8 — MONGODB STORAGE) =====
-
-STORAGE CHANGELOG v1.8 — JSON → MONGODB:
-────────────────────────────────────────────────────────────────────────
-WHAT CHANGED vs v1.7:
-
-  STORAGE LAYER (chỉ những thứ này thay đổi):
-  1. load_data(user_id)
-       — Không còn đọc file JSON.
-       — Gọi database_helper.load_core_data(uid_str) qua _with_retry.
-       — Returns {uid_str: user_doc, "upgraded_weapons": global_uw_dict}.
-       — user_id=None → trả về {} ngay (no-op, backward safe).
-
-  2. save_data(data, user_id)
-       — Không còn ghi file JSON / temp file / backup rotation.
-       — Gọi database_helper.save_core_data(uid_str, user_data, global_uw).
-       — user_data["upgraded_weapons"] (list) → lưu vào economy collection.
-       — global_uw dict → lưu vào global_metadata collection (dot-notation $set).
-       — Returns bool (True = thành công, False = thất bại).
-       — user_id=None → trả về False ngay (no-op, backward safe).
-
-  3. _validate_user() [MỚI]
-       — Helper nội bộ: validate + salvage mọi field trước khi trả về từ load_data.
-       — Thay thế vai trò của chuỗi _salvage_* trong load path (vẫn giữ _salvage_*
-         riêng cho get_user để tương thích cũ).
-
-  4. _emergency_dump()
-       — Vẫn ghi JSON local như cũ (last resort khi MongoDB cũng down).
-       — Trên Render (ephemeral FS) file sẽ mất sau restart — đây là ý định đúng:
-         emergency dump để admin đọc log, không phải để restore tự động.
-
-  ĐÃ XÓA (chỉ liên quan JSON):
-  • DATA_FILE / TEMP_FILE / BACKUP_FILES / LEGACY_BACKUP constants
-  • _try_load_json_file()
-  • _rotate_backups()
-
-KHÔNG THAY ĐỔI:
-  • Toàn bộ game logic, weapon logic, UID/base_id rules
-  • Cấu trúc data (user dict schema)
-  • Mọi tên biến / tên hàm được dùng ở file khác
-  • WeaponEntity / WeaponID / get_weapon_entity
-  • parse_effects / roll_hunt_items / handle_egg / calc_*
-  • equip_weapon / unequip_weapon / add_weapon / remove_weapon_from_bag
-  • ensure_weapon_uid / ensure_upgrade_entry
-  • get_user (Salvage-First philosophy)
-  • get_user_lock / _data_lock / _good_snapshots (concurrency model giữ nguyên)
-  • _validate_data_integrity (thêm guard skip "upgraded_weapons" key)
-  • _migrate_legacy_weapons
-
-ARCHITECTURE CHANGELOG v1.7 — HYBRID MODEL ENFORCEMENT (giữ nguyên):
-────────────────────────────────────────────────────────────────────────
-ROOT CAUSE FIX:
-  Previous versions conflated "has a UID" with "has upgrade data", creating
-  a hidden second weapon type.  This broke equip, sell, and upgrade because
-  commands saw two incompatible code paths for the same weapon.
-
-UNIFIED IDENTITY RULES (strict):
-  • base_id  = canonical weapon type  ("467")
-  • unique_id = instance of that type ("467-ABC12")
-  • Both forms are fully valid in user["weapons"] and user["equipped"].
-  • ALL gameplay logic resolves through get_base_id(weapon_id) first.
-  • UID existence does NOT imply upgrade data exists.
-
-WHAT CHANGED vs v5.6:
-  1. add_weapon(make_unique=True)
-       — no longer creates an upgraded_weapons entry on weapon acquisition.
-       — UID is stored in bag; upgrade data is created ONLY on first upgrade.
-
-  2. ensure_weapon_uid()
-       — now ONLY promotes base_id → UID in-place (lazy, on demand).
-       — REMOVED: implicit _ensure_upgraded_entry() call.
-       — Upgrade commands must call ensure_upgrade_entry() separately.
-
-  3. ensure_upgrade_entry()  [was: _ensure_upgraded_entry, now exported]
-       — public helper for the upgrade command to call explicitly.
-       — creates upgraded_weapons entry ONLY when an upgrade is about to happen.
-
-  4. _migrate_legacy_weapons()
-       — no longer creates upgraded_weapons entries during UID promotion.
-
-  5. _validate_data_integrity() Phase 2 REMOVED
-       — UIDs without upgraded_weapons entries are now VALID (not an error).
-       — Phase 1 (global duplicate UID detection) is retained.
-
-UPGRADE FLOW (correct call sequence for rpg_addon):
-  uid = ensure_weapon_uid(user, weapon_id)     # 1. guarantee UID exists
-  ensure_upgrade_entry(user, uid)              # 2. guarantee upgrade record exists
-  # ... read/write upgrade data ...            # 3. perform upgrade
-
-UNCHANGED:
-  • TRUE ATOMIC SAVE      — asyncio.Lock(_data_lock) guards every save_data() call.
-  • RAM SNAPSHOT ROLLBACK — _good_snapshots[] (max 3).
-  • equip_weapon()        — ID-aware bag lookup; equips actual stored ID.
-  • remove_weapon_from_bag() — ID-aware; no ghost items.
-  • WeaponEntity V5       — GLOBAL_SECRET + HMAC-SHA256 deterministic stat seeds.
-  • parse_effects()       — resolves via get_base_id(); scales if UID found.
-
-PHILOSOPHY: "SALVAGE FIRST, RESET LAST"
-"""
 
 import asyncio
 import copy
@@ -123,7 +23,7 @@ from rpg_item import (
     get_item_by_id,
     _pick_item_from_rarity,
 )
-from rpg_weapon import (
+from rpg_weapon_data import (
     WEAPONS,
     WEAPON_EFFECTS,
     CRATES,
@@ -974,6 +874,21 @@ def _validate_user(user_data: dict) -> dict:
             logger.warning("[VALIDATE] uid=%s: '%s'=%r không hợp lệ → 0", uid, cd_key, val)
             user_data[cd_key] = 0
 
+    # ── currency: canonical field is "cash" (was "coins" pre-v1.9) ───────────
+    # ARCHITECTURAL: _validate_user runs inside load_data — apply the same
+    # coins→cash rename here so that data arriving from MongoDB is already
+    # normalised before get_user's salvage pass sees it.  This prevents a
+    # window where user_data has "coins" but not "cash" between load and get_user.
+    if "coins" in user_data and "cash" not in user_data:
+        user_data["cash"] = user_data.pop("coins")
+        logger.info("[VALIDATE] uid=%s: migrated 'coins' → 'cash'", uid)
+    elif "coins" in user_data:
+        user_data.pop("coins")
+        logger.warning("[VALIDATE] uid=%s: both 'coins' and 'cash' present — dropped 'coins'", uid)
+    if not isinstance(user_data.get("cash"), (int, float)):
+        logger.warning("[VALIDATE] uid=%s: 'cash'=%r không hợp lệ → 0", uid, user_data.get("cash"))
+        user_data["cash"] = 0
+
     # ── passives → dict ───────────────────────────────────────────────────────
     if not isinstance(user_data.get("passives"), dict):
         user_data["passives"] = {}
@@ -1154,7 +1069,15 @@ async def save_data(data: dict, user_id=None) -> bool:
 
     async with _data_lock:   # Một save tại một thời điểm — tránh torn writes
         try:
-            _with_retry(save_core_data, uid_str, user_data, global_uw)
+            # ARCHITECTURAL: _with_retry is a synchronous blocking call.
+            # Running it directly inside an async function would stall the entire
+            # event loop for the duration of each DB retry cycle.
+            # run_in_executor offloads the blocking work to the default ThreadPoolExecutor
+            # so other coroutines (commands, heartbeats) keep running while we wait.
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None, _with_retry, save_core_data, uid_str, user_data, global_uw
+            )
             logger.debug("[SAVE] ✅ uid=%s lưu thành công.", uid_str)
 
             # Commit RAM snapshot sau khi DB xác nhận
@@ -1196,13 +1119,22 @@ async def save_data(data: dict, user_id=None) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _make_default_user() -> dict:
-    """Return a fresh default user dict (avoid mutating a shared constant)."""
+    """
+    Return a fresh default user dict (avoid mutating a shared constant).
+
+    ARCHITECTURAL NOTE — canonical currency field:
+        "cash" is the ONE canonical field for player currency.
+        "coins" was the legacy name; it must never appear in new user docs.
+        Any code that reads currency MUST use user["cash"].
+        Any code that grants/deducts currency MUST write user["cash"].
+        The migration in get_user() renames old "coins" docs at load-time.
+    """
     return {
         "inv":              {},
         "weapons":          [],
         "weapon_instances": [],
         "equipped":         [None, None, None],
-        "coins":            0,
+        "cash":             0,      # CANONICAL — was "coins" before v1.9
         "passives":         {},
         "hunt_cd":          0,
         "crate_cd":         0,
@@ -1226,6 +1158,14 @@ def get_user(uid, data: dict) -> dict:
     Note: bare base_id weapons ("467") are valid stack weapons and are left
     as-is.  Call ensure_weapon_uid() from the upgrade command when a UID is
     needed — do NOT force-migrate here.
+
+    ARCHITECTURAL NOTE — migration ownership:
+        Schema-level field migrations (renaming, defaults, type coercion) belong
+        HERE in rpg_core — it owns the canonical user-dict schema.
+        DB-level migrations (weapon UID promotion, upgraded_weapons shape) are
+        delegated to rpg_database via a lazy import to avoid circular imports at
+        module startup.  If rpg_database is unavailable those steps are skipped
+        with an error log rather than crashing the bot.
     """
     uid = str(uid)
 
@@ -1245,12 +1185,30 @@ def get_user(uid, data: dict) -> dict:
         data[uid] = _make_default_user()
         return data[uid]
 
-    # Back-fill new fields for existing users
-    if "coins" not in user:
-        user["coins"] = 0
+    # ── CURRENCY MIGRATION: "coins" → "cash" (one-time, backward-compatible) ──
+    # ARCHITECTURAL: "cash" is the canonical field as of v1.9.
+    # Docs written by older versions use "coins"; we rename it here at load-time
+    # so the rest of the codebase never sees "coins" again.
+    # Order is important: do this BEFORE any salvage call that references "cash".
+    if "coins" in user and "cash" not in user:
+        user["cash"] = user.pop("coins")
+        logger.info(f"User {uid}: migrated legacy 'coins' → 'cash'")
+    elif "coins" in user and "cash" in user:
+        # Both keys present (partial double-write from a race or bad deploy).
+        # Keep "cash" (canonical), drop "coins" to prevent future confusion.
+        user.pop("coins")
+        logger.warning(
+            f"User {uid}: both 'coins' and 'cash' present — "
+            f"dropped 'coins', kept 'cash'={user['cash']}"
+        )
+
+    # Back-fill for docs that have neither field (pre-economy users).
+    if "cash" not in user:
+        user["cash"] = 0
 
     # ── Salvage each field in priority order ──────────────────────────────────
-    _salvage_numeric(user, "coins",    0, uid)
+    # NOTE: salvage "cash", NOT "coins" — canonical field since v1.9.
+    _salvage_numeric(user, "cash",     0, uid)
     _salvage_numeric(user, "hunt_cd",  0, uid)
     _salvage_numeric(user, "crate_cd", 0, uid)
 
@@ -1276,15 +1234,39 @@ def get_user(uid, data: dict) -> dict:
             and "base_id" in wi
         ]
 
-    # Gọi migration để đảm bảo weapon_instances nhất quán
-    # (phòng trường hợp file cũ vẫn dùng load_data → get_user pattern)
-    from rpg_database import (
-        migrate_upgraded_weapons,
-        migrate_all_weapons_to_uid,
-    )
-    migrate_upgraded_weapons(user)
-    migrate_all_weapons_to_uid(user)
-    migrate_weapon_instance_fields(user)
+    # ── DB-level migrations (delegated to rpg_database) ───────────────────────
+    # ARCHITECTURAL: these are imported lazily (not at module level) to prevent
+    # a circular import: rpg_core ← rpg_database ← rpg_core.
+    # Ownership rule: rpg_database owns UID-promotion + upgraded_weapons shape;
+    # rpg_core owns field-type coercion and currency naming.
+    # If rpg_database is unavailable we skip gracefully — salvage already ran.
+    try:
+        from rpg_database import (          # noqa: PLC0415 (intentional lazy import)
+            migrate_upgraded_weapons,
+            migrate_all_weapons_to_uid,
+        )
+        migrate_upgraded_weapons(user)
+        migrate_all_weapons_to_uid(user)
+    except ImportError:
+        logger.warning(
+            "get_user uid=%s: rpg_database not importable — "
+            "skipping upgraded_weapons / UID migration.", uid
+        )
+    except Exception as exc:
+        logger.error(
+            "get_user uid=%s: DB-level migration raised %s — "
+            "user data may be partially un-migrated.", uid, exc, exc_info=True
+        )
+
+    # migrate_weapon_instance_fields is owned by rpg_instance (no circular risk).
+    # Keep separate try-block so instance migration still runs if DB migration fails.
+    try:
+        migrate_weapon_instance_fields(user)
+    except Exception as exc:
+        logger.error(
+            "get_user uid=%s: migrate_weapon_instance_fields raised %s",
+            uid, exc, exc_info=True
+        )
 
     return user
 
@@ -1376,7 +1358,7 @@ def add_weapon(user: dict, base_id: str, make_unique: bool = True) -> str:
             "base_id":        base_id,
             "level":          1,
             "exp":            0,
-            "exp_to_next":    30,
+            "exp_to_next":    120,
             "quality":        quality,
             "durability":     dur_max,
             "durability_max": dur_max,
@@ -1528,7 +1510,7 @@ def ensure_weapon_uid(user: dict, weapon_id: str) -> str | None:
             "base_id":        base_id,
             "level":          1,
             "exp":            0,
-            "exp_to_next":    40,
+            "exp_to_next":    120,
             "quality":        quality,
             "durability":     dur_max,
             "durability_max": dur_max,

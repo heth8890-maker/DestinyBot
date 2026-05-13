@@ -139,7 +139,7 @@ def _equipped_display(equipped: list, user: dict | None = None) -> str:
             dur    = wi.get("durability", 0)
             dur_mx = wi.get("durability_max", 1)
             if broken:
-                lines.append(f"  `[{i}]` {em} ~~**{nm}**~~ _(Lv {lv})_ ⚠️ **HỎng**")
+                lines.append(f"  `[{i}]` {em} ~~**{nm}**~~ _(Lv {lv})_ **Broken**")
             else:
                 lines.append(f"  `[{i}]` {em} **{nm}** _(Lv {lv} • {dur}/{dur_mx})_")
         else:

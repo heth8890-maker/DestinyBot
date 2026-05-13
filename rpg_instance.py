@@ -1,26 +1,8 @@
-"""
-===== FILE: rpg_instance.py =====
-
-Weapon Instance Layer — quản lý quality, durability, passive cho từng instance.
-
-DEPENDENCY (một chiều, không circular):
-    rpg_instance.py → rpg_weapon.py (get_weapon_by_id, RARITY_LABEL)
-
-KHÔNG import từ: rpg_core, rpg_hunt, rpg_forge, rpg_database, rpg_addon.
-
-Exports:
-    QUALITY_TIERS, QUALITY_WEIGHTS, DURABILITY_BY_RARITY
-    PASSIVE_POOL, PASSIVE_INDEX, PASSIVE_TIER_WEIGHTS
-    roll_quality, roll_passive, resolve_passive
-    build_weapon_effects
-    migrate_weapon_instance_fields
-    decrease_durability
-"""
 
 import random
 import logging
 
-from rpg_weapon import get_weapon_by_id, RARITY_LABEL
+from rpg_weapon_data import get_weapon_by_id, RARITY_LABEL
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +50,8 @@ DURABILITY_BY_RARITY = {
     "rare":      80,
     "epic":      120,
     "legendary": 150,
+    "legend":    150,
+    "mythical":  200,
     "special":   200,
     "soul":      200,
 }
@@ -253,74 +237,275 @@ def build_weapon_effects(base_effects: dict, wi: dict | None = None) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  MIGRATION — HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _is_valid_quality(quality: object) -> bool:
+    """
+    A quality value is valid iff it is an exact key in QUALITY_TIERS.
+    Does NOT accept None, empty-string, or any unknown tier name.
+    """
+    return isinstance(quality, str) and quality in QUALITY_TIERS
+
+
+def _is_valid_passive(passive: object) -> bool:
+    """
+    A passive is structurally valid iff:
+      - it is a non-empty dict
+      - its "id" is present in PASSIVE_INDEX (known pool entry)
+      - its "roll" is a numeric value (int or float)
+
+    Intentionally rejects {} (empty dict) — the invisible-passive corruption
+    where setdefault previously silently preserved a useless value.
+    A valid passive is NEVER rerolled; only structurally broken ones are replaced.
+    """
+    if not isinstance(passive, dict) or not passive:
+        return False
+    pid  = str(passive.get("id", ""))
+    roll = passive.get("roll")
+    return pid in PASSIVE_INDEX and isinstance(roll, (int, float))
+
+
+def _dur_max_floor(rarity: str) -> int:
+    """
+    The absolute minimum durability_max that any legitimate roll could produce
+    for a given rarity: base_durability × very_low_multiplier (0.55).
+
+    Any stored durability_max at or above this floor is considered legitimate
+    (i.e. was produced by a real roll_quality call) and will not be repaired.
+    Any value *below* the floor is impossible and indicates corruption.
+    """
+    base = DURABILITY_BY_RARITY.get(rarity, DURABILITY_BY_RARITY["common"])
+    lowest_multiplier = QUALITY_TIERS["very_low"]["multiplier"]   # 0.55 — never changes
+    return max(1, int(base * lowest_multiplier))
+
+
+def _dur_max_expected(rarity: str, quality: str) -> int:
+    """Canonical durability_max for a given (rarity, quality) pair."""
+    q_multi = QUALITY_TIERS.get(quality, {}).get("multiplier", 1.0)
+    return int(DURABILITY_BY_RARITY.get(rarity, DURABILITY_BY_RARITY["common"]) * q_multi)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  MIGRATION
 # ══════════════════════════════════════════════════════════════════════════════
 
 def migrate_weapon_instance_fields(user: dict) -> bool:
     """
-    Back-fill quality, durability, passive, broken cho instance cũ còn thiếu.
-    Dọn orphan instances — uid không còn tồn tại trong bag hoặc equipped.
+    Repair and back-fill weapon instances surgically.
 
-    Salvage-First: setdefault only — KHÔNG ghi đè field đã có.
-    Gọi trong get_user() sau migrate_all_weapons_to_uid().
+    Design principles
+    -----------------
+    REPAIR-CAPABLE  — each field is validated for *correctness*, not just presence.
+                      Fields that exist but contain corrupt values are fixed.
+    SURGICAL        — only fields that fail their specific invariant are written;
+                      everything else is left exactly as the player earned it.
+    IDEMPOTENT      — running twice produces identical output to running once.
+    ADDITIVE        — missing instances for bag/equipped UIDs are created as stubs
+                      and then repaired in the same pass; no UID is left orphaned.
+    SAFE CLEANUP    — orphan detection requires only a valid uid anchor; instances
+                      missing base_id but with a known uid are kept and repaired,
+                      not destroyed.
 
-    Returns: True nếu có thay đổi (để caller biết cần save).
+    Repair order (each field may depend on the previous):
+        quality → durability_max → durability → broken → passive
+
+    Returns True if any field was written (caller should persist the user record).
     """
     changed = False
 
-    # --- Dọn orphan instances ---
-    valid_uids: set[str] = set(user.get("weapons", [])) | {
-        e for e in user.get("equipped", []) if isinstance(e, str)
-    }
-    before = len(user.get("weapon_instances", []))
-    user["weapon_instances"] = [
-        wi for wi in user.get("weapon_instances", [])
-        if isinstance(wi, dict)
-        and "uid"     in wi
-        and "base_id" in wi
-        and wi["uid"] in valid_uids
-    ]
-    if len(user["weapon_instances"]) != before:
+    # ── Step 0: Build the authoritative UID set ──────────────────────────────
+    # Accept only string UIDs; silently skip malformed entries.
+    valid_uids: set[str] = set()
+    for uid in user.get("weapons", []):
+        if isinstance(uid, str):
+            valid_uids.add(uid)
+    for uid in user.get("equipped", []):
+        if isinstance(uid, str):
+            valid_uids.add(uid)
+
+    # ── Step 1: Safer orphan cleanup ─────────────────────────────────────────
+    # Remove an instance only when we are CERTAIN it is orphaned:
+    #   (a) not a dict                     — structurally unusable
+    #   (b) uid key missing                — cannot anchor to any inventory slot
+    #   (c) uid present but not in bag/equipped — genuine orphan
+    #
+    # Critically: we do NOT require base_id here.  An instance that has a valid
+    # uid but is missing base_id can still be repaired in Step 3 (it falls back
+    # to "common" rarity).  Destroying it would silently wipe player progression.
+    raw_instances = user.get("weapon_instances", [])
+    kept: list[dict] = []
+    removed_count = 0
+    for wi in raw_instances:
+        if not isinstance(wi, dict):
+            removed_count += 1
+            logger.debug("migrate: discarding non-dict entry in weapon_instances")
+            continue
+        uid = wi.get("uid")
+        if uid is None:
+            removed_count += 1
+            logger.debug("migrate: discarding instance with no uid")
+            continue
+        if uid not in valid_uids:
+            removed_count += 1
+            logger.debug(f"migrate: discarding orphan uid={uid!r}")
+            continue
+        kept.append(wi)
+
+    if removed_count:
         logger.info(
-            f"migrate_weapon_instance_fields: "
-            f"removed {before - len(user['weapon_instances'])} orphan instances"
+            f"migrate_weapon_instance_fields: removed {removed_count} orphan/invalid instances"
         )
         changed = True
+    user["weapon_instances"] = kept
 
-    # --- Back-fill fields mới ---
+    # ── Step 2: Create stub instances for UIDs that have none ─────────────────
+    # A UID in the player's bag or equipped slots with no matching instance is
+    # a data gap — the instance was never written or was accidentally deleted.
+    # We create a minimal stub {"uid": uid} so Step 3 repairs it fully.
+    # Sorted for determinism (consistent ordering across saves).
+    existing_uids = {wi["uid"] for wi in user["weapon_instances"]}
+    for uid in sorted(valid_uids - existing_uids):
+        stub: dict = {"uid": uid}
+        user["weapon_instances"].append(stub)
+        logger.info(f"migrate_weapon_instance_fields: created stub instance for uid={uid!r}")
+        changed = True
+
+    # ── Step 3: Surgical per-field repair ────────────────────────────────────
     for wi in user["weapon_instances"]:
         if not isinstance(wi, dict):
-            continue
-        # FIX: phải kiểm tra đủ 5 field VÀ durability > 0
-        # Nếu durability == 0 mà durability_max chưa có → vẫn cần back-fill
-        if (
-            "quality"        in wi
-            and "durability"     in wi and wi.get("durability", 0) > 0
-            and "durability_max" in wi
-            and "passive"        in wi
-            and "broken"         in wi
-        ):
-            continue  # đã đầy đủ, bỏ qua
+            continue  # paranoia guard; Step 1 already filtered these
 
+        uid = wi.get("uid", "<unknown>")
+
+        # Resolve rarity from weapon definition — safe fallback to "common".
+        # If base_id is missing or unknown, all calculations use "common" values.
         try:
-            w_data  = get_weapon_by_id(wi.get("base_id", "")) or {}
-            rarity  = w_data.get("rarity", "common")
-            quality = roll_quality(rarity)
-            q_multi = QUALITY_TIERS.get(quality, {}).get("multiplier", 1.0)
-            dur_max = int(DURABILITY_BY_RARITY.get(rarity, 30) * q_multi)
-            passive = roll_passive(rarity, quality)
-        except Exception as e:
-            logger.warning(f"migrate_weapon_instance_fields: fallback for uid={wi.get('uid')}: {e}")
-            quality = "medium"
-            dur_max = 30
-            passive = {}
+            w_data = get_weapon_by_id(wi.get("base_id", "")) or {}
+        except Exception as exc:
+            logger.warning(f"migrate: uid={uid!r} get_weapon_by_id failed: {exc}")
+            w_data = {}
+        rarity: str = w_data.get("rarity", "common")
 
-        wi.setdefault("quality",        quality)
-        wi.setdefault("durability",     dur_max)
-        wi.setdefault("durability_max", dur_max)
-        wi.setdefault("passive",        passive)
-        wi.setdefault("broken",         False)
-        changed = True
+        # ── quality ──────────────────────────────────────────────────────────
+        # Invariant: must be a key in QUALITY_TIERS.
+        # Repair:    reroll using the weapon's rarity for correct probability.
+        # False-positive guard: only invalid tier names trigger a reroll;
+        #   any recognised key (e.g. "high") is preserved unconditionally.
+        quality_stored = wi.get("quality")
+        if not _is_valid_quality(quality_stored):
+            try:
+                new_quality = roll_quality(rarity)
+            except Exception as exc:
+                logger.warning(f"migrate: uid={uid!r} roll_quality failed: {exc}")
+                new_quality = "medium"
+            wi["quality"] = new_quality
+            logger.info(
+                f"migrate: uid={uid!r} quality repaired {quality_stored!r} → {new_quality!r}"
+            )
+            changed = True
+        quality: str = wi["quality"]  # guaranteed valid from this point
+
+        # ── durability_max ───────────────────────────────────────────────────
+        # Invariant: int ≥ _dur_max_floor(rarity).
+        # Repair:    recalculate from (rarity, quality) — the same formula used
+        #            at instance creation.
+        # False-positive guard: the floor is the minimum any real roll could ever
+        #   produce (base × 0.55).  A stored value at or above the floor is kept,
+        #   even if it doesn't match the exact current formula, because the player
+        #   may legitimately have rolled that tier before rounding changed.
+        dur_max_stored = wi.get("durability_max")
+        dur_floor      = _dur_max_floor(rarity)
+        if not isinstance(dur_max_stored, int) or dur_max_stored < dur_floor:
+            new_dur_max = _dur_max_expected(rarity, quality)
+            logger.info(
+                f"migrate: uid={uid!r} durability_max repaired "
+                f"{dur_max_stored!r} → {new_dur_max} (floor={dur_floor})"
+            )
+            wi["durability_max"] = new_dur_max
+            changed = True
+        dur_max: int = wi["durability_max"]  # guaranteed ≥ dur_floor
+
+        # ── durability ───────────────────────────────────────────────────────
+        # Invariant: int in [0, dur_max].
+        # Missing    → full (treat as a freshly issued weapon).
+        # Negative   → clamp to 0 (impossible value; may have come from a
+        #               subtraction bug elsewhere).
+        # > dur_max  → clamp to dur_max (e.g. dur_max was *reduced* by repair
+        #               above from a corrupted value; preserve as much as possible).
+        # NOTE: we never invent durability > dur_max even to "restore" the weapon;
+        #       that would silently grant free durability.
+        dur_stored = wi.get("durability")
+        if not isinstance(dur_stored, int):
+            wi["durability"] = dur_max
+            logger.info(
+                f"migrate: uid={uid!r} durability set to {dur_max} (was {dur_stored!r})"
+            )
+            changed = True
+        elif dur_stored < 0:
+            wi["durability"] = 0
+            logger.info(
+                f"migrate: uid={uid!r} durability clamped {dur_stored} → 0"
+            )
+            changed = True
+        elif dur_stored > dur_max:
+            wi["durability"] = dur_max
+            logger.info(
+                f"migrate: uid={uid!r} durability clamped {dur_stored} → {dur_max}"
+            )
+            changed = True
+        durability: int = wi["durability"]  # guaranteed in [0, dur_max]
+
+        # ── broken ───────────────────────────────────────────────────────────
+        # Invariant: bool; broken MUST be True when durability == 0.
+        # `broken` is a derived field — decrease_durability() sets it at the
+        # moment durability hits zero.  Any disagreement between broken and
+        # durability is therefore corruption, not a legitimate game state.
+        #
+        # We fix BOTH impossible cases:
+        #   durability == 0  and  broken == False  → weapon should be broken
+        #   durability  > 0  and  broken == True   → weapon can't be broken with HP
+        broken_stored = wi.get("broken")
+        correct_broken = (durability == 0)
+        if not isinstance(broken_stored, bool):
+            wi["broken"] = correct_broken
+            logger.info(
+                f"migrate: uid={uid!r} broken set to {correct_broken} "
+                f"(was {broken_stored!r}, durability={durability})"
+            )
+            changed = True
+        elif broken_stored != correct_broken:
+            wi["broken"] = correct_broken
+            logger.info(
+                f"migrate: uid={uid!r} broken corrected "
+                f"{broken_stored} → {correct_broken} (durability={durability})"
+            )
+            changed = True
+
+        # ── passive ──────────────────────────────────────────────────────────
+        # Invariant: {"id": <id in PASSIVE_INDEX>, "roll": <numeric>}.
+        # Invalid states (all trigger a fresh roll):
+        #   - key absent in wi entirely
+        #   - {} empty dict  ← the "invisible passive" silent corruption
+        #   - id missing or not in PASSIVE_INDEX (unknown passive, possibly from
+        #     a content removal)
+        #   - roll missing or not numeric
+        #
+        # Valid passives are NEVER rerolled.  The check is strict equality
+        # against PASSIVE_INDEX — no fuzzy matching.
+        passive_stored = wi.get("passive")
+        if not _is_valid_passive(passive_stored):
+            try:
+                new_passive = roll_passive(rarity, quality)
+            except Exception as exc:
+                logger.warning(f"migrate: uid={uid!r} roll_passive failed: {exc}")
+                new_passive = roll_passive("common", "medium")
+            wi["passive"] = new_passive
+            logger.info(
+                f"migrate: uid={uid!r} passive repaired "
+                f"(was {passive_stored!r}) → id={new_passive.get('id')!r}"
+            )
+            changed = True
 
     return changed
 
@@ -380,7 +565,9 @@ def fmt_instance_info(wi: dict) -> str:
 
     quality = wi.get("quality", "medium")
     q_label = QUALITY_TIERS.get(quality, {}).get("label", quality)
-    dur_max = wi.get("durability_max", 1)
+    dur_max = wi.get("durability_max", 0)
+    if dur_max == 0:
+        return ""   # instance chưa có durability data → không hiển thị
     dur     = wi.get("durability", dur_max)  # FIX: default = full durability, không phải 0
     broken  = wi.get("broken", False)
     fill    = int(dur / max(dur_max, 1) * 10)
