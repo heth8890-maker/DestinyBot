@@ -324,24 +324,6 @@ ITEMS = [
     },
     # ── VẬT PHẨM MỚI THÊM ──
     {
-        "id": "5307",
-        "name": "Rong biển",
-        "emoji": "<:5326:1503843375412023407>",
-        "rarity": "uncommon",
-        "min": 8,
-        "max": 13,
-        "drop_chance": 0.06,
-    },
-    {
-        "id": "1905",
-        "name": "Càng cua biển sâu",
-        "emoji": "<:5328:1503843373759332483>",
-        "rarity": "rare",
-        "min": 24,
-        "max": 28,
-        "drop_chance": 0.07,
-    },
-    {
         "id": "5305",
         "name": "Vỏ ốc biển",
         "emoji": "<:5329:1503843371788275862>",

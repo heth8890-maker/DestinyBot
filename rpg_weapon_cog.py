@@ -33,6 +33,7 @@ from rpg_weapon_data import (
     _fmt_combined_effects,
     _rarity_tier,
 )
+from rpg_instance import resolve_passive
 
 
 # ═══════════════════════════════════════════════════════════
@@ -56,7 +57,9 @@ class RPGWeapon(commands.Cog):
         wi      = wi_map.get(wid)
         lv      = wi.get("level", 1) if wi else 1
         eq_tag  = " **[E]**" if wid in equipped_set else ""
-        return f"{em} **{nm}**{eq_tag} • Lv {lv}\n`{wid}`"
+        p       = resolve_passive(wi) if isinstance(wi, dict) else {}
+        p_tag   = f" {p.get('emoji', '')} {p.get('name', '')}" if p.get("id") else ""
+        return f"{em} **{nm}**{p_tag}{eq_tag} • Lv {lv}\n`{wid}`"
 
     # ─────────────────────────────────────────────────────────
     # MAIN: dtn weapon / dtn weapon <uid>
@@ -749,13 +752,18 @@ class RPGWeapon(commands.Cog):
                 if raw_info and raw_info.strip():
                     instance_info_line = raw_info
                 else:
-                    # Present but returned empty — surface this explicitly
-                    instance_info_line = "-# ⚠️ Instance info unavailable (empty return)"
+                    # Present but returned empty — expose the corrupt field
+                    uid_dbg = wi_safe.get("uid", "?") if isinstance(wi_safe, dict) else "?"
+                    dur_dbg = wi_safe.get("durability_max", "MISSING") if isinstance(wi_safe, dict) else "?"
+                    instance_info_line = f"-# ⚠️ Instance data incomplete (uid={uid_dbg}, dur_max={dur_dbg})"
             else:
                 instance_info_line = None   # already warned via exp_bar_line above
 
+            _p      = resolve_passive(wi_safe) if isinstance(wi_safe, dict) else {}
+            _p_tag  = f" {_p.get('emoji', '')} {_p.get('name', '')}" if _p.get("id") else ""
+
             field_parts = [
-                f"{em} **{nm}** — {rlabel}",
+                f"{em} **{nm}**{_p_tag} — {rlabel}",
                 exp_bar_line,
                 f"-# `{uid}`",
             ]

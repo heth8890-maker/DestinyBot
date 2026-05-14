@@ -24,7 +24,7 @@ _QUALITY_LABEL_FALLBACK = {
     "extreme":     "Cực Cao",
 }
 
-FORGE_IMAGE_PATH = "assets/IMG_forge.png"
+FORGE_IMAGE_PATH = "IMG_forge.png"
 COIN_EMOJI       = "<:Coin:1495831576397742241>"
 ERR              = "<:X_:1495466670616219819>"
 OK               = "<:Tick:1495466684520206528>"

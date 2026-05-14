@@ -366,7 +366,8 @@ def migrate_weapon_instance_fields(user: dict) -> bool:
     # Sorted for determinism (consistent ordering across saves).
     existing_uids = {wi["uid"] for wi in user["weapon_instances"]}
     for uid in sorted(valid_uids - existing_uids):
-        stub: dict = {"uid": uid}
+        base_id = uid.split("-")[0] if "-" in uid else uid
+        stub: dict = {"uid": uid, "base_id": base_id}
         user["weapon_instances"].append(stub)
         logger.info(f"migrate_weapon_instance_fields: created stub instance for uid={uid!r}")
         changed = True
@@ -566,8 +567,12 @@ def fmt_instance_info(wi: dict) -> str:
     quality = wi.get("quality", "medium")
     q_label = QUALITY_TIERS.get(quality, {}).get("label", quality)
     dur_max = wi.get("durability_max", 0)
-    if dur_max == 0:
-        return ""   # instance chưa có durability data → không hiển thị
+    if not isinstance(dur_max, int) or dur_max <= 0:
+        logger.warning(
+            f"fmt_instance_info: uid={wi.get('uid')!r} has invalid "
+            f"durability_max={dur_max!r} — rendering with fallback"
+        )
+        dur_max = 1  # safe fallback: render partial info rather than hide all
     dur     = wi.get("durability", dur_max)  # FIX: default = full durability, không phải 0
     broken  = wi.get("broken", False)
     fill    = int(dur / max(dur_max, 1) * 10)
