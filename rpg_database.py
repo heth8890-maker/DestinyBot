@@ -36,6 +36,7 @@ import uuid as _uuid
 
 from database_helper import load_core_data, save_core_data
 from typing import Optional
+from rpg_instance import migrate_weapon_instance_fields as _migrate_instance_fields
 
 log = logging.getLogger(__name__)
 
@@ -498,7 +499,8 @@ def get_user(user_id) -> tuple[dict, list]:
     # whatever both prior passes produced.
     dirty  = migrate_upgraded_weapons(user)
     dirty |= migrate_all_weapons_to_uid(user)
-    dirty |= migrate_weapon_instance_fields(user)  # FIX: was missing entirely
+    dirty |= migrate_weapon_instance_fields(user)   # local: normalizes level/exp/exp_to_next
+    dirty |= _migrate_instance_fields(user)         # full: adds quality/durability/passive/broken
 
     if dirty:
         # FIX: Wrap in try/except so a save failure is surfaced, not silently

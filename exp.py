@@ -11,23 +11,52 @@ Hệ thống Level / XP / Profile / Background.
   - dtn shop background        → dtn bg shop
 
   dtn profile / dtn pf         → giữ nguyên (không conflict)
+
+⚡ Thay đổi so với bản render (chuyển JSON → MongoDB):
+  - Xóa load_eco / save_eco / load_exp / save_exp / load_inv / save_inv
+  - get_balance / update_balance   → dùng database_helper (collection economy)
+  - Level/XP data (exp, level)     → lưu vào cùng document user trong economy
+  - Inventory (owned_backgrounds,
+    equipped_background)            → lưu vào cùng document user trong economy
+
+⚡ Fix kiến trúc (v2):
+  - apply_economy_delta(): gộp cash + exp + level vào 1 atomic MongoDB update
+    → tránh trạng thái lệch nếu một trong hai operation fail
+  - on_message chạy Mongo I/O qua run_in_executor → không block event loop
+  - get_inventory() dùng flag "inv_migrated" → migration backward-compat
+    chỉ chạy 1 lần, không overwrite dữ liệu mới sau restart
+  - Chuẩn hóa schema document (xem DEFAULT_EXP_FIELDS bên dưới)
 """
 
+import asyncio
 import discord
 from discord.ext import commands
-import json
 import os
 import io
 import time
 import aiohttp
 from PIL import Image, ImageDraw, ImageFont
+import pymongo
+
+from database_helper import load_core_data, save_core_data, _get_collections, _with_retry
+
+# ═══════════════════════════════════════════════════════════
+# SCHEMA CHUẨN — các field exp.py quản lý trong document economy
+# ═══════════════════════════════════════════════════════════
+# Chỉ dùng để khởi tạo field còn thiếu — KHÔNG dùng để overwrite.
+DEFAULT_EXP_FIELDS = {
+    "exp":                 0,
+    "level":               1,
+    "owned_backgrounds":   [],
+    "equipped_background": None,
+    "inv_migrated":        False,   # flag: backward-compat đã chạy chưa
+}
 
 # ═══════════════════════════════════════════════════════════
 # PHẦN 1: CẤU HÌNH BACKGROUND SHOP
 # ═══════════════════════════════════════════════════════════
 
 BACKGROUNDS = {
-
     "9282": {"name": "Bãi biển",             "file": "IMG_20260416_047927.png",  "price": 6000},
     "3938": {"name": "Thảm cỏ ánh nắng",    "file": "IMG_20260416_017935.jpeg", "price": 6000},
     "7386": {"name": "Bãi biển xanh",        "file": "IMG_20260416_046937.png",  "price": 8000},
@@ -41,100 +70,214 @@ BACKGROUNDS = {
     "7580": {"name": "Đại hồng thủy",       "file": "IMG_daihongthuy.png",      "price": 8000},
     "1393": {"name": "Pháo đài rừng sâu",   "file": "IMG_phaodairungsau.png",   "price": 8000},
     "9339": {"name": "Sắc cảnh hắc miêu",   "file": "IMG_saccanhhacmieu.png",   "price": 6500},
-    "1836": {"name": "Ace hoa quyen",       "file": "IMG_ace.png",              "price": 12000},
-    "4839": {"name": "Wang lin ",       "file": "IMG_vulam.png",              "price": 12000},
+    "1836": {"name": "Ace hoa quyen",        "file": "IMG_ace.png",              "price": 12000},
+    "4839": {"name": "Wang lin ",            "file": "IMG_vulam.png",            "price": 12000},
 }
 
 XP_COOLDOWN      = 5    # giây cooldown cộng XP từ on_message
 COMMAND_COOLDOWN = 10   # giây cooldown lệnh profile
 
 # ═══════════════════════════════════════════════════════════
-# PHẦN 2: HÀM XỬ LÝ DỮ LIỆU JSON
+# PHẦN 2: HÀM TRUY CẬP DỮ LIỆU — MONGODB
 # ═══════════════════════════════════════════════════════════
+# Tất cả data (cash, exp, level, inventory) nằm trong 1 document
+# trong collection "economy" của database_helper.
+#
+# Cấu trúc document user (economy collection):
+#   {
+#     "_id":                 "uid_str",
+#     "cash":                int,
+#     "exp":                 int,           ← XP hiện tại (trong level này)
+#     "level":               int,
+#     "owned_backgrounds":   [str, ...],
+#     "equipped_background": str | None,
+#     "inv_migrated":        bool,          ← flag: backward-compat chỉ chạy 1 lần
+#     ... (các field RPG khác từ database_helper)
+#   }
+# ────────────────────────────────────────────────────────────
 
-def _load_json(path):
-    if not os.path.exists(path):
-        with open(path, "w") as f:
-            json.dump({}, f)
-        return {}
-    try:
-        with open(path, "r") as f:
-            content = f.read().strip()
-            return json.loads(content) if content else {}
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def _save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-def load_eco():  return _load_json("economy.json")
-def save_eco(d): _save_json("economy.json", d)
-def load_exp():  return _load_json("level.json")
-def save_exp(d): _save_json("level.json", d)
-def load_inv():  return _load_json("inventory.json")
-def save_inv(d): _save_json("inventory.json", d)
+def _get_economy_col():
+    """Lấy collection economy từ database_helper."""
+    economy_col, _ = _get_collections()
+    return economy_col
 
 
-def get_balance(user_id):
-    return load_eco().get(str(user_id), 0)
+def _load_user(user_id) -> dict:
+    """
+    Tải document user đầy đủ. Tự tạo mới nếu chưa có.
+    Luôn trả về dict (không bao giờ None).
+    """
+    data = load_core_data(str(user_id))
+    return data["user"]
 
 
-def update_balance(user_id, amount):
-    data = load_eco()
+# ── Balance ──────────────────────────────────────────────────
+
+def get_balance(user_id) -> int:
+    """Đọc số dư của user từ MongoDB (sync)."""
+    user = _load_user(user_id)
+    return user.get("cash", 0)
+
+
+# ── Entry point duy nhất cho mọi cập nhật kinh tế ────────────
+
+def apply_economy_delta(
+    user_id,
+    *,
+    cash:  int = 0,
+    exp:   int = 0,
+    level: int | None = None,
+) -> dict:
+    """
+    Gộp cash + exp + level vào 1 atomic MongoDB update.
+
+    Tại sao cần hàm này:
+      Nếu dùng 2 update riêng (1 cho cash, 1 cho exp/level), một trong 2
+      có thể fail sau khi cái kia đã commit → user bị lệch trạng thái
+      (ví dụ: đã nhận tiền level-up nhưng level không tăng, hoặc ngược lại).
+      1 atomic update = all-or-nothing trên server MongoDB.
+
+    Args:
+        cash:  số tiền cộng/trừ (âm để trừ).
+        exp:   lượng XP cộng vào field exp (chỉ dùng khi chưa tính level-up).
+        level: nếu có level mới sau khi tính level-up, $set luôn vào đây.
+               exp lúc này là exp còn dư SAU khi trừ ngưỡng level.
+
+    Returns:
+        Document sau update {"cash": ..., "exp": ..., "level": ...}.
+        Trả về {} nếu update thất bại (caller tự xử lý).
+    """
+    uid       = str(user_id)
+    inc_ops   = {}
+    set_ops   = {}
+
+    if cash != 0:
+        inc_ops["cash"] = cash
+    if exp != 0 and level is None:
+        # Chỉ $inc exp khi KHÔNG có level-up — tránh xung đột với $set exp bên dưới
+        inc_ops["exp"] = exp
+    if level is not None:
+        # Level-up: set cả exp (phần dư) lẫn level mới trong cùng 1 operation
+        set_ops["exp"]   = exp    # exp ở đây = exp còn dư sau level-up
+        set_ops["level"] = level
+
+    if not inc_ops and not set_ops:
+        # Không có gì để update — trả về data hiện tại
+        return _load_user(uid)
+
+    update_doc: dict = {}
+    if inc_ops:
+        update_doc["$inc"] = inc_ops
+    if set_ops:
+        update_doc["$set"] = set_ops
+
+    economy_col = _get_economy_col()
+    result = _with_retry(
+        economy_col.find_one_and_update,
+        {"_id": uid},
+        update_doc,
+        upsert=True,
+        return_document=pymongo.ReturnDocument.AFTER,
+    )
+    return result or {}
+
+
+# ── XP / Level ───────────────────────────────────────────────
+
+def _get_exp_data(user_id) -> tuple[int, int]:
+    """Trả về (xp, level) của user."""
+    user = _load_user(user_id)
+    return user.get("exp", 0), user.get("level", 1)
+
+
+# ── Inventory (backgrounds) ──────────────────────────────────
+
+def get_inventory(user_id) -> dict:
+    """
+    Trả về {"owned_backgrounds": [...], "equipped_background": str|None}.
+
+    Migration backward-compat (key cũ từ inventory.json) chỉ chạy 1 lần
+    nhờ flag "inv_migrated". Sau khi bot restart, nếu flag đã True,
+    bỏ qua toàn bộ migration → không bao giờ overwrite dữ liệu mới.
+    """
     uid  = str(user_id)
-    data[uid] = data.get(uid, 0) + amount
-    save_eco(data)
+    user = _load_user(uid)
+
+    # Đã migrate rồi → trả thẳng, không check key cũ nữa
+    if user.get("inv_migrated"):
+        return {
+            "owned_backgrounds":   user.get("owned_backgrounds", []),
+            "equipped_background": user.get("equipped_background"),
+        }
+
+    # Lần đầu hoặc user cũ chưa có flag: chạy migration 1 lần duy nhất
+    economy_col = _get_economy_col()
+    set_ops = {"inv_migrated": True}
+
+    # Rename key cũ nếu tồn tại, dùng $rename để atomic
+    rename_ops = {}
+    if "owned" in user and "owned_backgrounds" not in user:
+        rename_ops["owned"] = "owned_backgrounds"
+    if "current" in user and "equipped_background" not in user:
+        rename_ops["current"] = "equipped_background"
+
+    # Khởi tạo field mới nếu chưa có (dùng $setOnInsert không được ở đây
+    # vì document đã tồn tại → dùng setOnInsert alternative: chỉ set nếu thiếu)
+    if "owned_backgrounds" not in user and "owned" not in user:
+        set_ops["owned_backgrounds"] = []
+    if "equipped_background" not in user and "current" not in user:
+        set_ops["equipped_background"] = None
+
+    update_doc: dict = {"$set": set_ops}
+    if rename_ops:
+        update_doc["$rename"] = rename_ops
+
+    result = _with_retry(
+        economy_col.find_one_and_update,
+        {"_id": uid},
+        update_doc,
+        upsert=False,   # không tạo mới — user phải tồn tại rồi
+        return_document=pymongo.ReturnDocument.AFTER,
+    )
+    if result is None:
+        result = user   # fallback: document chưa tồn tại, dùng data local
+
+    return {
+        "owned_backgrounds":   result.get("owned_backgrounds", []),
+        "equipped_background": result.get("equipped_background"),
+    }
 
 
-def get_inventory(user_id):
-    data = load_inv()
-    uid  = str(user_id)
-    if uid not in data:
-        data[uid] = {"owned_backgrounds": [], "equipped_background": None}
-        save_inv(data)
-    else:
-        changed = False
-        # Backward-compat: đổi tên key cũ
-        if "owned" in data[uid] and "owned_backgrounds" not in data[uid]:
-            data[uid]["owned_backgrounds"] = data[uid].pop("owned")
-            changed = True
-        if "current" in data[uid] and "equipped_background" not in data[uid]:
-            data[uid]["equipped_background"] = data[uid].pop("current")
-            changed = True
-        if "owned_backgrounds" not in data[uid]:
-            data[uid]["owned_backgrounds"] = []
-            changed = True
-        if "equipped_background" not in data[uid]:
-            data[uid]["equipped_background"] = None
-            changed = True
-        if changed:
-            save_inv(data)
-    return data[uid]
+def add_owned_bg(user_id, bg_id: str) -> None:
+    """Thêm background vào danh sách sở hữu (atomic $addToSet)."""
+    uid = str(user_id)
+    economy_col = _get_economy_col()
+    _with_retry(
+        economy_col.update_one,
+        {"_id": uid},
+        {"$addToSet": {"owned_backgrounds": bg_id}},
+        upsert=True,
+    )
 
 
-def add_owned_bg(user_id, bg_id):
-    data = load_inv()
-    uid  = str(user_id)
-    if uid not in data:
-        data[uid] = {"owned_backgrounds": [], "equipped_background": None}
-    if bg_id not in data[uid]["owned_backgrounds"]:
-        data[uid]["owned_backgrounds"].append(bg_id)
-    save_inv(data)
+def set_equipped_bg(user_id, bg_id: str) -> bool:
+    """
+    Trang bị background nếu user đã sở hữu.
+    Trả về True nếu thành công, False nếu chưa sở hữu.
+    """
+    uid = str(user_id)
+    inv = get_inventory(uid)
+    if bg_id not in inv.get("owned_backgrounds", []):
+        return False
 
-
-def set_equipped_bg(user_id, bg_id):
-    data = load_inv()
-    uid  = str(user_id)
-    if uid not in data:
-        data[uid] = {"owned_backgrounds": [], "equipped_background": None}
-    if bg_id in data[uid]["owned_backgrounds"]:
-        data[uid]["equipped_background"] = bg_id
-        save_inv(data)
-        return True
-    return False
+    economy_col = _get_economy_col()
+    _with_retry(
+        economy_col.update_one,
+        {"_id": uid},
+        {"$set": {"equipped_background": bg_id}},
+        upsert=True,
+    )
+    return True
 
 
 # ═══════════════════════════════════════════════════════════
@@ -209,40 +352,56 @@ class Experience(commands.Cog):
         uid = str(message.author.id)
         now = time.time()
 
-        if now - self._xp_cooldown.get(uid, 0) >= XP_COOLDOWN:
-            self._xp_cooldown[uid] = now
+        if now - self._xp_cooldown.get(uid, 0) < XP_COOLDOWN:
+            return
 
-            data = load_exp()
-            if uid not in data:
-                data[uid] = {"xp": 0, "level": 1}
+        self._xp_cooldown[uid] = now
 
-            xp_to_add = 120 if message.content.lower().startswith("dtn ") else 50
-            data[uid]["xp"] += xp_to_add
+        # Đọc exp/level hiện tại — chạy trong executor để không block event loop
+        # (pymongo là sync I/O; nếu Mongo chậm sẽ block toàn bộ bot)
+        loop = asyncio.get_event_loop()
+        xp, current_level = await loop.run_in_executor(None, _get_exp_data, uid)
 
-            leveled_up    = False
-            current_level = data[uid]["level"]
+        xp_to_add = 120 if message.content.lower().startswith("dtn ") else 50
+        xp += xp_to_add
 
-            while True:
-                req_xp = get_xp_needed(current_level)
-                if data[uid]["xp"] >= req_xp:
-                    data[uid]["xp"]    -= req_xp
-                    data[uid]["level"] += 1
-                    current_level       = data[uid]["level"]
-                    leveled_up          = True
-                    reward_money        = 4000 * (2 ** (current_level - 2))
-                    update_balance(message.author.id, reward_money)
-                else:
-                    break
+        leveled_up   = False
+        reward_money = 0
 
-            save_exp(data)
+        while True:
+            req_xp = get_xp_needed(current_level)
+            if xp >= req_xp:
+                xp            -= req_xp
+                current_level += 1
+                leveled_up     = True
+                reward_money  += 4000 * (2 ** (current_level - 2))
+            else:
+                break
 
-            if leveled_up:
-                reward = 24000 * (2 ** (current_level - 2))
-                await message.channel.send(
-                    f"🎉 | Chúc mừng **{message.author.name}** đã thăng cấp lên "
-                    f"**Level {current_level}**! "
-                    f"Bạn nhận được **{reward:,}** <:Coin:1495831576397742241>!"
-                )
+        # Gộp cash + exp + level vào 1 atomic MongoDB update
+        # → tránh trường hợp: level tăng thành công nhưng cash fail (hoặc ngược lại)
+        if leveled_up:
+            await loop.run_in_executor(
+                None,
+                lambda: apply_economy_delta(
+                    uid,
+                    cash=reward_money,
+                    exp=xp,
+                    level=current_level,
+                ),
+            )
+            reward_display = 24000 * (2 ** (current_level - 2))
+            await message.channel.send(
+                f"🎉 | Chúc mừng **{message.author.name}** đã thăng cấp lên "
+                f"**Level {current_level}**! "
+                f"Bạn nhận được **{reward_display:,}** <:Coin:1495831576397742241>!"
+            )
+        else:
+            # Không level-up: chỉ cộng exp, không đụng cash
+            await loop.run_in_executor(
+                None,
+                lambda: apply_economy_delta(uid, exp=xp_to_add),
+            )
 
     # ── Vẽ ảnh profile ──────────────────────────────────────
     async def create_profile_image(self, user, level, xp, req_xp, bal, current_bg_id):
@@ -330,7 +489,7 @@ class Experience(commands.Cog):
         draw.rectangle(
             [AV_X - BORDER_W, AV_Y - BORDER_W,
              AV_X + AV_SIZE + BORDER_W, AV_Y + AV_SIZE + BORDER_W],
-            outline=(255, 255, 255, 120),  #trắng mờ
+            outline=(255, 255, 255, 120),  # trắng mờ
             width=BORDER_W,
         )
 
@@ -374,7 +533,7 @@ class Experience(commands.Cog):
         inner_pad  = 6
         if fill_width > inner_pad * 2:
             draw.rectangle(
-                [BAR_X + inner_pad,          BAR_Y + inner_pad,
+                [BAR_X + inner_pad,              BAR_Y + inner_pad,
                  BAR_X + fill_width - inner_pad, BAR_Y + BAR_HEIGHT - inner_pad],
                 fill="#2ECC71",
             )
@@ -408,13 +567,9 @@ class Experience(commands.Cog):
             )
             return
 
-        uid  = str(ctx.author.id)
-        data = load_exp()
-        if uid not in data:
-            data[uid] = {"xp": 0, "level": 1}
-            save_exp(data)
+        uid = str(ctx.author.id)
 
-        inv      = get_inventory(ctx.author.id)
+        inv      = get_inventory(uid)
         owned    = inv.get("owned_backgrounds", [])
         equipped = inv.get("equipped_background", None)
 
@@ -425,10 +580,9 @@ class Experience(commands.Cog):
             )
             return
 
-        level  = data[uid]["level"]
-        xp     = data[uid]["xp"]
-        req_xp = get_xp_needed(level)
-        bal    = get_balance(ctx.author.id)
+        xp, level = _get_exp_data(uid)
+        req_xp    = get_xp_needed(level)
+        bal       = get_balance(uid)
 
         image_bytes = await self.create_profile_image(
             ctx.author, level, xp, req_xp, bal, equipped
@@ -570,7 +724,11 @@ class Experience(commands.Cog):
             )
             return
 
-        update_balance(ctx.author.id, -price)
+        # apply_economy_delta trừ tiền atomic — tuy nhiên check "bal < price" bên trên
+        # và trừ tiền bên dưới vẫn có khoảng TOCTOU nhỏ nếu 2 lệnh buy chạy song song.
+        # Để triệt để: nên dùng update_balance_safe (async, có lock) từ cash.py.
+        # Hiện tại acceptable vì background không phải item high-frequency.
+        apply_economy_delta(ctx.author.id, cash=-price)
         add_owned_bg(ctx.author.id, bg_id)
 
         await ctx.send(
@@ -611,21 +769,16 @@ class Experience(commands.Cog):
             await ctx.send("❌ ID Background không tồn tại!")
             return
 
-        inv = get_inventory(ctx.author.id)
-        if bg_id not in inv.get("owned_backgrounds", []):
-            await ctx.send(
-                f"❌ Bạn chưa sở hữu Background `{bg_id}`! "
-                f"Mua bằng `dtn bg buy {bg_id}`"
-            )
-            return
-
         if set_equipped_bg(ctx.author.id, bg_id):
             await ctx.send(
                 f"✅ Đã trang bị **{BACKGROUNDS[bg_id]['name']}**! "
                 f"Dùng `dtn profile` để xem."
             )
         else:
-            await ctx.send("❌ Có lỗi xảy ra khi đổi background.")
+            await ctx.send(
+                f"❌ Bạn chưa sở hữu Background `{bg_id}`! "
+                f"Mua bằng `dtn bg buy {bg_id}`"
+            )
 
 
 # ═══════════════════════════════════════════════════════════

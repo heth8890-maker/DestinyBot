@@ -123,7 +123,7 @@ from rpg_item import (
     get_item_by_id,
     _pick_item_from_rarity,
 )
-from rpg_weapon import (
+from rpg_weapon_data import (
     WEAPONS,
     WEAPON_EFFECTS,
     CRATES,

@@ -57,8 +57,8 @@ class RPGWeapon(commands.Cog):
         wi      = wi_map.get(wid)
         lv      = wi.get("level", 1) if wi else 1
         eq_tag  = " **[E]**" if wid in equipped_set else ""
-        p       = resolve_passive(wi) if isinstance(wi, dict) else {}
-        p_tag   = f" {p.get('emoji', '')} {p.get('name', '')}" if p.get("id") else ""
+        p       = resolve_passive(wi.get("passive")) if isinstance(wi, dict) else None
+        p_tag   = f" {p.get('emoji', '')} {p.get('name', '')}" if p and p.get("id") else ""
         return f"{em} **{nm}**{p_tag}{eq_tag} • Lv {lv}\n`{wid}`"
 
     # ─────────────────────────────────────────────────────────
