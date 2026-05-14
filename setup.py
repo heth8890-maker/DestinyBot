@@ -1,8 +1,6 @@
 import discord
-from discord.ext import commands
 import os
 
-from exp import load_exp
 from database_helper import _get_collections, _with_retry
 
 ICON_COIN = "<:Coin:1495831576397742241>"

@@ -57,7 +57,7 @@ class RPGWeapon(commands.Cog):
         wi      = wi_map.get(wid)
         lv      = wi.get("level", 1) if wi else 1
         eq_tag  = " **[E]**" if wid in equipped_set else ""
-        p       = resolve_passive(wi) if isinstance(wi, dict) else None
+        p       = resolve_passive(wi.get("passive", {})) if isinstance(wi, dict) else None
         p_icon  = p.get("emoji", "") if p and p.get("id") else ""
         return f"{em}{p_icon} **{nm}**{eq_tag} • Lv {lv}\n`{wid}`"
 
@@ -156,17 +156,15 @@ class RPGWeapon(commands.Cog):
                         inline=True,
                     )
 
-                # Passive — icon | name + description/effect in backticks
-                _p = resolve_passive(wi)
+                # Passive — format: <Icon> | <tên> → Passive → <mô tả>
+                _p = resolve_passive(wi.get("passive", {}))
                 if _p and _p.get("id"):
-                    p_lines = [f"{_p.get('emoji', '')} | **{_p.get('name', '')}**"]
-                    if _p.get("description"):
-                        p_lines.append(f"`{_p.get('description')}`")
-                    if _p.get("effect"):
-                        p_lines.append(f"`{_p.get('effect')}`")
+                    p_emoji = _p.get("emoji", "🔮")
+                    p_name  = _p.get("name", "Passive")
+                    p_desc  = _p.get("description") or _p.get("effect") or "—"
                     embed.add_field(
-                        name="Passive",
-                        value="\n".join(p_lines),
+                        name=f"{p_emoji} | {p_name}",
+                        value=f"**Passive**\n{p_desc}",
                         inline=False,
                     )
             else:
@@ -736,8 +734,8 @@ class RPGWeapon(commands.Cog):
             effects = w.get("effects", {})
 
             # Passive — for header tag and for effect formatter
-            _p      = resolve_passive(wi_safe) if isinstance(wi_safe, dict) else {}
-            _p_icon = _p.get("emoji", "") if _p.get("id") else ""
+            _p      = resolve_passive(wi_safe.get("passive", {})) if isinstance(wi_safe, dict) else {}
+            _p_icon = _p.get("emoji", "") if _p and _p.get("id") else ""
 
             effect_lines = _fmt_effects_scaled(
                 effects, level, instance_missing=instance_missing,
@@ -775,9 +773,14 @@ class RPGWeapon(commands.Cog):
             if effect_lines:
                 field_parts.extend(effect_lines)
 
+            # Guard: Discord giới hạn 1024 ký tự / field value
+            field_value = "\n".join(field_parts)
+            if len(field_value) > 1024:
+                field_value = field_value[:1020] + "\n…"
+
             embed.add_field(
                 name=slot_header,
-                value="\n".join(field_parts),
+                value=field_value,
                 inline=False,
             )
 

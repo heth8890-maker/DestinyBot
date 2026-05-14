@@ -207,7 +207,7 @@ class RPGForge(commands.Cog):
         self.bot = bot
 
     @commands.command(name="repair", aliases=["re"])
-    async def repair(self, ctx):
+    async def repair(self, ctx, target_uid: str = None):
         from rpg_core     import get_base_id
         from rpg_weapon_data   import get_weapon_by_id
         from rpg_database import get_user, save_user
@@ -336,6 +336,20 @@ class RPGForge(commands.Cog):
                 "corrupt":        False,
             })
 
+        # ── Lọc theo target_uid nếu được chỉ định ────────────────────
+        if target_uid is not None:
+            matched = [
+                s for s in slots_info
+                if s["uid"] and s["uid"].lower() == target_uid.lower()
+            ]
+            if not matched:
+                return await ctx.send(
+                    f"{ERR} | Không tìm thấy vũ khí `{target_uid}` trong các ô đang trang bị."
+                )
+            # Giữ lại đúng 1 slot khớp, cập nhật total_cost
+            slots_info = matched
+            total_cost = sum(s["cost"] for s in slots_info if s["needs_repair"])
+
         # ── Không có gì cần repair ────────────────────────────────────
         if total_cost == 0:
             embed = _build_forge_embed(slots_info, 0, ctx.author.display_name)
@@ -384,6 +398,7 @@ class RPGForge(commands.Cog):
                     await self_v.message.edit(
                         content="⏰ | Hết thời gian — đã huỷ.",
                         embed=None,
+                        attachments=[],
                         view=self_v,
                     )
                 except Exception:
@@ -433,6 +448,7 @@ class RPGForge(commands.Cog):
             return await view.message.edit(
                 content=f"{ERR} | Đã huỷ repair.",
                 embed=None,
+                attachments=[],
                 view=view,
             )
 
@@ -454,6 +470,7 @@ class RPGForge(commands.Cog):
             return await view.message.edit(
                 content=f"{ERR} | Không đủ tiền! Cần **{total_cost:,}** {COIN_EMOJI}.",
                 embed=None,
+                attachments=[],
                 view=view,
             )
 
@@ -504,6 +521,7 @@ class RPGForge(commands.Cog):
                     f"Không trừ tiền."
                 ),
                 embed=None,
+                attachments=[],
                 view=view,
             )
 
@@ -532,6 +550,7 @@ class RPGForge(commands.Cog):
             return await view.message.edit(
                 content=f"{ERR} | Lỗi lưu dữ liệu — không có gì thay đổi.",
                 embed=None,
+                attachments=[],
                 view=view,
             )
 
@@ -544,6 +563,7 @@ class RPGForge(commands.Cog):
                 f"— mất **{actual_cost:,}** {COIN_EMOJI}"
             ),
             embed=None,
+            attachments=[],
             view=view,
         )
 
