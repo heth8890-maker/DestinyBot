@@ -19,7 +19,7 @@ Quản lý Weapon Shop (10 slot, reset mỗi SHOP_RESET_SEC giây)
 import random
 import time
 
-from rpg_weapon import WEAPONS, RARE_CRATE_WEAPONS
+from rpg_weapon_data import WEAPONS, RARE_CRATE_WEAPONS
 from database_helper import load_shop_data, save_shop_data
 
 # ═══════════════════════════════════════════════════════════════
