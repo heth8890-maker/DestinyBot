@@ -579,16 +579,16 @@ def _rarity_tier(rarity: str) -> str:
 
 # ── Effect key → nhãn hiển thị ──────────────────────────
 _EFFECT_LABEL: dict[str, str] = {
-    "sell_bonus":      "sell_bonus",
-    "extra_slot":      "extra_slot",
-    "rare_bias":       "rare_bias",
-    "luck_up":         "luck_up",
-    "reduce_fail":     "reduce_fail",
-    "reduce_cooldown": "reduce_cooldown",
-    "double_drop":     "double_drop",
-    "double_value":    "double_value",
-    "reduce_uncommon": "reduce_uncommon",
-    "passive_oneiroi": "passive_oneiroi",
+    "sell_bonus":      "Sell Bonus",
+    "extra_slot":      "Extra Slot",
+    "rare_bias":       "Rare Bias",
+    "luck_up":         "Luck Up",
+    "reduce_fail":     "Reduce Fail",
+    "reduce_cooldown": "Reduce Cooldown",
+    "double_drop":     "Double Drop",
+    "double_value":    "Double Value",
+    "reduce_uncommon": "Reduce Uncommon",
+    "passive_oneiroi": "Oneiroi",
 }
 
 # Effect dạng số nguyên — không scale, không format %
@@ -791,43 +791,57 @@ def _fmt_effects_scaled(
     level: int,
     *,
     instance_missing: bool = False,
+    passive_obj: dict | None = None,
 ) -> list[str]:
     """
     Format từng effect có scale theo level — dùng trong DWI cho từng weapon.
 
     instance_missing=True: scale bị ép về Lv1 do không có instance record.
-    Passive effects được đánh dấu riêng để phân biệt với regular effects.
+    Passive effects được render thành block riêng với icon|name header.
     """
-    # If the instance record is absent we cannot know the real level.
-    # We still render effects but flag them as unverified.
     if instance_missing:
-        scale = 0.60   # Lv1 assumed — do NOT claim this is accurate
+        scale = 0.60
     else:
         scale = round(0.60 + (level - 1) * 0.02857, 3)
 
-    lines = []
+    regular_lines = []
+    passive_lines = []
+
     for key, val in effects.items():
         label = _EFFECT_LABEL.get(key, key)
-
-        # Passive effects require a live, registered instance.
-        # If the instance is missing, mark the passive as unverified.
         is_passive = key.startswith("passive_")
-        if is_passive and instance_missing:
-            lines.append(f"-# ⚠️ {label}: _passive — instance missing, may be inactive_")
+
+        if is_passive:
+            if instance_missing:
+                passive_lines.append(f"-# ⚠️ {label}: _passive — instance missing, may be inactive_")
+            else:
+                # Passive block rendered separately below
+                pass
             continue
 
         if key in _EFFECT_INT_KEYS:
             suffix = " _(Lv? — approx)_" if instance_missing else ""
-            lines.append(f"-# {label}: **+{int(val)}**{suffix}")
+            regular_lines.append(f"-# {label}: **+{int(val)}**{suffix}")
         elif isinstance(val, float):
             suffix = " _(Lv? — approx)_" if instance_missing else ""
-            if is_passive:
-                lines.append(f"-# 🔮 {label}: **+{val * scale:.1%}**{suffix}")
-            else:
-                lines.append(f"-# {label}: **+{val * scale:.1%}**{suffix}")
+            regular_lines.append(f"-# {label}: **+{val * scale:.1%}**{suffix}")
         else:
-            lines.append(f"-# {label}: **+{val}**")
-    return lines
+            regular_lines.append(f"-# {label}: **+{val}**")
+
+    # Build passive block if passive_obj provided and not missing
+    if passive_obj and passive_obj.get("id") and not instance_missing:
+        p_emoji = passive_obj.get("emoji", "🔮")
+        p_name  = passive_obj.get("name", "Passive")
+        p_desc  = passive_obj.get("description", "")
+        p_effect = passive_obj.get("effect", "")
+        passive_block = [f"{p_emoji} | **{p_name}**"]
+        if p_desc:
+            passive_block.append(f"`{p_desc}`")
+        if p_effect:
+            passive_block.append(f"`{p_effect}`")
+        passive_lines = passive_block + passive_lines
+
+    return regular_lines + passive_lines
 
 
 # ═══════════════════════════════════════════════════════════
@@ -844,7 +858,6 @@ def _fmt_combined_effects(combined: dict) -> list[str]:
     """
     lines = []
 
-    # Surface missing-instance sentinel before effect lines
     missing = combined.get("_missing_instance_uids")
     if missing:
         uid_tags = ", ".join(f"`{u}`" for u in missing)
@@ -855,7 +868,7 @@ def _fmt_combined_effects(combined: dict) -> list[str]:
 
     for key, val in combined.items():
         if key.startswith("_"):
-            continue  # skip internal sentinels
+            continue
 
         label = _EFFECT_LABEL.get(key, key)
         is_passive = key.startswith("passive_")
@@ -863,8 +876,10 @@ def _fmt_combined_effects(combined: dict) -> list[str]:
         if key in _EFFECT_INT_KEYS:
             lines.append(f"-# {label}: **+{int(val)}**")
         elif isinstance(val, float):
-            prefix = "🔮 " if is_passive else ""
-            lines.append(f"-# {prefix}{label}: **+{val:.1%}**")
+            if is_passive:
+                lines.append(f"-# 🔮 **{label}**: `+{val:.1%}`")
+            else:
+                lines.append(f"-# {label}: **+{val:.1%}**")
         else:
             lines.append(f"-# {label}: **+{val}**")
     return lines

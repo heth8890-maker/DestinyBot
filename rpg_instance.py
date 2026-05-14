@@ -70,27 +70,89 @@ PASSIVE_TIER_WEIGHTS = {
 # Pool 21 passive — gắn vào weapon instance, KHÔNG phải weapon trang bị được
 # Giá trị âm là CỐ Ý trade-off design — không sửa, không abs()
 PASSIVE_POOL = [
-    {"id": "5234", "name": "Bánh Xe Tai Ương",               "emoji": "<:5234:1503397777579708547>", "rarity": "legendary", "effects": {"rare_bias": 0.01,  "luck_up": 0.03}},
-    {"id": "5233", "name": "Cổ Nha",                         "emoji": "<:5233:1503397779589042326>", "rarity": "legendary", "effects": {"reduce_fail": 0.05, "sell_bonus": 0.05}},
-    {"id": "5232", "name": "Ảnh Trảm",                       "emoji": "<:5232:1503397781325217933>", "rarity": "uncommon",  "effects": {"reduce_cooldown": 0.08}},
-    {"id": "5231", "name": "Kẻ Dối Trá",                     "emoji": "<:5231:1503397783699456140>", "rarity": "rare",      "effects": {"extra_slot": 1,    "sell_bonus": 0.02}},
-    {"id": "5230", "name": "Sự Hối Lỗi",                     "emoji": "<:5230:1503397785964249148>", "rarity": "rare",      "effects": {"reduce_fail": 0.04}},
-    {"id": "5229", "name": "Nắm Chặt",                       "emoji": "<:5229:1503397788107673710>", "rarity": "rare",      "effects": {"reduce_fail": 0.10, "reduce_cooldown": -0.01}},
-    {"id": "5228", "name": "Lá Vàng",                        "emoji": "<:5228:1503397789852504155>", "rarity": "rare",      "effects": {"sell_bonus": 0.06,  "luck_up": 0.01}},
-    {"id": "5227", "name": "Trói Buộc",                      "emoji": "<:5227:1503397792062898237>", "rarity": "epic",      "effects": {"reduce_cooldown": -0.03, "rare_bias": 0.03, "sell_bonus": 0.01}},
-    {"id": "5226", "name": "Búa Vỡ",                         "emoji": "<:5226:1503397793421594907>", "rarity": "uncommon",  "effects": {"sell_bonus": 0.03,  "reduce_fail": 0.02}},
-    {"id": "5225", "name": "Kẻ Ngốc",                        "emoji": "<:5225:1503397796684894380>", "rarity": "legendary", "effects": {"sell_bonus": 0.10,  "reduce_fail": 0.03}},
-    {"id": "5224", "name": "Nhật Kí Của Oneiroi",             "emoji": "<:5224:1503397799406997585>", "rarity": "epic",      "effects": {"passive_oneiroi": 0.02}},
-    {"id": "5223", "name": "Khiêu Chiến",                    "emoji": "<:5223:1503397801588162591>", "rarity": "uncommon",  "effects": {"reduce_fail": 0.03}},
-    {"id": "5222", "name": "Lòng Tham Và Sự Dối Trá",         "emoji": "<:5222:1503397811801034905>", "rarity": "epic",      "effects": {"reduce_fail": 0.03, "luck_up": 0.02, "reduce_cooldown": 0.01}},
-    {"id": "5221", "name": "Lôi Đỏ",                         "emoji": "<:5221:1503397814930116608>", "rarity": "rare",      "effects": {"sell_bonus": 0.04}},
-    {"id": "5220", "name": "Dao Găm Của Lựa Chọn Cuối Cùng",  "emoji": "<:5220:1503397819262963893>", "rarity": "epic",      "effects": {"luck_up": 0.05}},
-    {"id": "5219", "name": "Bảo Thủ",                        "emoji": "<:5219:1503397821888335902>", "rarity": "uncommon",  "effects": {"luck_up": -0.02,   "reduce_cooldown": 0.03}},
-    {"id": "5218", "name": "Hoả Lâu",                        "emoji": "<:5218:1503397824098996284>", "rarity": "epic",      "effects": {"sell_bonus": 0.01,  "luck_up": 0.01,  "double_drop": 0.01}},
-    {"id": "5217", "name": "Mưa Tên",                        "emoji": "<:5217:1503397826150010961>", "rarity": "rare",      "effects": {"reduce_fail": 0.02}},
-    {"id": "5216", "name": "Tín Đồ",                         "emoji": "<:5216:1503397828238774362>", "rarity": "rare",      "effects": {"luck_up": 0.02,    "rare_bias": 0.01}},
-    {"id": "5212", "name": "Tham Lam",                       "emoji": "<:5212:1503397837449330698>", "rarity": "epic",      "effects": {"sell_bonus": -0.06, "rare_bias": 0.04}},
-    {"id": "5210", "name": "Sự Cứu Rỗi",                     "emoji": "<:5210:1503397842180509878>", "rarity": "uncommon",  "effects": {"sell_bonus": 0.03}},
+    {"id": "5234", "name": "Bánh Xe Tai Ương", "emoji": "<:5234:1503397777579708547>", "rarity": "legendary", 
+     "desc": "Vòng xoay không vận hành bằng may mắn, nó nghiền nát linh hồn để đổi lấy thiên cơ.", 
+     "effects": {"rare_bias": 0.01,  "luck_up": 0.03}},
+
+    {"id": "5233", "name": "Cổ Nha", "emoji": "<:5233:1503397779589042326>", "rarity": "legendary", 
+     "desc": "Nanh vuốt che chắn cho kẻ kế thừa trước những bước chân lầm lạc.", 
+     "effects": {"reduce_fail": 0.05, "sell_bonus": 0.05}},
+
+    {"id": "5232", "name": "Ảnh Trảm", "emoji": "<:5232:1503397781325217933>", "rarity": "uncommon", 
+     "desc": "Nhát chém cắt đứt sợi dây của thời gian, để lại thực tại một vết mờ hư ảo.", 
+     "effects": {"reduce_cooldown": 0.08}},
+
+    {"id": "5231", "name": "Kẻ Dối Trá", "emoji": "<:5231:1503397783699456140>", "rarity": "rare", 
+     "desc": "Nụ cười che giấu quân bài rác; trong thế giới này, sự chân thật là một sai lầm.", 
+     "effects": {"extra_slot": 1,    "sell_bonus": 0.02}},
+
+    {"id": "5230", "name": "Sự Hối Lỗi", "emoji": "<:5230:1503397785964249148>", "rarity": "rare", 
+     "desc": "Lời cầu nguyện muộn màng trước giá treo cổ đôi khi khiến thần chết mủi lòng.", 
+     "effects": {"reduce_fail": 0.04}},
+
+    {"id": "5229", "name": "Nắm Chặt", "emoji": "<:5229:1503397788107673710>", "rarity": "rare", 
+     "desc": "Ghì chặt định mệnh trong lòng bàn tay, dù đôi chân phải quỵ ngã vì sức nặng.", 
+     "effects": {"reduce_fail": 0.10, "reduce_cooldown": -0.01}},
+
+    {"id": "5228", "name": "Lá Vàng", "emoji": "<:5228:1503397789852504155>", "rarity": "rare", 
+     "desc": "Mảnh vụn từ vương miện của một vị vua mất nước; hào nhoáng nhưng đầy phù du.", 
+     "effects": {"sell_bonus": 0.06,  "luck_up": 0.01}},
+
+    {"id": "5227", "name": "Trói Buộc", "emoji": "<:5227:1503397792062898237>", "rarity": "epic", 
+     "desc": "Chấp nhận giam mình trong lồng sắt để nhìn thấu những bí mật của thế gian.", 
+     "effects": {"reduce_cooldown": -0.03, "rare_bias": 0.03, "sell_bonus": 0.01}},
+
+    {"id": "5226", "name": "Búa Vỡ", "emoji": "<:5226:1503397793421594907>", "rarity": "uncommon", 
+     "desc": "Đập tan trật tự cũ để tìm thấy cơ hội trong những mảnh vụn đổ nát.", 
+     "effects": {"sell_bonus": 0.03,  "reduce_fail": 0.02}},
+
+    {"id": "5225", "name": "Kẻ Ngốc", "emoji": "<:5225:1503397796684894380>", "rarity": "legendary", 
+     "desc": "Bước qua vực thẳm với nụ cười vô tri, nơi quy luật trần thế không còn chạm tới.", 
+     "effects": {"sell_bonus": 0.10,  "reduce_fail": 0.03}},
+
+    {"id": "5224", "name": "Nhật Kí Của Oneiroi", "emoji": "<:5224:1503397799406997585>", "rarity": "epic", 
+     "desc": "Những trang giấy từ cõi mộng, nơi thực tại bị bóp méo bởi lời thì thầm điên loạn.", 
+     "effects": {"passive_oneiroi": 0.02}},
+
+    {"id": "5223", "name": "Khiêu Chiến", "emoji": "<:5223:1503397801588162591>", "rarity": "uncommon", 
+     "desc": "Ném găng tay vào mặt định mệnh; sự ngạo mạn chính là tấm khiên vững chãi nhất.", 
+     "effects": {"reduce_fail": 0.03}},
+
+    {"id": "5222", "name": "Lòng Tham Và Sự Dối Trá", "emoji": "<:5222:1503397811801034905>", "rarity": "epic", 
+     "desc": "Bản khế ước viết bằng máu khô, hứa hẹn sự sống nhưng giấu nhẹm đi cái giá.", 
+     "effects": {"reduce_fail": 0.03, "luck_up": 0.02, "reduce_cooldown": 0.01}},
+
+    {"id": "5221", "name": "Lôi Đỏ", "emoji": "<:5221:1503397814930116608>", "rarity": "rare", 
+     "desc": "Tiếng sấm từ bầu trời máu; điềm báo của sự thịnh vượng xây trên tro tàn.", 
+     "effects": {"sell_bonus": 0.04}},
+
+    {"id": "5220", "name": "Dao Găm Của Lựa Chọn Cuối Cùng", "emoji": "<:5220:1503397819262963893>", "rarity": "epic", 
+     "desc": "Lưỡi dao chỉ sắc khi kẻ cầm nó không còn đường lui; một canh bạc sinh tử.", 
+     "effects": {"luck_up": 0.05}},
+
+    {"id": "5219", "name": "Bảo Thủ", "emoji": "<:5219:1503397821888335902>", "rarity": "uncommon", 
+     "desc": "An toàn trong chiếc lồng của quá khứ, mù quáng trước ánh sáng của tương lai.", 
+     "effects": {"luck_up": -0.02,   "reduce_cooldown": 0.03}},
+
+    {"id": "5218", "name": "Hoả Lâu", "emoji": "<:5218:1503397824098996284>", "rarity": "epic", 
+     "desc": "Hộp sọ rực cháy lửa tội đồ, soi sáng những kho báu bị nguyền rủa.", 
+     "effects": {"sell_bonus": 0.01,  "luck_up": 0.01,  "double_drop": 0.01}},
+
+    {"id": "5217", "name": "Mưa Tên", "emoji": "<:5217:1503397826150010961>", "rarity": "rare", 
+     "desc": "Khi cái chết đổ xuống từ hư không, kẻ tĩnh lặng nhất mới tìm thấy lối thoát.", 
+     "effects": {"reduce_fail": 0.02}},
+
+    {"id": "5216", "name": "Tín Đồ", "emoji": "<:5216:1503397828238774362>", "rarity": "rare", 
+     "desc": "Sự sùng bái mù quáng mở ra những cánh cửa mà lý trí không bao giờ chạm tới.", 
+     "effects": {"luck_up": 0.02,    "rare_bias": 0.01}},
+
+    {"id": "5212", "name": "Tham Lam", "emoji": "<:5212:1503397837449330698>", "rarity": "epic", 
+     "desc": "Cơn đói vĩnh cửu; bạn thấy được mọi báu vật nhưng đôi tay mãi mãi run rẩy.", 
+     "effects": {"sell_bonus": -0.06, "rare_bias": 0.04}},
+
+    {"id": "5210", "name": "Sự Cứu Rỗi", "emoji": "<:5210:1503397842180509878>", "rarity": "uncommon", 
+     "desc": "Tia sáng yếu ớt nơi đáy ngục; nó không cứu mạng bạn, chỉ giữ bạn không bỏ cuộc.", 
+     "effects": {"sell_bonus": 0.03}},
 ]
 
 # O(1) lookup theo id
@@ -175,6 +237,7 @@ def resolve_passive(passive_stored: dict) -> dict | None:
         "name":    base["name"],
         "emoji":   base["emoji"],
         "rarity":  base["rarity"],
+        "desc":    base.get("desc", ""),
         "effects": resolved_effects,
         "roll":    roll,
     }
@@ -593,6 +656,8 @@ def fmt_instance_info(wi: dict) -> str:
         if resolved:
             p_label = RARITY_LABEL.get(resolved["rarity"], resolved["rarity"])
             lines.append(f"Nội tại: {resolved['emoji']} **{resolved['name']}** _{p_label}_")
+            if resolved.get("desc"):
+                lines.append(f"  `{resolved['desc']}`")
             for k, v in resolved["effects"].items():
                 if k == "extra_slot":
                     lines.append(f"  └ `{k}`: **+{int(v)} ô**")

@@ -57,9 +57,9 @@ class RPGWeapon(commands.Cog):
         wi      = wi_map.get(wid)
         lv      = wi.get("level", 1) if wi else 1
         eq_tag  = " **[E]**" if wid in equipped_set else ""
-        p       = resolve_passive(wi.get("passive")) if isinstance(wi, dict) else None
-        p_tag   = f" {p.get('emoji', '')} {p.get('name', '')}" if p and p.get("id") else ""
-        return f"{em} **{nm}**{p_tag}{eq_tag} • Lv {lv}\n`{wid}`"
+        p       = resolve_passive(wi) if isinstance(wi, dict) else None
+        p_tag   = f"\n{p.get('emoji', '')} | {p.get('name', '')}" if p and p.get("id") else ""
+        return f"{em} **{nm}**{eq_tag} • Lv {lv}{p_tag}\n`{wid}`"
 
     # ─────────────────────────────────────────────────────────
     # MAIN: dtn weapon / dtn weapon <uid>
@@ -110,7 +110,6 @@ class RPGWeapon(commands.Cog):
             # ── PATCH 5: Level / EXP — guard missing instance & corrupt exp_to_next ──
             wi = wi_map.get(weapon_id)  # None = no instance record
             if wi is not None:
-                from rpg_instance import fmt_instance_info
                 level    = wi.get("level", 1)
                 exp      = wi.get("exp", 0)
                 exp_next = wi.get("exp_to_next", 40)
@@ -138,21 +137,36 @@ class RPGWeapon(commands.Cog):
                         inline=False,
                     )
 
-                # SAFETY: guard fmt_instance_info early-return
-                # Empty string = function detected bad state and returned nothing.
-                # Surface that explicitly instead of hiding the field.
-                instance_text = fmt_instance_info(wi)
-                if instance_text and instance_text.strip():
+                # Durability — raw text, no bar
+                dur     = wi.get("durability", None)
+                dur_max = wi.get("durability_max", None)
+                if dur is not None and dur_max:
                     embed.add_field(
-                        name="⚙️ Chi tiết",
-                        value=instance_text,
-                        inline=False,
+                        name="Durability",
+                        value=f"{dur}/{dur_max}",
+                        inline=True,
                     )
-                else:
-                    # fmt_instance_info returned empty — do NOT silently skip
+
+                # Quality
+                quality = wi.get("quality", None)
+                if quality:
                     embed.add_field(
-                        name="⚙️ Chi tiết",
-                        value="-# ⚠️ Instance info returned empty — state may be corrupt",
+                        name="Quality",
+                        value=str(quality),
+                        inline=True,
+                    )
+
+                # Passive — icon | name + description/effect in backticks
+                _p = resolve_passive(wi)
+                if _p and _p.get("id"):
+                    p_lines = [f"{_p.get('emoji', '')} | **{_p.get('name', '')}**"]
+                    if _p.get("description"):
+                        p_lines.append(f"`{_p.get('description')}`")
+                    if _p.get("effect"):
+                        p_lines.append(f"`{_p.get('effect')}`")
+                    embed.add_field(
+                        name="Passive",
+                        value="\n".join(p_lines),
                         inline=False,
                     )
             else:
@@ -658,7 +672,6 @@ class RPGWeapon(commands.Cog):
     async def display_weapon_info(self, ctx):
         from rpg_core import get_base_id, get_weapon_entity
         from rpg_database import get_user
-        from rpg_instance import fmt_instance_info
 
         author_uid   = str(ctx.author.id)
         user, _      = get_user(author_uid)
@@ -700,10 +713,9 @@ class RPGWeapon(commands.Cog):
             w    = get_weapon_by_id(b_id)
 
             # PATCH 4 SAFETY: explicitly distinguish missing vs present instance.
-            # Never use {} as a fallback — that fabricates a fake Lv1 record.
             wi               = wi_map.get(uid)       # None = genuinely absent
             instance_missing = wi is None
-            wi_safe          = wi or {}              # only for .get() calls below
+            wi_safe          = wi or {}
             level            = wi_safe.get("level", 1)
 
             if not w:
@@ -723,52 +735,42 @@ class RPGWeapon(commands.Cog):
             nm      = w.get("name", b_id)
             effects = w.get("effects", {})
 
-            # Pass instance_missing so effect formatter can flag approx values
-            # and exclude unverifiable passives
+            # Passive — for header tag and for effect formatter
+            _p     = resolve_passive(wi_safe) if isinstance(wi_safe, dict) else {}
+            _p_tag = f" {_p.get('emoji', '')} | **{_p.get('name', '')}**" if _p.get("id") else ""
+
             effect_lines = _fmt_effects_scaled(
                 effects, level, instance_missing=instance_missing
             )
 
-            # ── EXP bar — only render if instance record is present ──
+            # ── EXP bar ──
             if instance_missing:
-                # Do NOT fabricate a 0/40 bar; that implies a valid fresh weapon
                 exp_bar_line = "-# ⚠️ Instance record not found — level & EXP unknown"
             else:
                 exp      = wi_safe.get("exp", 0)
                 exp_next = wi_safe.get("exp_to_next", 40)
-                # Guard against corrupt exp_to_next = 0 (would produce a full bar)
                 if exp_next <= 0:
                     exp_bar_line = f"-# ⚠️ EXP data corrupt (exp_to_next={exp_next})"
                 else:
-                    filled   = int(exp / exp_next * 10)
-                    bar      = "█" * filled + "░" * (10 - filled)
+                    filled       = int(exp / exp_next * 10)
+                    bar          = "█" * filled + "░" * (10 - filled)
                     exp_bar_line = f"Lv **{level}** / 50 │ `{bar}` {exp}/{exp_next} EXP"
 
-            # ── fmt_instance_info guard ──────────────────────────────────
-            # fmt_instance_info may early-return "" for bad/empty state.
-            # Never insert a raw empty string or None into field_parts.
+            # ── Durability — raw text ──
+            dur_line = None
             if not instance_missing:
-                raw_info = fmt_instance_info(wi_safe)
-                if raw_info and raw_info.strip():
-                    instance_info_line = raw_info
-                else:
-                    # Present but returned empty — expose the corrupt field
-                    uid_dbg = wi_safe.get("uid", "?") if isinstance(wi_safe, dict) else "?"
-                    dur_dbg = wi_safe.get("durability_max", "MISSING") if isinstance(wi_safe, dict) else "?"
-                    instance_info_line = f"-# ⚠️ Instance data incomplete (uid={uid_dbg}, dur_max={dur_dbg})"
-            else:
-                instance_info_line = None   # already warned via exp_bar_line above
-
-            _p      = resolve_passive(wi_safe) if isinstance(wi_safe, dict) else {}
-            _p_tag  = f" {_p.get('emoji', '')} {_p.get('name', '')}" if _p.get("id") else ""
+                dur     = wi_safe.get("durability", None)
+                dur_max = wi_safe.get("durability_max", None)
+                if dur is not None and dur_max:
+                    dur_line = f"-# Durability: {dur}/{dur_max}"
 
             field_parts = [
                 f"{em} **{nm}**{_p_tag} — {rlabel}",
                 exp_bar_line,
                 f"-# `{uid}`",
             ]
-            if instance_info_line:
-                field_parts.append(instance_info_line)
+            if dur_line:
+                field_parts.append(dur_line)
             if effect_lines:
                 field_parts.extend(effect_lines)
 
@@ -783,7 +785,7 @@ class RPGWeapon(commands.Cog):
         if combined:
             combined_lines = _fmt_combined_effects(combined)
             embed.add_field(
-                name="Tổng hiệu ứng",
+                name="Total Effects",
                 value="\n".join(combined_lines),
                 inline=False,
             )
