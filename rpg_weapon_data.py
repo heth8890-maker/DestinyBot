@@ -792,11 +792,13 @@ def _fmt_effects_scaled(
     *,
     instance_missing: bool = False,
     passive_obj: dict | None = None,
+    show_passive: bool = True,
 ) -> list[str]:
     """
     Format từng effect có scale theo level — dùng trong DWI cho từng weapon.
 
     instance_missing=True: scale bị ép về Lv1 do không có instance record.
+    show_passive=False: ẩn toàn bộ passive text (effect, warning, name).
     Passive effects được render thành block riêng với icon|name header.
     """
     if instance_missing:
@@ -812,6 +814,8 @@ def _fmt_effects_scaled(
         is_passive = key.startswith("passive_")
 
         if is_passive:
+            if not show_passive:
+                continue
             if instance_missing:
                 passive_lines.append(f"-# ⚠️ {label}: _passive — instance missing, may be inactive_")
             else:
@@ -828,8 +832,8 @@ def _fmt_effects_scaled(
         else:
             regular_lines.append(f"-# {label}: **+{val}**")
 
-    # Build passive block if passive_obj provided and not missing
-    if passive_obj and passive_obj.get("id") and not instance_missing:
+    # Build passive block if passive_obj provided, not missing, and show_passive enabled
+    if show_passive and passive_obj and passive_obj.get("id") and not instance_missing:
         p_emoji = passive_obj.get("emoji", "🔮")
         p_name  = passive_obj.get("name", "Passive")
         p_desc  = passive_obj.get("description", "")

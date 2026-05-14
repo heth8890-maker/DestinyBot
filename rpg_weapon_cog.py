@@ -58,8 +58,8 @@ class RPGWeapon(commands.Cog):
         lv      = wi.get("level", 1) if wi else 1
         eq_tag  = " **[E]**" if wid in equipped_set else ""
         p       = resolve_passive(wi) if isinstance(wi, dict) else None
-        p_tag   = f"\n{p.get('emoji', '')} | {p.get('name', '')}" if p and p.get("id") else ""
-        return f"{em} **{nm}**{eq_tag} • Lv {lv}{p_tag}\n`{wid}`"
+        p_icon  = p.get("emoji", "") if p and p.get("id") else ""
+        return f"{em}{p_icon} **{nm}**{eq_tag} • Lv {lv}\n`{wid}`"
 
     # ─────────────────────────────────────────────────────────
     # MAIN: dtn weapon / dtn weapon <uid>
@@ -247,7 +247,7 @@ class RPGWeapon(commands.Cog):
                 text=(
                     f"Trang {page_idx+1}/{total_pages}  │  "
                     f"[E] = đang trang bị  │  "
-                    f"dtn weapon <uid> để xem chi tiết"
+                    f"dtn weapon <uid> chi tiết  │  dtn wi"
                 )
             )
             return e
@@ -736,11 +736,12 @@ class RPGWeapon(commands.Cog):
             effects = w.get("effects", {})
 
             # Passive — for header tag and for effect formatter
-            _p     = resolve_passive(wi_safe) if isinstance(wi_safe, dict) else {}
-            _p_tag = f" {_p.get('emoji', '')} | **{_p.get('name', '')}**" if _p.get("id") else ""
+            _p      = resolve_passive(wi_safe) if isinstance(wi_safe, dict) else {}
+            _p_icon = _p.get("emoji", "") if _p.get("id") else ""
 
             effect_lines = _fmt_effects_scaled(
-                effects, level, instance_missing=instance_missing
+                effects, level, instance_missing=instance_missing,
+                show_passive=False,
             )
 
             # ── EXP bar ──
@@ -765,7 +766,7 @@ class RPGWeapon(commands.Cog):
                     dur_line = f"-# Durability: {dur}/{dur_max}"
 
             field_parts = [
-                f"{em} **{nm}**{_p_tag} — {rlabel}",
+                f"{em}{_p_icon} **{nm}** — {rlabel}",
                 exp_bar_line,
                 f"-# `{uid}`",
             ]
@@ -792,8 +793,8 @@ class RPGWeapon(commands.Cog):
 
         embed.set_footer(
             text=(
-                "dtn weapon <uid> để xem chi tiết  •  "
-                "dtn weapon equip/unequip"
+                "dtn weapon <uid> chi tiết  •  equip/unequip  •  "
+                "dtn repair / dtn repair <id>"
             )
         )
         await ctx.send(embed=embed)
