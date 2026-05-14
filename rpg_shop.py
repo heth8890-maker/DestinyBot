@@ -24,7 +24,7 @@ from rpg_core import (
 )
 from database_helper import load_core_data, save_core_data
 from rpg_database import get_user, save_user
-from rpg_weapon import (
+from rpg_weapon_data import (
     RARE_CRATE_WEAPONS,
     DARK_CRATE_WEAPON,
     _rarity_tier,
