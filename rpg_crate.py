@@ -28,7 +28,7 @@ from rpg_core import (
 # ✅ Dùng get_user / save_user từ rpg_database (MongoDB) thay vì load_data / save_data JSON
 from rpg_database import get_user, save_user
 
-from rpg_weapon import roll_rare_crate_weapon, roll_dark_crate_weapon
+from rpg_weapon_data import roll_rare_crate_weapon, roll_dark_crate_weapon
 from rpg_quest import add_quest_progress
 from cash import update_balance_safe, get_balance
 
@@ -150,7 +150,7 @@ class RPGCrate(commands.Cog):
             if roll <= 0.6:
                 special_pool = ["5001", "5002", "5003"]
                 w_id = random.choice(special_pool)
-                add_weapon(user, w_id, make_unique=False)
+                add_weapon(user, w_id)
                 # ✅ Lưu lên MongoDB
                 save_user(uid, user)
 
@@ -190,7 +190,7 @@ class RPGCrate(commands.Cog):
         user, _ = get_user(uid)
 
         # 🔥 IMPORTANT: STACK BASE_ID ONLY — NEVER produce a UID from a crate
-        add_weapon(user, weapon["id"], make_unique=False)
+        new_uid = add_weapon(user, weapon["id"])
 
         # ✅ Lưu lên MongoDB
         save_user(uid, user)
@@ -231,7 +231,7 @@ class RPGCrate(commands.Cog):
         )
 
         embed.set_footer(
-            text=f"dtn weapon {weapon['id']} status │ dtn weapon equip {weapon['id']}"
+            text=f"UID: {new_uid}  │  dtn weapon equip {new_uid}"
         )
 
         await msg.edit(content=None, embed=embed)
