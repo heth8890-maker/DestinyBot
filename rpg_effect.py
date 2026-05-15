@@ -194,6 +194,16 @@ def roll_hunt_items(equipped: list, user: dict | None = None) -> list[dict]:
         if double_drop > 0 and random.random() < double_drop:
             found.append(item)
 
+    # ── event_hunt: mỗi slot roll thêm 1 lần để ra item 5200 (Linh Hoả) ──
+    event_hunt_chance = effects.get("event_hunt", 0.0)
+    if event_hunt_chance > 0:
+        from rpg_core import get_item_by_id   # lazy import — tránh circular
+        item_5200 = get_item_by_id("5200")
+        if item_5200:
+            for _ in range(total_slots):
+                if random.random() < event_hunt_chance:
+                    found.append(item_5200)
+
     return found
 
 

@@ -578,7 +578,7 @@ def migrate_weapon_instance_fields(user: dict) -> bool:
 #  DURABILITY
 # ══════════════════════════════════════════════════════════════════════════════
 
-def decrease_durability(user: dict, equipped: list) -> list[str]:
+def decrease_durability(user: dict, equipped: list, effects: dict | None = None) -> list[str]:
     """
     Trừ 1 durability cho mỗi weapon equipped đang không broken.
     Set broken=True khi durability về 0.
@@ -587,10 +587,16 @@ def decrease_durability(user: dict, equipped: list) -> list[str]:
     Args:
         user:     user dict từ get_user()
         equipped: list uid đang trang bị (user["equipped"])
+        effects:  aggregated effects dict (từ parse_effects_upgraded). Optional.
+                  Dùng để check unbreaking — xác suất bỏ qua trừ durability.
 
     Returns:
         list uid vừa bị hỏng trong lần hunt này — để hiển thị cảnh báo cho người chơi.
     """
+    if effects is None:
+        effects = {}
+    unbreaking = effects.get("unbreaking", 0.0)   # xác suất skip [0.0, 1.0]
+
     wi_map: dict[str, dict] = {
         wi["uid"]: wi
         for wi in user.get("weapon_instances", [])
@@ -603,6 +609,9 @@ def decrease_durability(user: dict, equipped: list) -> list[str]:
             continue
         wi = wi_map.get(wid)
         if not wi or wi.get("broken", False):
+            continue
+        # unbreaking: roll skip trước khi trừ durability
+        if unbreaking > 0 and random.random() < unbreaking:
             continue
         wi["durability"] = max(0, wi.get("durability", 1) - 1)
         if wi["durability"] == 0:

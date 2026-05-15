@@ -190,7 +190,7 @@ class Cash(commands.Cog):
         self.bot = bot
 
     # ── LỆNH BAL ──────────────────────────
-    @commands.command(name="bal")
+    @commands.command(name="bal", aliases=["cash"])
     @commands.cooldown(1, 12, commands.BucketType.user)
     async def balance(self, ctx):
         bal = get_balance(ctx.author.id)

@@ -10,6 +10,12 @@ Tách từ rpg_weapon.py để tránh phình to.
              guard EXP bar, không fabricate {} default
   - PATCH 5: weapon <uid> detail — guard fmt_instance_info empty return,
              guard exp_to_next <= 0 (tránh fake 100% bar)
+  - UI UPDATE:
+      dtn weapon <id> <slot>  — equip nhanh (thay dtn weapon equip)
+      dtn unequip <slot>      — top-level command (thay dtn weapon unequip)
+      dtn weapon <id>         — lệnh nhanh hiển thị đầu embed
+      dtn wi / dtn myweapon   — footer tóm tắt lệnh
+      PAGE_SIZE               — 16 → 12 vũ khí/trang
 """
 
 import random
@@ -65,7 +71,7 @@ class RPGWeapon(commands.Cog):
     # MAIN: dtn weapon / dtn weapon <uid>
     # ─────────────────────────────────────────────────────────
     @commands.group(name="weapon", aliases=["w"], invoke_without_command=True)
-    async def weapon(self, ctx, *, weapon_id: str = None):
+    async def weapon(self, ctx, weapon_id: str = None, slot: int = None):
         from rpg_core import WeaponID, get_weapon_entity, get_base_id
         from rpg_database import get_user
 
@@ -77,6 +83,42 @@ class RPGWeapon(commands.Cog):
             for wi in user.get("weapon_instances", [])
             if isinstance(wi, dict) and "uid" in wi
         }
+
+        # ── dtn weapon <uid> <slot> — trang bị nhanh ────────────────
+        if weapon_id and slot is not None:
+            from rpg_core import equip_weapon, WeaponID
+            from rpg_quest import add_quest_progress
+            from rpg_database import save_user
+
+            base_id, _ = WeaponID.parse(weapon_id)
+            w_new      = get_weapon_by_id(base_id)
+
+            for i, wid in enumerate(user.get("equipped", []), 1):
+                if wid is None:
+                    continue
+                existing_base, _ = WeaponID.parse(str(wid))
+                if existing_base == base_id:
+                    return await ctx.send(
+                        f"{ERR} | Đã có **{w_new['name'] if w_new else base_id}** "
+                        f"ở ô [{i}]. Dùng `dtn unequip {i}` trước."
+                    )
+
+            ok, msg = equip_weapon(user, weapon_id, slot)
+            if ok:
+                if not save_user(author_uid, user):
+                    return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu. Thử lại.")
+                slot_used = next(
+                    (i+1 for i, wid in enumerate(user["equipped"])
+                     if wid == weapon_id), "?"
+                )
+                name = w_new["name"] if w_new else weapon_id
+                add_quest_progress(ctx.author.id, "weapons_equipped")
+                return await ctx.send(
+                    f"{OK} | Đã trang bị **{name}** vào ô **[{slot_used}]**.\n"
+                    f"-# `{weapon_id}`"
+                )
+            else:
+                return await ctx.send(f"{ERR} | {msg}")
 
         # ── dtn weapon <uid> — chi tiết ──────────────────────────────
         if weapon_id:
@@ -92,6 +134,18 @@ class RPGWeapon(commands.Cog):
             embed = entity.build_embed() if entity else discord.Embed(
                 title=f"⚔️ {weapon_id}",
                 color=0xE91E63,
+            )
+
+            # Lệnh nhanh — đặt ở đầu embed
+            embed.insert_field_at(
+                0,
+                name="⚡ Lệnh nhanh",
+                value=(
+                    f"`dtn weapon {weapon_id} <slot>` trang bị\n"
+                    f"`dtn unequip <slot>` tháo\n"
+                    f"`dtn repair` sửa"
+                ),
+                inline=False,
             )
 
             # Trạng thái equip
@@ -175,23 +229,15 @@ class RPGWeapon(commands.Cog):
                     value=(
                         "-# No instance record found for this UID.\n"
                         "-# Level, EXP, and passive effects are unknown.\n"
-                        "-# Use `dtn weapon unequip` then re-equip to attempt recovery."
+                        "-# Use `dtn unequip <slot>` then re-equip to attempt recovery."
                     ),
                     inline=False,
                 )
 
-            # UID + lệnh nhanh
+            # UID
             embed.add_field(
                 name=" UID",
                 value=f"`{weapon_id}`",
-                inline=False,
-            )
-            embed.add_field(
-                name=" Lệnh nhanh",
-                value=(
-                    f"`dtn weapon equip {weapon_id}`\n"
-                    f"`dtn weapon unequip <slot>`"
-                ),
                 inline=False,
             )
             if w and w.get("rarity") != "special":
@@ -227,8 +273,8 @@ class RPGWeapon(commands.Cog):
                 )
             )
 
-        # Pagination — 16 weapon/trang
-        PAGE_SIZE   = 16
+        # Pagination — 12 weapon/trang
+        PAGE_SIZE   = 12
         pages       = [lines[i:i+PAGE_SIZE] for i in range(0, len(lines), PAGE_SIZE)]
         total_pages = len(pages)
 
@@ -243,9 +289,8 @@ class RPGWeapon(commands.Cog):
             )
             e.set_footer(
                 text=(
-                    f"Trang {page_idx+1}/{total_pages}  │  "
-                    f"[E] = đang trang bị  │  "
-                    f"dtn weapon <uid> chi tiết  │  dtn wi"
+                    f"Trang {page_idx+1}/{total_pages}  │  [E] = đang trang bị  │  "
+                    f"dtn weapon <id> chi tiết  •  dtn wi"
                 )
             )
             return e
@@ -296,52 +341,9 @@ class RPGWeapon(commands.Cog):
         view.message = await ctx.send(embed=build_embed(0), view=view)
 
     # ─────────────────────────────────────────────────────────
-    # EQUIP
+    # UNEQUIP — dtn unequip <slot>
     # ─────────────────────────────────────────────────────────
-    @weapon.command(name="equip", aliases=["e", "eq"])
-    async def weapon_equip(self, ctx, weapon_id: str, slot: int = None):
-        from rpg_core import equip_weapon, WeaponID
-        from rpg_quest import add_quest_progress
-        from rpg_database import get_user, save_user
-
-        author_uid = str(ctx.author.id)
-        user, _    = get_user(author_uid)
-
-        base_id, _ = WeaponID.parse(weapon_id)
-        w_new      = get_weapon_by_id(base_id)
-
-        # Chặn equip trùng base_id
-        for i, wid in enumerate(user.get("equipped", []), 1):
-            if wid is None:
-                continue
-            existing_base, _ = WeaponID.parse(str(wid))
-            if existing_base == base_id:
-                return await ctx.send(
-                    f"{ERR} | Đã có **{w_new['name'] if w_new else base_id}** "
-                    f"ở ô [{i}]. Dùng `dtn weapon unequip {i}` trước."
-                )
-
-        ok, msg = equip_weapon(user, weapon_id, slot)
-        if ok:
-            if not save_user(author_uid, user):  # FIX 3: check return value
-                return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu. Thử lại.")
-            slot_used = next(
-                (i+1 for i, wid in enumerate(user["equipped"])
-                 if wid == weapon_id), "?"
-            )
-            name = w_new["name"] if w_new else weapon_id
-            add_quest_progress(ctx.author.id, "weapons_equipped")
-            await ctx.send(
-                f"{OK} | Đã trang bị **{name}** vào ô **[{slot_used}]**.\n"
-                f"-# `{weapon_id}`"
-            )
-        else:
-            await ctx.send(f"{ERR} | {msg}")
-
-    # ─────────────────────────────────────────────────────────
-    # UNEQUIP
-    # ─────────────────────────────────────────────────────────
-    @weapon.command(name="unequip", aliases=["ue", "une"])
+    @commands.command(name="unequip", aliases=["ue", "une"])
     async def weapon_unequip(self, ctx, slot: int):
         from rpg_core import unequip_weapon, WeaponID
         from rpg_database import get_user, save_user
@@ -679,7 +681,7 @@ class RPGWeapon(commands.Cog):
             return await ctx.send(
                 f"<:Hamer:1495462570469888069> "
                 f"**{ctx.author.display_name}** chưa trang bị weapon nào.\n"
-                f"-# Dùng `dtn weapon equip <uid>` để trang bị."
+                f"-# Dùng `dtn weapon <id> <slot>` để trang bị."
             )
 
         wi_map = {
@@ -796,8 +798,8 @@ class RPGWeapon(commands.Cog):
 
         embed.set_footer(
             text=(
-                "dtn weapon <uid> chi tiết  •  equip/unequip  •  "
-                "dtn repair / dtn repair <id>"
+                "dtn weapon <id>  •  dtn weapon <id> <slot>  •  "
+                "dtn unequip <slot>  •  dtn repair"
             )
         )
         await ctx.send(embed=embed)

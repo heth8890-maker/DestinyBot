@@ -90,6 +90,7 @@ WEAPON_EFFECTS = {
         "luck_up":   0.18,
         "reduce_fail":   0.1,
         "sell_bonus": 0.1,
+        "treasure_hunt": 0.008
     },
 
     # ── SPECIAL: Domain of Makima ──
@@ -104,28 +105,32 @@ WEAPON_EFFECTS = {
     "247": {
         "extra_slot": 2,               # +2 slot hunt  (FIX 1: was "extra_slots" — parse_effects uses "extra_slot")
         "rare_bias":  0.03,            # +3% tỉ lệ ra rare legend
-        "sell_bonus": 0.10,            # FIX 1: sell_boost → sell_bonus
+        "sell_bonus": 0.10,            
+        "treasure_hunt": 0.03
     },
 
     # ── SOUL SPECIAL: Tam hoả thống soái ──
     "5001": {
         "sell_bonus": 0.20,            # +20% giá bán
         "luck_up": 0.50,               # +10% luck
-        "reduce_fail": 0.1,            # +10% tỉ lệ thành công (gộp 10%+10%)
+        "reduce_fail": 0.1,            
+        "event_hunt": 0.03
     },
 
     # ── SOUL SPECIAL: Hồn giáp bất diệt ──
     "5002": {
         "extra_slot": 3,               # +3 slot hunt
         "sell_bonus": 0.1,             # +5% giá bán
-        "reduce_cooldown": 0.3,        # -2% cooldown
+        "reduce_cooldown": 0.3,        
+        "event_hunt": 0.02
     },
 
     # ── SOUL SPECIAL: Linh diệm sát thần ──
     "5003": {
         "sell_bonus": 0.33,            # +32% giá bán
         "rare_bias": 0.05,             # +5% rare bias
-        "luck_up": 0.1,                # +5% luck
+        "luck_up": 0.1,                
+        "event_hunt": 0.02
     },
 
     # ── NEW: Dagger blood ──
@@ -167,6 +172,7 @@ WEAPON_EFFECTS = {
         "sell_bonus": 0.20,
         "passive_oneiroi": 0.03,
         "rare_bias": 0.05,
+        "treasure_hunt": 0.0125
     },
 
     # ── NEW: Đầu lâu bạc ──
@@ -589,6 +595,10 @@ _EFFECT_LABEL: dict[str, str] = {
     "double_value":    "Double Value",
     "reduce_uncommon": "Reduce Uncommon",
     "passive_oneiroi": "Oneiroi",
+    # ── NEW EFFECTS ──────────────────────────────────────────
+    "treasure_hunt":   "Treasure Hunt",   # mở rộng window bonus crate/coin mỗi hunt
+    "event_hunt":      "Event Hunt",      # tăng hiệu quả khi hunt event đặc biệt
+    "unbreaking":      "Unbreaking",      # % giảm xác suất hao mòn độ bền
 }
 
 # Effect dạng số nguyên — không scale, không format %

@@ -1,6 +1,6 @@
 """
 ===== FILE: rpg_addon.py =====
-Quản lý Weapon Shop (10 slot, reset mỗi SHOP_RESET_SEC giây)
+Quản lý Weapon Shop (slot, reset mỗi SHOP_RESET_SEC giây)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ★  REFACTOR v3 – Weighted Spawn System (Logic Fix + Legend Split)
@@ -60,8 +60,8 @@ _LEGENDARY_COMBINED_CAP: int       = 1
 _LEGENDARY_TIERS:         frozenset = frozenset({"legendary", "legend"})
 
 EFFECT_CAPS: dict[str, float] = {
-    "sell_bonus":      1.0,
-    "reduce_cooldown": 0.8,
+    "sell_bonus":      3.0,
+    "reduce_cooldown": 0.7,
     "double_drop":     0.5,
 }
 
@@ -248,7 +248,7 @@ def parse_effects_upgraded(equipped: list, user: dict) -> dict:
 
     _STACKABLE = frozenset({
         "sell_bonus", "rare_bias", "reduce_fail",
-        "reduce_cooldown", "double_value",
+        "reduce_cooldown", "double_value", "event_hunt", "treasure_hunt"
     })
 
     _all_weapons = {w["id"]: w for w in WEAPONS + RARE_CRATE_WEAPONS}

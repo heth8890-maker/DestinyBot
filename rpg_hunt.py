@@ -86,6 +86,27 @@ def _roll_bonus() -> str | None:
     return None
 
 
+def _roll_bonus_boosted(extra_chance: float) -> str | None:
+    """
+    Giống _roll_bonus nhưng mở rộng window theo treasure_hunt effect.
+    extra_chance: giá trị thô từ effects (vd: 0.05), nhân *100 để ra %.
+    Giữ nguyên tỉ lệ crate:coin trong window mới.
+    Khi extra_chance = 0 → hoạt động y hệt _roll_bonus().
+    """
+    base_window  = CRATE_DROP_CHANCE + COIN_DROP_CHANCE   # 2.75
+    total_window = base_window + extra_chance * 100
+
+    roll = random.uniform(0, 100)
+    if roll >= total_window:
+        return None
+
+    # Phân chia trong window giữ nguyên tỉ lệ gốc crate : coin
+    crate_threshold = (CRATE_DROP_CHANCE / base_window) * total_window
+    if roll < crate_threshold:
+        return "crate"
+    return "coin"
+
+
 def _roll_crate_id() -> str:
     """Sub-roll xác định loại crate theo bảng tỉ lệ."""
     r = random.uniform(0, 100)
@@ -260,7 +281,7 @@ class RPGHunt(commands.Cog):
                 print(f"⚠️  Warning: weapon exp grant failed: {e}")
 
             try:
-                just_broken = decrease_durability(user, equipped)
+                just_broken = decrease_durability(user, equipped, effects_full)
             except Exception as e:
                 just_broken = []
                 print(f"⚠️  Warning: durability decrease failed: {e}")
@@ -362,7 +383,8 @@ class RPGHunt(commands.Cog):
                 can_bonus  = bonus["count"] < BONUS_MAX
 
                 if can_bonus:
-                    bonus_type = _roll_bonus()  # 'crate', 'coin', hoặc None
+                    treasure_hunt_val = effects_full.get("treasure_hunt", 0.0)
+                    bonus_type = _roll_bonus_boosted(treasure_hunt_val)  # 'crate', 'coin', hoặc None
 
                     if bonus_type == "crate":
                         crate_id  = _roll_crate_id()

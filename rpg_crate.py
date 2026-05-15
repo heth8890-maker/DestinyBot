@@ -9,6 +9,7 @@ HỆ MỚI:
 - UID chỉ xuất hiện ở hệ nâng cấp / enchant / upgrade
 
 Commands:
+  dtn crate <id>             — xem chi tiết & drop rate crate
   dtn crate buy <id> [amount]
   dtn crate open <id> [amount|all]
 """
@@ -99,9 +100,56 @@ class RPGCrate(commands.Cog):
         self.bot = bot
 
     @commands.group(name="crate", invoke_without_command=True)
-    async def crate(self, ctx):
+    async def crate(self, ctx, crate_id: str = None):
+        # ── dtn crate <id> → chi tiết crate + drop rate + lệnh nhanh ──
+        if crate_id is not None:
+            if crate_id not in CRATES:
+                return await ctx.send(
+                    f"{ERR} | Crate `{crate_id}` không tồn tại. Xem: `dtn shop crate`"
+                )
+
+            crate_data = CRATES[crate_id]
+            uid  = str(ctx.author.id)
+            user, _ = get_user(uid)
+            owned = user["inv"].get(f"crate_{crate_id}", 0)
+
+            # Màu embed theo rarity
+            rarity = crate_data.get("rarity", "common")
+            color  = RARITY_COLOR.get(rarity, 0x7289DA)
+
+            embed = discord.Embed(
+                title=f"{crate_data['emoji']}  {crate_data['name']}",
+                description=crate_data["description"],
+                color=color,
+            )
+            embed.add_field(
+                name="💰 Giá mua",
+                value=f"**{crate_data['price']:,}** {COIN_EMOJI}",
+                inline=True,
+            )
+            embed.add_field(
+                name="🎒 Bạn đang có",
+                value=f"**{owned}** crate",
+                inline=True,
+            )
+            embed.add_field(
+                name="⚡ Lệnh nhanh",
+                value=(
+                    f"`dtn crate buy {crate_id}` — mua 1 crate\n"
+                    f"`dtn crate buy {crate_id} <n>` — mua n crate\n"
+                    f"`dtn crate open {crate_id}` — mở 1 crate\n"
+                    f"`dtn crate open {crate_id} all` — mở tất cả "
+                    f"*(tối đa {CRATE_OPEN_MAX})*"
+                ),
+                inline=False,
+            )
+            embed.set_footer(text=f"ID: {crate_id}  •  dtn shop crate — xem tất cả crate")
+            return await ctx.send(embed=embed)
+
+        # ── dtn crate → help ──
         await ctx.send(
             f"{CHEST_EMOJI} **Lệnh crate:**\n"
+            "• `dtn crate <id>` — xem chi tiết & drop rate crate\n"
             "• `dtn crate buy <id> [amount]` — mua crate\n"
             "• `dtn crate open <id> [amount|all]` — mở crate nhận weapon\n"
             "• `dtn shop crate` — xem danh sách crate & drop rate"
@@ -152,6 +200,22 @@ class RPGCrate(commands.Cog):
     # =========================
     # OPEN CRATE
     # =========================
+    @staticmethod
+    async def _play_open_animation(ctx, crate_data: dict) -> discord.Message:
+        """
+        Gửi tin nhắn animation mở crate, edit qua 6 frame rồi trả về Message.
+        Caller có thể dùng message đó làm header kết quả.
+        """
+        frames = ["◻◻◻◻◻", "·◻◻◻◻", "··◻◻◻", "···◻◻", "····◻", "·····"]
+        msg = await ctx.send(
+            f"{crate_data['emoji']} **Đang mở crate...** {frames[0]}"
+        )
+        for frame in frames[1:]:
+            await asyncio.sleep(0.45)
+            await msg.edit(content=f"{crate_data['emoji']} **Đang mở crate...** {frame}")
+        await asyncio.sleep(0.3)
+        return msg
+
     @crate.command(name="open")
     async def crate_open(self, ctx, crate_id: str, raw_amount: str = "1"):
         if crate_id not in CRATES:
@@ -192,8 +256,9 @@ class RPGCrate(commands.Cog):
         # SOUL CRATE (id "004") — keep existing result logic
         # ══════════════════════════════════════════════════
         if crate_id == "004":
-            # Header sent ONCE regardless of batch size
-            await ctx.send(f"{display_name} | opens a weapon crate")
+            # Animation mở crate, sau đó edit thành header
+            anim_msg = await self._play_open_animation(ctx, CRATES[crate_id])
+            await anim_msg.edit(content=f"{display_name} | opens a weapon crate")
 
             for _ in range(count):
                 # Reload fresh state each iteration so add_weapon / add_item
@@ -252,8 +317,9 @@ class RPGCrate(commands.Cog):
         # ALL OTHER CRATES — plain-text output, no embeds
         # ══════════════════════════════════════════════════
 
-        # Header sent once
-        await ctx.send(f"{display_name} | opens a weapon crate")
+        # Animation mở crate, sau đó edit thành header kết quả
+        anim_msg = await self._play_open_animation(ctx, CRATES[crate_id])
+        await anim_msg.edit(content=f"{display_name} | opens a weapon crate")
 
         for _ in range(count):
             # Reload each iteration — same pattern as original; ensures
