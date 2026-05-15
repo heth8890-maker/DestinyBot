@@ -1,5 +1,6 @@
 import discord
 import os
+from discord.ext import commands
 
 from database_helper import _get_collections, _with_retry
 
@@ -30,8 +31,6 @@ class TopView(discord.ui.View):
                 {},
                 {"_id": 1, "cash": 1},
             )
-            # Lọc bỏ document không có cash hợp lệ, sort tại client
-            # (dùng sort() của pymongo để chắc chắn đúng thứ tự)
             cursor = cursor.sort("cash", -1).limit(10)
             top_10 = list(cursor)
 
@@ -70,30 +69,49 @@ class TopView(discord.ui.View):
         return embed
 
     def get_top_level_embed(self):
-        data = load_exp()
-        users = []
+        """
+        Query MongoDB trực tiếp, sort theo level DESC rồi exp DESC, lấy top 10.
+        """
+        try:
+            economy_col, _ = _get_collections()
 
-        for uid, val in data.items():
-            if isinstance(val, dict):
-                xp = val.get("xp", 0)
-                lvl = val.get("level", 1)
-                users.append((uid, xp, lvl))
+            cursor = _with_retry(
+                economy_col.find,
+                {},
+                {"_id": 1, "exp": 1, "level": 1},
+            )
+            cursor = cursor.sort([("level", -1), ("exp", -1)]).limit(10)
+            top_10 = list(cursor)
 
-        users.sort(key=lambda x: x[1], reverse=True)
-        top_10 = users[:10]
+        except Exception as e:
+            embed = discord.Embed(
+                title="🏆 | BẢNG XẾP HẠNG LEVEL",
+                description=f"❌ Không thể tải dữ liệu: {e}",
+                color=0x3498DB,
+            )
+            return embed
 
         embed = discord.Embed(
             title="🏆 | BẢNG XẾP HẠNG LEVEL",
             color=0x3498DB,
         )
 
-        description = ""
-        for i, (uid, xp, lvl) in enumerate(top_10, 1):
-            user_obj = self.bot.get_user(int(uid))
-            name = user_obj.name if user_obj else f"User ID: {uid}"
-            description += f"**#{i}. {name}** — `Lv.{lvl}`\n└ *{xp:,} xp*\n"
+        if not top_10:
+            embed.description = "Chưa có dữ liệu."
+        else:
+            description = ""
+            for i, doc in enumerate(top_10, 1):
+                uid = doc["_id"]
+                xp  = doc.get("exp", 0) or 0
+                lvl = doc.get("level", 1) or 1
+                try:
+                    user_obj = self.bot.get_user(int(uid))
+                except (ValueError, TypeError):
+                    user_obj = None
+                name = user_obj.name if user_obj else f"User ID: {uid}"
+                description += f"**#{i}. {name}** — `Lv.{lvl}`\n└ *{xp:,} xp*\n"
+            embed.description = description
 
-        embed.description = description if description else "Chưa có dữ liệu."
         embed.set_footer(
             text=f"Yêu cầu bởi {self.ctx.author.name}",
             icon_url=self.ctx.author.display_avatar.url,
