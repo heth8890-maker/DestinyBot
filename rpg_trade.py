@@ -7,12 +7,13 @@ import discord
 from discord.ext import commands
 
 from rpg_core import (
-    load_data, save_data, get_user,
     get_user_lock,
     get_item_by_id,
     add_item, remove_item,
     add_weapon, remove_weapon_from_bag,
 )
+from rpg_database import get_user, save_user
+from rpg_instance import resolve_passive
 # FIX-2: Dùng get_weapon_by_id từ rpg_weapo — cover đủ 4 weapon pool
 from rpg_weapon_data import (
     get_weapon_by_id,
@@ -20,7 +21,6 @@ from rpg_weapon_data import (
     WEAPONS, RARE_CRATE_WEAPONS, DARK_CRATE_WEAPON, SPECIAL_WEAPONS, CRATES,
 )
 from rpg_item import ITEMS
-from rpg_addon import get_upgraded_weapon
 from rpg_quest import add_quest_progress
 from cash import update_balance_safe, get_balance
 
@@ -89,11 +89,14 @@ def _side_text(side: dict, uid: str, bot, guild) -> tuple[str, str]:
 
     # ── Weapons (NEW-4: icon Discord thật từ weapon definition) ──
     for wid in side["weapons"]:
-        w     = _find_weapon(wid)
-        emoji = w["emoji"] if w else "<:Uncommon:1495000967417040969>"
-        label = w["name"]  if w else wid
-        star  = "<:Effect:1495466103047061679> " if "-" in wid else ""
-        lines.append(f"{emoji} {star}`{wid}` {label}")
+        w       = _find_weapon(wid)
+        emoji   = w["emoji"] if w else "<:Uncommon:1495000967417040969>"
+        label   = w["name"]  if w else wid
+        wi_snap = side.get("weapon_snapshots", {}).get(wid, {})
+        lv      = wi_snap.get("level", 1)
+        p       = resolve_passive(wi_snap.get("passive")) if wi_snap else None
+        p_icon  = p.get("emoji", "") if p and p.get("id") else ""
+        lines.append(f"{emoji}{p_icon} **{label}** Lv{lv} `{wid}`")
 
     # ── Items (NEW-4: icon Discord thật từ item definition) ──
     for entry in side["items"]:
@@ -171,20 +174,20 @@ async def _execute_trade(ctx, session: dict) -> str:
     pending_crates_to_b:  list[dict] = []
 
     async with get_user_lock(uid_a):
-        data_a = load_data(uid_a)
-        user_a = get_user(uid_a, data_a)
+        user_a, _ = get_user(uid_a)
 
         for wid in sa["weapons"]:
             if wid not in user_a.get("weapons", []):
                 notes.append(f"⚠️ <@{uid_a}> không có vũ khí `{wid}` → bỏ qua.")
                 continue
             remove_weapon_from_bag(user_a, wid)
-            uw_entry = None
-            if "-" in wid:
-                uw_entry = get_upgraded_weapon(user_a, wid)
-                if uw_entry and uw_entry in user_a.get("upgraded_weapons", []):
-                    user_a["upgraded_weapons"].remove(uw_entry)
-            pending_weapons_to_b.append((wid, uw_entry))
+            wi_entry = None
+            instances_a = user_a.setdefault("weapon_instances", [])
+            for i, wi in enumerate(instances_a):
+                if isinstance(wi, dict) and wi.get("uid") == wid:
+                    wi_entry = instances_a.pop(i)
+                    break
+            pending_weapons_to_b.append((wid, wi_entry))
 
         for entry in sa["items"]:
             if not remove_item(user_a, entry["id"], entry["qty"]):
@@ -207,7 +210,7 @@ async def _execute_trade(ctx, session: dict) -> str:
                     del inv_a[cid]
                 pending_crates_to_b.append({"id": cid, "qty": qty})
 
-        await save_data(data_a, uid_a)
+        save_user(uid_a, user_a)
 
     # ── Phase 2: Load B → add received từ A + remove thứ B cho đi → save B ──
     # received_*_from_b: danh sách đã remove thành công khỏi B, chờ add vào A
@@ -216,14 +219,13 @@ async def _execute_trade(ctx, session: dict) -> str:
     received_crates_from_b:  list[dict] = []
 
     async with get_user_lock(uid_b):
-        data_b = load_data(uid_b)
-        user_b = get_user(uid_b, data_b)
+        user_b, _ = get_user(uid_b)
 
         # Add nhận từ A
-        for wid, uw_entry in pending_weapons_to_b:
+        for wid, wi_entry in pending_weapons_to_b:
             add_weapon(user_b, wid)
-            if uw_entry:
-                user_b.setdefault("upgraded_weapons", []).append(uw_entry)
+            if wi_entry:
+                user_b.setdefault("weapon_instances", []).append(wi_entry)
         for entry in pending_items_to_b:
             add_item(user_b, entry["id"], entry["qty"])
         for entry in pending_crates_to_b:
@@ -236,12 +238,13 @@ async def _execute_trade(ctx, session: dict) -> str:
                 notes.append(f"⚠️ <@{uid_b}> không có vũ khí `{wid}` → bỏ qua.")
                 continue
             remove_weapon_from_bag(user_b, wid)
-            uw_entry = None
-            if "-" in wid:
-                uw_entry = get_upgraded_weapon(user_b, wid)
-                if uw_entry and uw_entry in user_b.get("upgraded_weapons", []):
-                    user_b["upgraded_weapons"].remove(uw_entry)
-            received_weapons_from_b.append((wid, uw_entry))
+            wi_entry = None
+            instances_b = user_b.setdefault("weapon_instances", [])
+            for i, wi in enumerate(instances_b):
+                if isinstance(wi, dict) and wi.get("uid") == wid:
+                    wi_entry = instances_b.pop(i)
+                    break
+            received_weapons_from_b.append((wid, wi_entry))
 
         for entry in sb["items"]:
             if not remove_item(user_b, entry["id"], entry["qty"]):
@@ -264,24 +267,23 @@ async def _execute_trade(ctx, session: dict) -> str:
                     del inv_b[cid]
                 received_crates_from_b.append({"id": cid, "qty": qty})
 
-        await save_data(data_b, uid_b)
+        save_user(uid_b, user_b)
 
     # ── Phase 3: Load lại A → add received từ B → save A lần 2 ─────────────
     async with get_user_lock(uid_a):
-        data_a = load_data(uid_a)
-        user_a = get_user(uid_a, data_a)
+        user_a, _ = get_user(uid_a)
 
-        for wid, uw_entry in received_weapons_from_b:
+        for wid, wi_entry in received_weapons_from_b:
             add_weapon(user_a, wid)
-            if uw_entry:
-                user_a.setdefault("upgraded_weapons", []).append(uw_entry)
+            if wi_entry:
+                user_a.setdefault("weapon_instances", []).append(wi_entry)
         for entry in received_items_from_b:
             add_item(user_a, entry["id"], entry["qty"])
         for entry in received_crates_from_b:
             inv_a = user_a.setdefault("crates", {})
             inv_a[entry["id"]] = inv_a.get(entry["id"], 0) + entry["qty"]
 
-        await save_data(data_a, uid_a)
+        save_user(uid_a, user_a)
 
     # ── Quest progress ────────────────────────────────────────────────────────
     add_quest_progress(uid_a, "trades_done")
@@ -511,8 +513,7 @@ class RPGTrade(commands.Cog):
         # ── Weapon ──────────────────────────────────────────
         if cat == "weapon":
             wid  = item_id
-            data = load_data(uid)
-            user = get_user(uid, data)
+            user, _ = get_user(uid)
             bag  = user.get("weapons", [])
 
             if wid not in bag:
@@ -528,6 +529,17 @@ class RPGTrade(commands.Cog):
                 return await ctx.send(f"{ERR} | Bạn chỉ có {owned_count}x `{wid}`.")
 
             side["weapons"].append(wid)
+            # Snapshot level + passive for embed display (read from already-loaded user)
+            user_snap, _ = get_user(uid)
+            wi_snap = next(
+                (wi for wi in user_snap.get("weapon_instances", [])
+                 if isinstance(wi, dict) and wi.get("uid") == wid),
+                {},
+            )
+            side.setdefault("weapon_snapshots", {})[wid] = {
+                "level":   wi_snap.get("level", 1),
+                "passive": wi_snap.get("passive"),
+            }
             self._invalidate_accepted(session)
 
         # ── Item ─────────────────────────────────────────────
@@ -541,8 +553,7 @@ class RPGTrade(commands.Cog):
             if not _find_item(item_id):
                 return await ctx.send(f"{ERR} | Item `{item_id}` không tồn tại.")
 
-            data      = load_data(uid)
-            user      = get_user(uid, data)
+            user, _   = get_user(uid)
             owned_qty = user["inv"].get(item_id, 0)
             already   = sum(e["qty"] for e in side["items"] if e["id"] == item_id)
 
@@ -574,8 +585,7 @@ class RPGTrade(commands.Cog):
             except (ValueError, AssertionError):
                 return await ctx.send(f"{ERR} | Số lượng không hợp lệ.")
 
-            data      = load_data(uid)
-            user      = get_user(uid, data)
+            user, _   = get_user(uid)
             owned_qty = user.get("crates", {}).get(str(item_id), 0)
             already   = sum(e["qty"] for e in side.get("crates", []) if e["id"] == item_id)
 

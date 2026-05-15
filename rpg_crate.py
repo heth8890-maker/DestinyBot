@@ -10,7 +10,7 @@ HỆ MỚI:
 
 Commands:
   dtn crate buy <id> [amount]
-  dtn crate open <id>
+  dtn crate open <id> [amount|all]
 """
 
 import asyncio
@@ -30,17 +30,68 @@ from rpg_database import get_user, save_user
 
 from rpg_weapon_data import roll_rare_crate_weapon, roll_dark_crate_weapon
 from rpg_quest import add_quest_progress
+from rpg_instance import PASSIVE_INDEX, resolve_passive
 from cash import update_balance_safe, get_balance
 
 
 COIN_EMOJI  = "<:Coin:1495831576397742241>"
 CHEST_EMOJI = "<:2925:1495277191867400284>"
-ERR  = "<:X_:1495466670616219819>"
-OK   = "<:Tick:1495466684520206528>"
+ERR         = "<:X_:1495466670616219819>"
+OK          = "<:Tick:1495466684520206528>"
+
+# Open icon shown on each result line, keyed by crate_id.
+# Soul crate (004) uses its own icon inline — not in this table.
+CRATE_OPEN_ICON: dict[str, str] = {
+    "001": "<:Uncomon:1495277191867400284>",
+    "002": "<:Craterare:1496191910765920406>",
+    "003": "<:Darkcrateopen:1498988761936302210>",
+}
+
+CRATE_OPEN_COOLDOWN = 9   # seconds
+CRATE_OPEN_MAX      = 6   # silent cap per batch
 
 
 def _rarity_tier(rarity: str) -> str:
     return RARITY_LABEL.get(rarity, rarity)
+
+
+def _parse_amount(raw: str, owned: int) -> int:
+    """
+    Parse the [amount|all] argument.
+    - "all"  → min(owned, CRATE_OPEN_MAX)
+    - int    → min(int, CRATE_OPEN_MAX)
+    - bad    → 1
+    Silently clamps; never raises.
+    """
+    if raw.lower() == "all":
+        count = owned
+    else:
+        try:
+            count = int(raw)
+        except ValueError:
+            count = 1
+    # Silently cap at 6, then cap at what the player actually owns
+    return max(1, min(count, CRATE_OPEN_MAX, owned))
+
+
+def _get_passive_emoji(user: dict, new_uid: str) -> str:
+    """
+    Look up the passive emoji for a freshly-added weapon instance.
+    Returns empty string on any failure so the output line still sends.
+    """
+    wi = next(
+        (w for w in user.get("weapon_instances", []) if w.get("uid") == new_uid),
+        None,
+    )
+    if not wi:
+        return ""
+    passive_stored = wi.get("passive")
+    if not passive_stored:
+        return ""
+    resolved = resolve_passive(passive_stored)
+    if not resolved:
+        return ""
+    return resolved.get("emoji", "")
 
 
 class RPGCrate(commands.Cog):
@@ -52,7 +103,7 @@ class RPGCrate(commands.Cog):
         await ctx.send(
             f"{CHEST_EMOJI} **Lệnh crate:**\n"
             "• `dtn crate buy <id> [amount]` — mua crate\n"
-            "• `dtn crate open <id>` — mở crate nhận weapon\n"
+            "• `dtn crate open <id> [amount|all]` — mở crate nhận weapon\n"
             "• `dtn shop crate` — xem danh sách crate & drop rate"
         )
 
@@ -102,18 +153,20 @@ class RPGCrate(commands.Cog):
     # OPEN CRATE
     # =========================
     @crate.command(name="open")
-    async def crate_open(self, ctx, crate_id: str):
+    async def crate_open(self, ctx, crate_id: str, raw_amount: str = "1"):
         if crate_id not in CRATES:
             return await ctx.send(
                 f"{ERR} | Crate `{crate_id}` không tồn tại. Xem: `dtn shop crate`"
             )
 
         crate_key = f"crate_{crate_id}"
-        uid  = str(ctx.author.id)
-        # ✅ Tải user từ MongoDB
+        uid       = str(ctx.author.id)
+
+        # ── Pre-flight: inventory & cooldown check (once for the entire batch) ──
         user, _ = get_user(uid)
 
-        if user["inv"].get(crate_key, 0) <= 0:
+        owned = user["inv"].get(crate_key, 0)
+        if owned <= 0:
             return await ctx.send(
                 f"{ERR} | Bạn không có {CRATES[crate_id]['name']}. "
                 f"Mua bằng `dtn crate buy {crate_id}`."
@@ -124,118 +177,116 @@ class RPGCrate(commands.Cog):
             remaining = int(user["crate_cd"] - now)
             return await ctx.send(f"⏳ Đang cooldown, còn **{remaining}s**.")
 
-        user["crate_cd"] = now + 2
+        # ── Resolve final count (silently capped at 6 and at owned) ──
+        count = _parse_amount(raw_amount, owned)
 
-        # remove 1 crate (stack system)
-        remove_item(user, crate_key)
-        # ✅ Lưu cooldown + xóa crate lên MongoDB
+        # ── Deduct ALL crates + set cooldown upfront, then save once ──
+        user["crate_cd"] = now + CRATE_OPEN_COOLDOWN
+        for _ in range(count):
+            remove_item(user, crate_key)
         save_user(uid, user)
 
-        crate = CRATES[crate_id]
+        display_name = ctx.author.display_name
 
-        frames = ["◻◻◻◻◻", "·◻◻◻◻", "··◻◻◻", "···◻◻", "····◻", "·····"]
-        msg = await ctx.send(f"{crate['emoji']} **Đang mở crate...** {frames[0]}")
-
-        for frame in frames[1:]:
-            await asyncio.sleep(0.45)
-            await msg.edit(content=f"{crate['emoji']} **Đang mở crate...** {frame}")
-
-        await asyncio.sleep(0.3)
-
-        # ── [LOGIC MỞ RIÊNG CHO SOUL CRATE] ──
+        # ══════════════════════════════════════════════════
+        # SOUL CRATE (id "004") — keep existing result logic
+        # ══════════════════════════════════════════════════
         if crate_id == "004":
-            roll = random.uniform(0, 100)
+            # Header sent ONCE regardless of batch size
+            await ctx.send(f"{display_name} | opens a weapon crate")
 
-            # 1. TRÚNG SPECIAL WEAPON (0.6%)
-            if roll <= 0.6:
-                special_pool = ["5001", "5002", "5003"]
-                w_id = random.choice(special_pool)
-                add_weapon(user, w_id)
-                # ✅ Lưu lên MongoDB
-                save_user(uid, user)
+            for _ in range(count):
+                # Reload fresh state each iteration so add_weapon / add_item
+                # accumulate correctly across the batch
+                user, _ = get_user(uid)
+                roll = random.uniform(0, 100)
 
-                from rpg_core import get_weapon_entity
-                entity = get_weapon_entity(user, w_id)
-                embed = entity.build_embed()
-                embed.title = f"<:Opensoulcrate:1498617029077499935> | fire of soul <:Linh_hoa:1498614127386562601>"
-                embed.color = 0xCCFFCC  # Xanh lá nhạt
-                embed.description = f"Chúc mừng {ctx.author.mention} đã triệu hồi thành công vũ khí từ **Soul Crate**!"
-                return await msg.edit(content=None, embed=embed)
+                # 1. Special weapon (0.6%)
+                if roll <= 0.6:
+                    special_pool = ["5001", "5002", "5003"]
+                    w_id = random.choice(special_pool)
+                    add_weapon(user, w_id)
+                    save_user(uid, user)
+                    add_quest_progress(ctx.author.id, "crates_opened")
 
-            # 2. TRÚNG LINH HOẢ (35%)
-            elif roll <= 35.6:
-                amount = random.randint(4, 18)
-                add_item(user, "5200", amount)
-                # ✅ Lưu lên MongoDB
-                save_user(uid, user)
-                return await msg.edit(content=f"<:Opensoulcrate:1498617029077499935> | Chúc mừng bạn đã mở ra **x{amount}** <:Linh_hoa:1498614127386562601> **Linh hoả**")
+                    from rpg_core import get_weapon_entity
+                    entity = get_weapon_entity(user, w_id)
+                    embed = entity.build_embed()
+                    embed.title = "<:Opensoulcrate:1498617029077499935> | fire of soul <:Linh_hoa:1498614127386562601>"
+                    embed.color = 0xCCFFCC
+                    embed.description = (
+                        f"Chúc mừng {ctx.author.mention} đã triệu hồi thành công "
+                        f"vũ khí từ **Soul Crate**!"
+                    )
+                    await ctx.send(embed=embed)
 
-            # 3. TRÚNG COIN (64.4%)
+                # 2. Linh hoả (35%)
+                elif roll <= 35.6:
+                    amount_linh = random.randint(4, 18)
+                    add_item(user, "5200", amount_linh)
+                    save_user(uid, user)
+                    add_quest_progress(ctx.author.id, "crates_opened")
+                    await ctx.send(
+                        f"<:Opensoulcrate:1498617029077499935> | "
+                        f"Chúc mừng bạn đã mở ra **x{amount_linh}** "
+                        f"<:Linh_hoa:1498614127386562601> **Linh hoả**"
+                    )
+
+                # 3. Coin (64.4%)
+                else:
+                    coins = random.randint(2000, 6000)
+                    # update_balance_safe self-saves; no save_user needed here
+                    await update_balance_safe(ctx.author.id, coins)
+                    add_quest_progress(ctx.author.id, "crates_opened")
+                    await ctx.send(
+                        f"<:Opensoulcrate:1498617029077499935> | "
+                        f"Chúc mừng bạn đã mở ra **x{coins:,}** "
+                        f"{COIN_EMOJI} **Coin**"
+                    )
+
+                await asyncio.sleep(0.125)
+
+            return
+
+        # ══════════════════════════════════════════════════
+        # ALL OTHER CRATES — plain-text output, no embeds
+        # ══════════════════════════════════════════════════
+
+        # Header sent once
+        await ctx.send(f"{display_name} | opens a weapon crate")
+
+        for _ in range(count):
+            # Reload each iteration — same pattern as original; ensures
+            # weapon_instances list is fresh before add_weapon writes to it
+            user, _ = get_user(uid)
+
+            if crate_id == "003":
+                weapon = roll_dark_crate_weapon()
+            elif crate_id == "002":
+                weapon = roll_rare_crate_weapon()
             else:
-                coins = random.randint(2000, 6000)
-                from cash import update_balance_safe
-                await update_balance_safe(ctx.author.id, coins)
-                # ✅ update_balance tự lưu; user dict không thay đổi → không cần save_user
-                return await msg.edit(content=f"<:Opensoulcrate:1498617029077499935> | Chúc mừng bạn đã mở ra **x{coins:,}** <:Coin:1495831576397742241> **Coin**")
+                weapon = roll_weapon()
 
-        # ── [LOGIC CHO CÁC CRATE CÒN LẠI] ──
-        if crate_id == "003":
-            weapon = roll_dark_crate_weapon()
-        elif crate_id == "002":
-            weapon = roll_rare_crate_weapon()
-        else:
-            weapon = roll_weapon()
+            new_uid = add_weapon(user, weapon["id"])
 
-        # ✅ Tải lại user từ MongoDB (giống re-load JSON cũ, đảm bảo dữ liệu mới nhất)
-        user, _ = get_user(uid)
+            # Resolve passive emoji from the newly-created weapon instance.
+            # The instance is already in user["weapon_instances"] at this point
+            # because add_weapon mutates user in-place before returning the UID.
+            passive_emoji = _get_passive_emoji(user, new_uid)
 
-        # 🔥 IMPORTANT: STACK BASE_ID ONLY — NEVER produce a UID from a crate
-        new_uid = add_weapon(user, weapon["id"])
+            save_user(uid, user)
+            add_quest_progress(ctx.author.id, "crates_opened")
 
-        # ✅ Lưu lên MongoDB
-        save_user(uid, user)
+            rarity_label = RARITY_LABEL.get(weapon["rarity"], weapon["rarity"])
+            weapon_emoji = weapon["emoji"]
+            drop_rate    = weapon["chance"]
+            open_icon    = CRATE_OPEN_ICON.get(crate_id, CHEST_EMOJI)
 
-        add_quest_progress(ctx.author.id, "crates_opened")
-
-        rarity_color = RARITY_COLOR.get(weapon["rarity"], 0x5865F2)
-
-        embed = discord.Embed(
-            title=f"{CHEST_EMOJI} Crate đã mở!",
-            description=(
-                f"**{ctx.author.mention}** nhận được:\n\n"
-                f"{weapon['emoji']}  **{weapon['name']}**\n"
-                f"{_rarity_tier(weapon['rarity'])}  |  Tỉ lệ: **{weapon['chance']}%**"
-            ),
-            color=rarity_color,
-        )
-
-        effects = weapon.get("effects", {})
-        if effects:
-            fx_lines = "\n".join(f"• `{k}`: `+{v}`" for k, v in effects.items())
-            embed.add_field(
-                name="<:Effect:1495466103047061679> | Hiệu ứng",
-                value=fx_lines,
-                inline=False,
+            await ctx.send(
+                f"{open_icon} | and finds a "
+                f"{rarity_label} {new_uid} {weapon_emoji} {passive_emoji} {drop_rate}%"
             )
-        else:
-            embed.add_field(
-                name="<:Effect:1495466103047061679> | Hiệu ứng",
-                value="Không có hiệu ứng.",
-                inline=False,
-            )
-
-        embed.add_field(
-            name="📖 Mô tả",
-            value=weapon.get("description", "—"),
-            inline=False,
-        )
-
-        embed.set_footer(
-            text=f"UID: {new_uid}  │  dtn weapon equip {new_uid}"
-        )
-
-        await msg.edit(content=None, embed=embed)
-
+            await asyncio.sleep(0.125)
 
 
 async def setup(bot):
