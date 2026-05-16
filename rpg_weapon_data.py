@@ -95,7 +95,7 @@ WEAPON_EFFECTS = {
 
     # ── SPECIAL: Domain of Makima ──
     "2509": {
-        "extra_slot": 2,              # +3 ô hunt
+        "extra_slot": 2,              # +2 ô hunt
         "reduce_fail": 0.08,           # Giảm 50% tỉ lệ hunt hụt
         "sell_bonus": 0.05,            # (Tùy chọn) Tăng thêm giá bán item khi hunt
         "luck_up": 0.11
@@ -164,15 +164,15 @@ WEAPON_EFFECTS = {
     # ── NEW: King of soul ──
     "4541": {
         "double_value": 0.15,
-        "double_drop": 0.25,
+        "double_drop": 0.2,
         "extra_slot": 2,
-        "luck_up": 0.35,
+        "luck_up": 0.25,
         "reduce_fail": 0.15,
-        "reduce_cooldown": 0.15,
-        "sell_bonus": 0.20,
+        "reduce_cooldown": 0.1,
+        "sell_bonus": 0.16,
         "passive_oneiroi": 0.03,
         "rare_bias": 0.05,
-        "treasure_hunt": 0.013
+        "treasure_hunt": 0.01
     },
 
     # ── NEW: Đầu lâu bạc ──
@@ -224,7 +224,6 @@ WEAPON_EFFECTS = {
         "luck_up":       0.10,
         "treasure_hunt": 0.04,
         "double_value":  0.18,
-        "rare_bias": 0.03,
         "double_item": 0.15,
         "double_drop": 0.25,
     },
@@ -512,7 +511,7 @@ PARADISE_CRATE_WEAPONS = [
         "name": "Arrow of god",
         "emoji": "<:5593:1505048757023014992>",
         "rarity": "rare",
-        "chance": 27.0,
+        "chance": 27.3,
         "effects": WEAPON_EFFECTS["5593"],
         "description": "+6% giá bán, giảm 1% cooldown.",
         "min": 3000, "max": 4000,
@@ -532,7 +531,7 @@ PARADISE_CRATE_WEAPONS = [
         "name": "Đinh ba của Poisedon",
         "emoji": "<:5591:1505048753172910231>",
         "rarity": "legendary",
-        "chance": 1.3,
+        "chance": 1,
         "effects": WEAPON_EFFECTS["5591"],
         "description": "+16% giá bán, giảm 8% cooldown, giảm 8% fail, +10% luck, +4% double item, +1 slot, +3% treasure hunt.",
         "min": 14000, "max": 14500,
@@ -619,7 +618,7 @@ CRATES = {
     "004": {
         "name": "Soul Crate",
         "emoji": "<:Soulcrate:1498617031501807646>",
-        "price": 32000,
+        "price": 24000,
         "rarity": "special",
         "description": (
             "Chứa đựng linh hồn rực cháy.\n"
