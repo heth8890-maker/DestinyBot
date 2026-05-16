@@ -519,7 +519,7 @@ PARADISE_CRATE_WEAPONS = [
     {
         "id": "5595",
         "name": "Chiến giáp valkyrie",
-        "emoji": "<:5595:1505048749712343130>",   # placeholder — update nếu có emoji riêng
+        "emoji": "<:5592:1505048755261669547>",   # placeholder — update nếu có emoji riêng
         "rarity": "epic",
         "chance": 3.0,
         "effects": WEAPON_EFFECTS["5595"],
