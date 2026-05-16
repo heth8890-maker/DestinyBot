@@ -163,7 +163,7 @@ def _paginate_fields(
 class PageView(discord.ui.View):
     """
     View phân trang chung dùng cho inv / shop item / shop weapon.
-    Nút ⬅️ ➡️ — tự disable ở trang đầu/cuối. Timeout 60s.
+    Nút ◀ Trước / Tiếp ▶ — tự disable ở trang đầu/cuối. Timeout 60s.
     """
 
     def __init__(self, embeds: list[discord.Embed], page: int = 0):
@@ -176,7 +176,7 @@ class PageView(discord.ui.View):
         self.prev_btn.disabled = (self.page == 0)
         self.next_btn.disabled = (self.page >= len(self.embeds) - 1)
 
-    @discord.ui.button(emoji="⬅️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="◀ Trước", style=discord.ButtonStyle.secondary)
     async def prev_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
@@ -186,7 +186,7 @@ class PageView(discord.ui.View):
             embed=self.embeds[self.page], view=self
         )
 
-    @discord.ui.button(emoji="➡️", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Tiếp ▶", style=discord.ButtonStyle.primary)
     async def next_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
@@ -222,9 +222,9 @@ class RPGInventory(commands.Cog):
     @commands.command(name="inv")
     async def inv(self, ctx):
         uid  = str(ctx.author.id)
-        user, upgraded_weapons = get_user(uid)
+        user, _ = get_user(uid)
 
-        item_lines, crate_lines, weapon_lines, upgraded_lines = [], [], [], []
+        item_lines, crate_lines = [], []
 
         # ── Items & Crates ────────────────────────────────────────────────────
         for item_id, qty in user["inv"].items():
@@ -242,74 +242,13 @@ class RPGInventory(commands.Cog):
                     f"{item['emoji']} `{item_id}` **{item['name']}** x{qty}  _{tier}_"
                 )
 
-        # ── Regular weapons — dùng WeaponID.is_unique() thay vì "-" not in ────
-        # FIX: also collect UID weapons that have no upgraded_weapons entry.
-        # Under v1.7 a UID without an upgrade record is valid, but the old code
-        # skipped them in both the regular-weapon block (is_unique check) AND the
-        # upgraded-weapon block (no entry in upgraded_weapons) → they were invisible.
-        # upgraded_weapons is now a separate dict {uid: {...}} from get_user()
-        uw_uids: set[str] = {uw["uid"] for uw in upgraded_weapons}
-
-        weapon_counts:    dict[str, int] = {}
-        uid_no_upgrade:   list[str]      = []   # UIDs with no upgrade entry yet
-
-        for wid in user.get("weapons", []):
-            if not WeaponID.is_unique(str(wid)):
-                weapon_counts[wid] = weapon_counts.get(wid, 0) + 1
-            elif wid not in uw_uids:
-                uid_no_upgrade.append(wid)   # UID but not yet upgraded
-
-        for wid, cnt in weapon_counts.items():
-            # Dùng get_weapon_entity() — single entry point
-            entity = get_weapon_entity(user, wid)
-            if entity:
-                weapon_lines.append(
-                    f"{entity.base_data['emoji']} `{wid}` **{entity.base_data['name']}** x{cnt}"
-                )
-
-        # Render UID weapons that have no upgrade entry yet (FIX: were invisible before)
-        for wid in uid_no_upgrade:
-            entity = get_weapon_entity(user, wid)
-            if entity:
-                weapon_lines.append(
-                    f"{entity.base_data['emoji']} `{wid}` **{entity.base_data['name']}** _(chưa nâng cấp)_"
-                )
-
-        # ── Upgraded weapons — dùng entity.fmt_name() → thống nhất với status ─
-        # TODO: get_weapon_entity() vẫn đọc user["upgraded_weapons"] (list cũ từ rpg_core).
-        # fmt_name() có thể không hiển thị upgrade decorators cho đến khi rpg_weapn.py
-        # được refactor sang MongoDB pattern. max_lv ở đây đọc trực tiếp từ upgraded_weapons
-        # dict nên vẫn đúng.
-        for uw_data in upgraded_weapons:
-            uid_key = uw_data["uid"]
-            entity = get_weapon_entity(user, uid_key)
-            if entity:
-                effect_levels = uw_data.get("effect_levels", {})
-                max_lv = max(effect_levels.values()) if effect_levels else 1
-                upgraded_lines.append(
-                    f"<:Effect:1495466103047061679> `{uid_key}` "
-                    f"{entity.fmt_name()} _(max lv{max_lv}/30)_"
-                )
-
-        # ── Equipped — ALWAYS resolve base_id first (Ghost Inventory fix) ─────
-        # NEVER look up `wid` directly in the weapon database.
-        # UIDs like "467-A1B2C" are not database keys → returns None
-        # → missing emoji/name → "Ghost" slot in the embed.
-
-        # ── Build paginated fields (logic cũ giữ nguyên, chỉ wrap vào phân trang) ──
+        # ── Build paginated fields ────────────────────────────────────────────
         fields: list[tuple] = []
         fields += _split_field(
             "<:2851:1495250164116492469> Vật phẩm", item_lines
         )
         if crate_lines:
             fields += _split_field("📦 Crate", crate_lines)
-        fields += _split_field(
-            "<:Hamer:1495462570469888069> Kho vũ khí", weapon_lines
-        )
-        if upgraded_lines:
-            fields += _split_field(
-                "<:Info:1496098636247863491> Weapon Nâng Cấp", upgraded_lines
-            )
 
         title  = f"<:Backpack:1495462021377032202> Kho đồ của {ctx.author.display_name}"
         footer = f"Số dư: {get_balance(ctx.author.id):,} {COIN_EMOJI}"
