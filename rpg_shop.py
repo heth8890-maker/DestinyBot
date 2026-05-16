@@ -27,6 +27,8 @@ from rpg_database import get_user, save_user
 from rpg_weapon_data import (
     RARE_CRATE_WEAPONS,
     DARK_CRATE_WEAPON,
+    PARADISE_CRATE_WEAPONS,
+    BOOK_OF_GODLY_WEAPONS,
     _rarity_tier,
 )
 from rpg_addon import (
@@ -67,6 +69,10 @@ _SHORT: dict[str, str] = {
     "Chiếc kéo của Apolo":             "Kéo Apolo",
     "Đuôi tắc kè hoa":                 "Đuôi TKH",
     "Ngôi sao may mắn":                "Sao May Mắn",
+    "Đinh ba của Poisedon":            "Đinh Ba Poisedon",
+    "Thần thời gian Chronus":          "Chronus",
+    "Surtr bản ngã hoàng kim":         "Surtr Hoàng Kim",
+    "Lôi thần Indra":                  "Indra",
     # Thêm tên rút gọn mới tại đây nếu cần
 }
 
@@ -75,6 +81,7 @@ _CRATE_POOL: dict[str, list] = {
     "001": WEAPONS,
     "002": RARE_CRATE_WEAPONS,
     "003": DARK_CRATE_WEAPON,
+    "006": PARADISE_CRATE_WEAPONS,
     # "005": FUTURE_CRATE_WEAPONS,  ← ví dụ thêm sau
 }
 
@@ -87,7 +94,12 @@ _CUSTOM_DROPS: dict[str, str] = {
         "  <:Linh_hoa:1498614127386562601> **Linh Hoả** (x4–18) — 35%\n"
         "  <:Coin:1495831576397742241> **Coin** (2,000–6,000) — 64.4%"
     ),
-    # "006": "custom drop text cho crate 006",
+    "009": (
+        "  <a:5610:1505051859537104906> **Lôi thần Indra** — 33.33%  _Mythical_\n"
+        "  <a:5611:1505052271182872576> **Thần thời gian Chronus** — 33.33%  _Mythical_\n"
+        "  <a:5612:1505052278753595402> **Surtr bản ngã hoàng kim** — 33.33%  _Mythical_\n"
+        "  ⚠ _Không thể mua trực tiếp — chỉ drop từ Crate of Paradise (006)_"
+    ),
 }
 
 CRATE_PAGE_SIZE = 2   # số crate hiển thị mỗi trang
@@ -130,8 +142,13 @@ def _build_crate_page_embed(page: int) -> discord.Embed:
         embed.add_field(
             name=f"{crate['emoji']} {crate['name']}  |  ID: `{crate_id}`",
             value=(
-                f"<:2245:1493575277605949480> Giá: **{crate['price']:,}** {COIN_EMOJI}\n\n"
-                "**Bảng drop rate:**\n" + drop_text
+                f"<:2245:1493575277605949480> Giá: "
+                + (
+                    "**Không bán** _(drop từ Crate of Paradise 006)_"
+                    if crate_id == "009"
+                    else f"**{crate['price']:,}** {COIN_EMOJI}"
+                )
+                + "\n\n**Bảng drop rate:**\n" + drop_text
             ),
             inline=False,
         )

@@ -172,7 +172,7 @@ WEAPON_EFFECTS = {
         "sell_bonus": 0.20,
         "passive_oneiroi": 0.03,
         "rare_bias": 0.05,
-        "treasure_hunt": 0.0125
+        "treasure_hunt": 0.013
     },
 
     # ── NEW: Đầu lâu bạc ──
@@ -182,6 +182,77 @@ WEAPON_EFFECTS = {
         "sell_bonus": 0.14,
         "luck_up": 0.05,
         "rare_bias": 0.02,
+    },
+
+    # ══ PARADISE CRATE WEAPONS ══════════════════════════════
+
+    # ── COMMON: Dây chuyền ruby ──
+    "5594": {
+        "sell_bonus": 0.03,
+    },
+
+    # ── RARE: Arrow of god ──
+    "5593": {
+        "sell_bonus":      0.06,
+        "reduce_cooldown": 0.01,
+    },
+
+    # ── EPIC: Chiến giáp valkyrie ──
+    "5595": {
+        "treasure_hunt":   0.02,
+        "sell_bonus":      0.04,
+        "reduce_cooldown": 0.02,
+    },
+
+    # ── LEGENDARY: Đinh ba của Poisedon ──
+    "5591": {
+        "sell_bonus":    0.16,
+        "reduce_cooldown": 0.08,
+        "reduce_fail":   0.08,
+        "luck_up":       0.10,
+        "double_item":   0.04,
+        "extra_slot":    1,
+        "treasure_hunt": 0.03,
+    },
+
+    # ══ BOOK OF GODLY WEAPONS (mythical) ════════════════════
+
+    # ── MYTHICAL: Lôi thần Indra ──
+    "5610": {
+        "rare_bias":     0.05,
+        "sell_bonus":    0.30,
+        "luck_up":       0.10,
+        "treasure_hunt": 0.04,
+        "double_value":  0.18,
+        "rare_bias": 0.03,
+        "double_item": 0.15,
+        "double_drop": 0.25,
+    },
+
+    # ── MYTHICAL: Thần thời gian Chronus ──
+    "5611": {
+        "reduce_cooldown": 0.37,
+        "reduce_fail":     0.30,
+        "sell_bonus":      0.18,
+        "extra_slot":      2,
+        "double_item":     0.10,
+        "rare_bias": 0.03,
+        "luck_up": 0.12,
+        "double_value": 0.12,
+        "double_drop": 0.25,
+    },
+
+    # ── MYTHICAL: Surtr bản ngã hoàng kim ──
+    "5612": {
+        "extra_slot":      4,
+        "reduce_cooldown": 0.07,
+        "treasure_hunt":   0.04,
+        "sell_bonus":      0.12,
+        "double_item":     0.12,
+        "rare_bias": 0.04,
+        "luck_up": 0.2,
+        "double_value": 0.2,
+        "double_drop": 0.25,
     },
 }
 
@@ -425,6 +496,92 @@ DARK_CRATE_WEAPON = [
     },
 ]
 
+PARADISE_CRATE_WEAPONS = [
+    {
+        "id": "5594",
+        "name": "Dây chuyền ruby",
+        "emoji": "<:5594:1505048749712343130>",
+        "rarity": "common",
+        "chance": 68.6,
+        "effects": WEAPON_EFFECTS["5594"],
+        "description": "+3% giá bán.",
+        "min": 1700, "max": 1900,
+    },
+    {
+        "id": "5593",
+        "name": "Arrow of god",
+        "emoji": "<:5593:1505048757023014992>",
+        "rarity": "rare",
+        "chance": 27.0,
+        "effects": WEAPON_EFFECTS["5593"],
+        "description": "+6% giá bán, giảm 1% cooldown.",
+        "min": 3000, "max": 4000,
+    },
+    {
+        "id": "5595",
+        "name": "Chiến giáp valkyrie",
+        "emoji": "<:5595:1505048749712343130>",   # placeholder — update nếu có emoji riêng
+        "rarity": "epic",
+        "chance": 3.0,
+        "effects": WEAPON_EFFECTS["5595"],
+        "description": "+2% treasure hunt, +4% giá bán, giảm 2% cooldown.",
+        "min": 4500, "max": 6500,
+    },
+    {
+        "id": "5591",
+        "name": "Đinh ba của Poisedon",
+        "emoji": "<:5591:1505048753172910231>",
+        "rarity": "legendary",
+        "chance": 1.3,
+        "effects": WEAPON_EFFECTS["5591"],
+        "description": "+16% giá bán, giảm 8% cooldown, giảm 8% fail, +10% luck, +4% double item, +1 slot, +3% treasure hunt.",
+        "min": 14000, "max": 14500,
+    },
+    {
+        "id": "006_book",   # special trigger — xem roll_paradise_crate_weapon()
+        "name": "Book of godly",
+        "emoji": "<:Paradise_crate:1505052530613289080>",
+        "rarity": "mythical",
+        "chance": 0.1,
+        "effects": {},
+        "description": "Một cuốn sách huyền bí. Mở ra ngay 1 Book of Godly Crate (009).",
+        "min": 0, "max": 0,
+    },
+]
+
+BOOK_OF_GODLY_WEAPONS = [
+    {
+        "id": "5610",
+        "name": "Lôi thần Indra",
+        "emoji": "<a:5610:1505051859537104906>",
+        "rarity": "mythical",
+        "chance": 33.333,
+        "effects": WEAPON_EFFECTS["5610"],
+        "description": "+5% rare bias, +30% giá bán, +10% luck, +4% treasure hunt, +10% double value.",
+        "min": 180000, "max": 280000,
+    },
+    {
+        "id": "5611",
+        "name": "Thần thời gian Chronus",
+        "emoji": "<a:5611:1505052271182872576>",
+        "rarity": "mythical",
+        "chance": 33.333,
+        "effects": WEAPON_EFFECTS["5611"],
+        "description": "+37% giảm cooldown, +30% giảm fail, +10% giá bán, +2 extra slot, +10% double item.",
+        "min": 180000, "max": 280000,
+    },
+    {
+        "id": "5612",
+        "name": "Surtr bản ngã hoàng kim",
+        "emoji": "<a:5612:1505052278753595402>",
+        "rarity": "mythical",
+        "chance": 33.334,
+        "effects": WEAPON_EFFECTS["5612"],
+        "description": "+4 extra slot, giảm 7% cooldown, +4% treasure hunt, +8% giá bán, +12% double item.",
+        "min": 180000, "max": 280000,
+    },
+]
+
 # ═══════════════════════════════════════════════════════════
 # CRATE DEFINITIONS
 # ═══════════════════════════════════════════════════════════
@@ -467,6 +624,28 @@ CRATES = {
         "description": (
             "Chứa đựng linh hồn rực cháy.\n"
             "Ma Hỏa Thống Soái 0.3% | Linh Diệm Sát Thần 0,3% | Hồn Giáp Bất Diệt 0,3% | Linh Hoả 35% | 64,4% 2000-6000 Coin"
+        ),
+    },
+    "006": {
+        "name": "Crate of Paradise",
+        "emoji": "<:Paradise_crate:1505052530613289080>",
+        "open_emoji": "<:Paradise_crate_open:1505052527157051454>",
+        "price": 15000,
+        "rarity": "legend",
+        "description": (
+            "Cánh cửa đến thiên đàng.\n"
+            "Book of Godly 0.6% | Đinh ba Poisedon 6.5% | Chiến giáp Valkyrie 10% | Arrow of God 27% | Dây chuyền Ruby 55.9%"
+        ),
+    },
+    "009": {
+        "name": "Book of Godly",
+        "emoji": "<:Book_of_godly:1505091902964371568>",
+        "open_emoji": "<a:Book_open:1505164965932306512>",
+        "price": 12800000,       # chỉ mở được từ Crate of Paradise (006) — không bán riêng
+        "rarity": "mythical",
+        "description": (
+            "Cuốn sách của các vị thần.\n"
+            "100% ra 1 trong 3 Mythical: Lôi thần Indra | Thần thời gian Chronus | Surtr bản ngã hoàng kim"
         ),
     },
 }
@@ -512,6 +691,10 @@ def get_weapon_by_id(weapon_id: any) -> dict | None:
         result = next((w for w in SPECIAL_WEAPONS if w["id"] == wid_str), None)
     if result is None:
         result = next((w for w in DARK_CRATE_WEAPON if w["id"] == wid_str), None)  # FIX: dark crate weapons
+    if result is None:
+        result = next((w for w in PARADISE_CRATE_WEAPONS if w["id"] == wid_str), None)
+    if result is None:
+        result = next((w for w in BOOK_OF_GODLY_WEAPONS if w["id"] == wid_str), None)
     return result
 
 
@@ -566,6 +749,35 @@ def roll_dark_crate_weapon() -> dict:
     return DARK_CRATE_WEAPON[0]  # fallback
 
 
+def roll_paradise_crate_weapon() -> dict:
+    """
+    Roll ngẫu nhiên 1 weapon từ Crate of Paradise (006).
+    Tổng chance = 100.
+    Nếu kết quả là id "006_book" → caller phải xử lý mở Book of Godly (009).
+    """
+    roll = random.uniform(0, 100)
+    cumulative = 0
+    for w in PARADISE_CRATE_WEAPONS:
+        cumulative += w["chance"]
+        if roll <= cumulative:
+            return w
+    return PARADISE_CRATE_WEAPONS[0]  # fallback
+
+
+def roll_book_of_godly_weapon() -> dict:
+    """
+    Roll ngẫu nhiên 1 trong 3 Mythical từ Book of Godly (009).
+    Tổng chance = 100 (33.34 + 33.33 + 33.33).
+    """
+    roll = random.uniform(0, 100)
+    cumulative = 0
+    for w in BOOK_OF_GODLY_WEAPONS:
+        cumulative += w["chance"]
+        if roll <= cumulative:
+            return w
+    return BOOK_OF_GODLY_WEAPONS[0]  # fallback
+
+
 # ═══════════════════════════════════════════════════════════
 # COSMETIC CONSTANTS
 # ═══════════════════════════════════════════════════════════
@@ -599,6 +811,7 @@ _EFFECT_LABEL: dict[str, str] = {
     "treasure_hunt":   "Treasure Hunt",   # mở rộng window bonus crate/coin mỗi hunt
     "event_hunt":      "Event Hunt",      # tăng hiệu quả khi hunt event đặc biệt
     "unbreaking":      "Unbreaking",      # % giảm xác suất hao mòn độ bền
+    "double_item":     "Double Item",     # % nhân đôi số lượng item nhận được
 }
 
 # Effect dạng số nguyên — không scale, không format %

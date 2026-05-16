@@ -49,11 +49,11 @@ DURABILITY_BY_RARITY = {
     "uncommon":  50,
     "rare":      80,
     "epic":      120,
-    "legendary": 150,
-    "legend":    150,
-    "mythical":  200,
-    "special":   200,
-    "soul":      200,
+    "legendary": 200,
+    "legend":    200,
+    "mythical":  420,
+    "special":   300,
+    "soul":      300,
 }
 
 # Tỉ lệ chọn passive tier theo weapon rarity

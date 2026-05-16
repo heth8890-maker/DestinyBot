@@ -29,7 +29,12 @@ from rpg_core import (
 # ✅ Dùng get_user / save_user từ rpg_database (MongoDB) thay vì load_data / save_data JSON
 from rpg_database import get_user, save_user
 
-from rpg_weapon_data import roll_rare_crate_weapon, roll_dark_crate_weapon
+from rpg_weapon_data import (
+    roll_rare_crate_weapon,
+    roll_dark_crate_weapon,
+    roll_paradise_crate_weapon,
+    roll_book_of_godly_weapon,
+)
 from rpg_quest import add_quest_progress
 from rpg_instance import PASSIVE_INDEX, resolve_passive
 from cash import update_balance_safe, get_balance
@@ -46,6 +51,8 @@ CRATE_OPEN_ICON: dict[str, str] = {
     "001": "<:Uncomon:1495277191867400284>",
     "002": "<:Craterare:1496191910765920406>",
     "003": "<:Darkcrateopen:1498988761936302210>",
+    "006": "<:Paradise_crate_open:1505052527157051454>",
+    "009": "<:Paradise_crate_open:1505052527157051454>",
 }
 
 CRATE_OPEN_COOLDOWN = 9   # seconds
@@ -124,7 +131,11 @@ class RPGCrate(commands.Cog):
             )
             embed.add_field(
                 name="💰 Giá mua",
-                value=f"**{crate_data['price']:,}** {COIN_EMOJI}",
+                value=(
+                    "**Không bán** _(drop từ Crate of Paradise 006)_"
+                    if crate_id == "009"
+                    else f"**{crate_data['price']:,}** {COIN_EMOJI}"
+                ),
                 inline=True,
             )
             embed.add_field(
@@ -163,6 +174,13 @@ class RPGCrate(commands.Cog):
         if crate_id not in CRATES:
             return await ctx.send(
                 f"{ERR} | Crate `{crate_id}` không tồn tại. Xem: `dtn shop crate`"
+            )
+
+        # Crate 009 (Book of Godly) chỉ drop từ Crate of Paradise — không bán trực tiếp
+        if crate_id == "009":
+            return await ctx.send(
+                f"{ERR} | **Book of Godly** không thể mua trực tiếp.\n"
+                f"Mở <:Paradise_crate:1505052530613289080> **Crate of Paradise** (ID: `006`) để có cơ hội nhận."
             )
 
         if amount < 1:
@@ -311,6 +329,69 @@ class RPGCrate(commands.Cog):
 
                 await asyncio.sleep(0.125)
 
+            return
+
+        # ══════════════════════════════════════════════════
+        # PARADISE CRATE (id "006")
+        # ══════════════════════════════════════════════════
+        if crate_id == "006":
+            anim_msg = await self._play_open_animation(ctx, CRATES[crate_id])
+            await anim_msg.edit(content=f"{display_name} | opens a **Crate of Paradise**")
+
+            for _ in range(count):
+                user, _ = get_user(uid)
+                weapon = roll_paradise_crate_weapon()
+
+                # Special: roll ra Book of Godly → mở ngay crate 009
+                if weapon["id"] == "006_book":
+                    godly_weapon = roll_book_of_godly_weapon()
+                    new_uid = add_weapon(user, godly_weapon["id"])
+                    passive_emoji = _get_passive_emoji(user, new_uid)
+                    save_user(uid, user)
+                    add_quest_progress(ctx.author.id, "crates_opened")
+                    rarity_label = RARITY_LABEL.get(godly_weapon["rarity"], godly_weapon["rarity"])
+                    await ctx.send(
+                        f"<:Paradise_crate_open:1505052527157051454> | "
+                        f"<a:Book_open:1505164965932306512> | **BOOK OF GODLY**  → {rarity_label} "
+                        f"{new_uid} {godly_weapon['emoji']} {passive_emoji} "
+                        f"{godly_weapon['chance']:.2f}%"
+                    )
+                else:
+                    new_uid = add_weapon(user, weapon["id"])
+                    passive_emoji = _get_passive_emoji(user, new_uid)
+                    save_user(uid, user)
+                    add_quest_progress(ctx.author.id, "crates_opened")
+                    rarity_label = RARITY_LABEL.get(weapon["rarity"], weapon["rarity"])
+                    await ctx.send(
+                        f"<:Paradise_crate_open:1505052527157051454> | and finds a "
+                        f"{rarity_label} {new_uid} {weapon['emoji']} {passive_emoji} "
+                        f"{weapon['chance']}%"
+                    )
+                await asyncio.sleep(0.125)
+            return
+
+        # ══════════════════════════════════════════════════
+        # BOOK OF GODLY (id "009") — mở trực tiếp nếu có trong inv
+        # ══════════════════════════════════════════════════
+        if crate_id == "009":
+            anim_msg = await self._play_open_animation(ctx, CRATES[crate_id])
+            await anim_msg.edit(content=f"{display_name} | opens a **Book of Godly**")
+
+            for _ in range(count):
+                user, _ = get_user(uid)
+                weapon = roll_book_of_godly_weapon()
+                new_uid = add_weapon(user, weapon["id"])
+                passive_emoji = _get_passive_emoji(user, new_uid)
+                save_user(uid, user)
+                add_quest_progress(ctx.author.id, "crates_opened")
+                rarity_label = RARITY_LABEL.get(weapon["rarity"], weapon["rarity"])
+                await ctx.send(
+                    f"<:Paradise_crate_open:1505052527157051454> | "
+                    f"<a:Book_open:1505164965932306512> | **MYTHICAL** {rarity_label} "
+                    f"{new_uid} {weapon['emoji']} {passive_emoji} "
+                    f"{weapon['chance']:.2f}%"
+                )
+                await asyncio.sleep(0.125)
             return
 
         # ══════════════════════════════════════════════════
