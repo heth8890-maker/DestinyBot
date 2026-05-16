@@ -540,7 +540,7 @@ PARADISE_CRATE_WEAPONS = [
     {
         "id": "006_book",   # special trigger — xem roll_paradise_crate_weapon()
         "name": "Book of godly",
-        "emoji": "<:Paradise_crate:1505052530613289080>",
+        "emoji": "<:Book_of_godly:1505091902964371568>",
         "rarity": "mythical",
         "chance": 0.1,
         "effects": {},
