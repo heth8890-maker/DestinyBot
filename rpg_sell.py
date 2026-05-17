@@ -766,4 +766,5 @@ class RPGSell(commands.Cog):
 # ═══════════════════════════════════════════════════════════
 # SETUP
 # ═══════════════════════════════════════════════════════════
-
+async def setup(bot):
+    await bot.add_cog(RPGSell(bot))
