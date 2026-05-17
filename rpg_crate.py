@@ -20,6 +20,7 @@ import random
 
 import discord
 from discord.ext import commands
+from discord import app_commands
 
 from rpg_core import (
     add_item, remove_item,
@@ -44,6 +45,19 @@ COIN_EMOJI  = "<:Coin:1495831576397742241>"
 CHEST_EMOJI = "<:2925:1495277191867400284>"
 ERR         = "<:X_:1495466670616219819>"
 OK          = "<:Tick:1495466684520206528>"
+LIGHT_ICON  = "<a:Light:1505457919188008980>"
+
+# Rarity tiers that trigger a congratulation banner
+_CONGRAT_TIERS: dict[str, str] = {
+    "legendary": f"{LIGHT_ICON} **Congratulation!** {LIGHT_ICON}",
+    "special":   f"{LIGHT_ICON} **Congratulation!** {LIGHT_ICON}",
+    "mythical":  f"{LIGHT_ICON} **Congratulation!!!** {LIGHT_ICON}",
+}
+
+
+def _congrat_line(rarity: str) -> str | None:
+    """Return the congratulation banner for high-rarity drops, or None."""
+    return _CONGRAT_TIERS.get(rarity.lower())
 
 # Open icon shown on each result line, keyed by crate_id.
 # Soul crate (004) uses its own icon inline — not in this table.
@@ -56,7 +70,7 @@ CRATE_OPEN_ICON: dict[str, str] = {
 }
 
 CRATE_OPEN_COOLDOWN = 9   # seconds
-CRATE_OPEN_MAX      = 6   # silent cap per batch
+CRATE_OPEN_MAX      =    # silent cap per batch
 
 
 def _rarity_tier(rarity: str) -> str:
@@ -130,7 +144,7 @@ class RPGCrate(commands.Cog):
                 color=color,
             )
             embed.add_field(
-                name="💰 Giá mua",
+                name="<:2245:1493575277605949480> | Price",
                 value=(
                     "**Không bán** _(drop từ Crate of Paradise 006)_"
                     if crate_id == "009"
@@ -139,12 +153,7 @@ class RPGCrate(commands.Cog):
                 inline=True,
             )
             embed.add_field(
-                name="🎒 Bạn đang có",
-                value=f"**{owned}** crate",
-                inline=True,
-            )
-            embed.add_field(
-                name="⚡ Lệnh nhanh",
+                name="Commands",
                 value=(
                     f"`dtn crate buy {crate_id}` — mua 1 crate\n"
                     f"`dtn crate buy {crate_id} <n>` — mua n crate\n"
@@ -268,7 +277,7 @@ class RPGCrate(commands.Cog):
             remove_item(user, crate_key)
         save_user(uid, user)
 
-        display_name = ctx.author.display_name
+        author_tag = ctx.author.mention
 
         # ══════════════════════════════════════════════════
         # SOUL CRATE (id "004") — keep existing result logic
@@ -276,7 +285,7 @@ class RPGCrate(commands.Cog):
         if crate_id == "004":
             # Animation mở crate, sau đó edit thành header
             anim_msg = await self._play_open_animation(ctx, CRATES[crate_id])
-            await anim_msg.edit(content=f"{display_name} | opens a weapon crate")
+            await anim_msg.edit(content=f"{author_tag} | opens a weapon crate")
 
             for _ in range(count):
                 # Reload fresh state each iteration so add_weapon / add_item
@@ -302,6 +311,11 @@ class RPGCrate(commands.Cog):
                         f"vũ khí từ **Soul Crate**!"
                     )
                     await ctx.send(embed=embed)
+                    # Special weapon → congrat banner
+                    await ctx.send(
+                        f"{LIGHT_ICON} **Congratulation!** {LIGHT_ICON}\n"
+                        f"{ctx.author.mention}"
+                    )
 
                 # 2. Linh hoả (35%)
                 elif roll <= 35.6:
@@ -336,7 +350,7 @@ class RPGCrate(commands.Cog):
         # ══════════════════════════════════════════════════
         if crate_id == "006":
             anim_msg = await self._play_open_animation(ctx, CRATES[crate_id])
-            await anim_msg.edit(content=f"{display_name} | opens a **Crate of Paradise**")
+            await anim_msg.edit(content=f"{author_tag} | opens a **Crate of Paradise**")
 
             for _ in range(count):
                 user, _ = get_user(uid)
@@ -351,11 +365,13 @@ class RPGCrate(commands.Cog):
                     add_quest_progress(ctx.author.id, "crates_opened")
                     rarity_label = RARITY_LABEL.get(godly_weapon["rarity"], godly_weapon["rarity"])
                     await ctx.send(
-                        f"<:Paradise_crate_open:1505052527157051454> | "
                         f"<a:Book_open:1505164965932306512> | **BOOK OF GODLY**  → {rarity_label} "
                         f"{new_uid} {godly_weapon['emoji']} {passive_emoji} "
                         f"{godly_weapon['chance']:.2f}%"
                     )
+                    congrat = _congrat_line(godly_weapon.get("rarity", ""))
+                    if congrat:
+                        await ctx.send(f"{congrat}\n{ctx.author.mention}")
                 else:
                     new_uid = add_weapon(user, weapon["id"])
                     passive_emoji = _get_passive_emoji(user, new_uid)
@@ -367,6 +383,9 @@ class RPGCrate(commands.Cog):
                         f"{rarity_label} {new_uid} {weapon['emoji']} {passive_emoji} "
                         f"{weapon['chance']}%"
                     )
+                    congrat = _congrat_line(weapon.get("rarity", ""))
+                    if congrat:
+                        await ctx.send(f"{congrat}\n{ctx.author.mention}")
                 await asyncio.sleep(0.125)
             return
 
@@ -375,7 +394,7 @@ class RPGCrate(commands.Cog):
         # ══════════════════════════════════════════════════
         if crate_id == "009":
             anim_msg = await self._play_open_animation(ctx, CRATES[crate_id])
-            await anim_msg.edit(content=f"{display_name} | opens a **Book of Godly**")
+            await anim_msg.edit(content=f"{author_tag} | opens a **Book of Godly**")
 
             for _ in range(count):
                 user, _ = get_user(uid)
@@ -391,6 +410,11 @@ class RPGCrate(commands.Cog):
                     f"{new_uid} {weapon['emoji']} {passive_emoji} "
                     f"{weapon['chance']:.2f}%"
                 )
+                # Book of Godly luôn là mythical → congrat!!!
+                await ctx.send(
+                    f"{LIGHT_ICON} **Congratulation!!!** {LIGHT_ICON}\n"
+                    f"{ctx.author.mention}"
+                )
                 await asyncio.sleep(0.125)
             return
 
@@ -400,7 +424,7 @@ class RPGCrate(commands.Cog):
 
         # Animation mở crate, sau đó edit thành header kết quả
         anim_msg = await self._play_open_animation(ctx, CRATES[crate_id])
-        await anim_msg.edit(content=f"{display_name} | opens a weapon crate")
+        await anim_msg.edit(content=f"{author_tag} | opens a weapon crate")
 
         for _ in range(count):
             # Reload each iteration — same pattern as original; ensures
@@ -433,7 +457,49 @@ class RPGCrate(commands.Cog):
                 f"{open_icon} | and finds a "
                 f"{rarity_label} {new_uid} {weapon_emoji} {passive_emoji} {drop_rate}%"
             )
+            congrat = _congrat_line(weapon.get("rarity", ""))
+            if congrat:
+                await ctx.send(f"{congrat}\n{ctx.author.mention}")
             await asyncio.sleep(0.125)
+
+    # ══════════════════════════════════════════════════════════════
+    # SLASH COMMANDS — mirror của prefix commands, hybrid style
+    # Sync một lần trong on_ready của bot chính.
+    # ══════════════════════════════════════════════════════════════
+
+    @app_commands.command(name="crate", description="Xem chi tiết & drop rate của một crate")
+    @app_commands.describe(crate_id="ID của crate (vd: 001, 002, 006...)")
+    async def slash_crate(self, interaction: discord.Interaction, crate_id: str):
+        ctx = await commands.Context.from_interaction(interaction)
+        await self.crate(ctx, crate_id)
+
+    @app_commands.command(name="crate_buy", description="Mua crate")
+    @app_commands.describe(
+        crate_id="ID của crate cần mua",
+        amount="Số lượng muốn mua (mặc định: 1)",
+    )
+    async def slash_crate_buy(
+        self,
+        interaction: discord.Interaction,
+        crate_id: str,
+        amount: int = 1,
+    ):
+        ctx = await commands.Context.from_interaction(interaction)
+        await self.crate_buy(ctx, crate_id, amount)
+
+    @app_commands.command(name="crate_open", description="Mở crate để nhận weapon")
+    @app_commands.describe(
+        crate_id="ID của crate cần mở",
+        amount="Số lượng muốn mở, hoặc 'all' (mặc định: 1)",
+    )
+    async def slash_crate_open(
+        self,
+        interaction: discord.Interaction,
+        crate_id: str,
+        amount: str = "1",
+    ):
+        ctx = await commands.Context.from_interaction(interaction)
+        await self.crate_open(ctx, crate_id, amount)
 
 
 async def setup(bot):

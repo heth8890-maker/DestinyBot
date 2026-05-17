@@ -4,71 +4,48 @@ Discord Cog chính. Các cog đã tách ra file riêng:
   rpg_crate.py    → dtn crate
   rpg_question.py → dtn quest
   rpg_trade.py    → dtn trade / dtn add / dtn remove
-  .py   → dtn weapon (tất cả subcommand)
+  rpg_weapon.py   → dtn weapon (tất cả subcommand)
   rpg_item.py     → dtn item / dtn item use
   rpg_shop.py     → dtn shop / dtn shopbuy   ← TÁCH RIÊNG
+  rpg_sell.py     → dtn sell / /sell          ← TÁCH RIÊNG
 
 COMMAND MAP
 ──────────────────────────────────────────────────────────
-  dtn inv
-  dtn sell item <id> [amount|all]
-  dtn sell weapon <id>
-  dtn sell all
+  dtn inv      (prefix)
+  /inv         (slash)
 ──────────────────────────────────────────────────────────
 
 ⚡ THAY ĐỔI v3 (Weapon Identity Layer):
-  - sell weapon : dùng get_weapon_entity() — fix UID mismatch khi bán unique weapon
   - inv         : dùng WeaponID.is_unique() thay vì "-" not in (chuẩn hoá logic)
   - inv equipped: dùng entity.fmt_name() — thống nhất hiển thị với status/upgrade
-  - Xoá duplicate _equipped_display (đã có trong rpg_weapo.py, import từ đó)
+  - Xoá duplicate _equipped_display (đã có trong rpg_weapon.py, import từ đó)
+
+⚡ THAY ĐỔI v4:
+  - RPGSell + _resolve_sell_weapon_targets tách sang rpg_sell.py
+  - Thêm slash command /inv cho RPGInventory
+
+⚡ THAY ĐỔI v5 (Cleanup):
+  - Xoá toàn bộ import thừa còn lại từ các cog đã tách (refactoring debt)
+  - Gộp _send_paged + _send_paged_inter thành _send_paged chung
+  - Fix PageView.on_timeout: edit message để disable nút thật sự trên Discord
+  - Fix slash_inv: thêm try/except, loại bỏ gọi interaction.user.id dư
+  - _build_inv_embeds nhận balance sẵn thay vì tự gọi get_balance() bên trong
 """
 
-import time
-import random
-
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from rpg_core import (
-    get_item_by_id, get_weapon_by_id, get_crate_by_id,
-    add_item, remove_item,
-    add_weapon, remove_weapon_from_bag,
-    roll_hunt_items, handle_egg,
-    calc_sell_value, calc_hunt_cooldown, parse_effects,
-    ITEMS, WEAPONS, CRATES, RARITY_COLOR, RARITY_LABEL,
-    # ── v3: Weapon Identity Layer ─────────────────────────
-    WeaponID, get_weapon_entity,
-    get_user_lock,
-    # ── Agent3: base_id resolver (Ghost Inventory fix) ────
-    get_base_id,
+    get_item_by_id,
+    CRATES,
 )
-from rpg_database import get_user, save_user
-from rpg_weapon_data import (
-    RARE_CRATE_WEAPONS,
-    DARK_CRATE_WEAPON,
-    _rarity_tier,
-    COIN_EMOJI as _W_COIN,
-    ERR as _W_ERR,
-    OK  as _W_OK,
-)
-from rpg_addon import (
-    load_weapon_shop,
-    seconds_to_shop_reset,
-    get_shop_slot,
-    fmt_effect_val,
-    mark_shop_slot_sold,
-)
-from rpg_quest import add_quest_progress
-from cash import update_balance_safe, get_balance
+from rpg_database import get_user
+from rpg_weapon_data import _rarity_tier
+from cash import get_balance
 
 # ── Cosmetic ───────────────────────────────────────────────
-COIN_EMOJI  = "<:Coin:1495831576397742241>"
-SKULL_EMOJI = "<:2859:1495250145942704189>"
-SWORD_EMOJI = "<:2918:1495252941492457502>"
-HUNT_CD_SEC = 16
-
-ERR = "<:X_:1495466670616219819>"
-OK  = "<:Tick:1495466684520206528>"
+COIN_EMOJI = "<:Coin:1495831576397742241>"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -168,8 +145,9 @@ class PageView(discord.ui.View):
 
     def __init__(self, embeds: list[discord.Embed], page: int = 0):
         super().__init__(timeout=60)
-        self.embeds = embeds
-        self.page   = max(0, min(page, len(embeds) - 1))
+        self.embeds  = embeds
+        self.page    = max(0, min(page, len(embeds) - 1))
+        self.message: discord.Message | None = None   # gán sau khi send
         self._sync_buttons()
 
     def _sync_buttons(self) -> None:
@@ -199,16 +177,74 @@ class PageView(discord.ui.View):
     async def on_timeout(self) -> None:
         for item in self.children:
             item.disabled = True
+        # Cập nhật message thật sự trên Discord để nút bị disable
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.NotFound:
+                pass
 
 
 async def _send_paged(
-    ctx, embeds: list[discord.Embed]
+    target: commands.Context | discord.Interaction,
+    embeds: list[discord.Embed],
 ) -> None:
-    """Gửi 1 embed nếu chỉ có 1 trang, ngược lại gửi kèm PageView."""
+    """
+    Gửi embed phân trang cho cả prefix lẫn slash (đã defer).
+    - prefix : dùng ctx.send()
+    - slash  : dùng interaction.followup.send()
+    Tự động lưu message vào PageView.message để on_timeout có thể edit.
+    """
+    is_interaction = isinstance(target, discord.Interaction)
+    send_fn = target.followup.send if is_interaction else target.send
+
     if len(embeds) == 1:
-        await ctx.send(embed=embeds[0])
+        await send_fn(embed=embeds[0])
     else:
-        await ctx.send(embed=embeds[0], view=PageView(embeds))
+        view = PageView(embeds)
+        msg  = await send_fn(embed=embeds[0], view=view)
+        # followup.send trả về Message; ctx.send cũng trả về Message
+        view.message = msg
+
+
+# ═══════════════════════════════════════════════════════════
+# INTERNAL: build inv embeds (dùng chung prefix + slash)
+# ═══════════════════════════════════════════════════════════
+
+def _build_inv_embeds(
+    display_name: str,
+    balance: int,
+    user: dict,
+) -> list[discord.Embed]:
+    """
+    Trả về list[Embed] phân trang cho inventory.
+    Nhận balance sẵn từ ngoài — tránh gọi DB bên trong builder.
+    """
+    item_lines, crate_lines = [], []
+
+    for item_id, qty in user["inv"].items():
+        if item_id.startswith("crate_"):
+            cid   = item_id.split("_", 1)[1]
+            crate = CRATES.get(cid)
+            emoji = crate["emoji"] if crate else "📦"
+            name  = crate["name"]  if crate else item_id
+            crate_lines.append(f"{emoji} {name} x{qty}")
+            continue
+        item = get_item_by_id(item_id)
+        if item:
+            tier = _rarity_tier(item["rarity"])
+            item_lines.append(
+                f"{item['emoji']} `{item_id}` **{item['name']}** x{qty}  _{tier}_"
+            )
+
+    fields: list[tuple] = []
+    fields += _split_field("<:2851:1495250164116492469> Vật phẩm", item_lines)
+    if crate_lines:
+        fields += _split_field("📦 Crate", crate_lines)
+
+    title  = f"<:Backpack:1495462021377032202> Kho đồ của {display_name}"
+    footer = f"Số dư: {balance:,} {COIN_EMOJI}"
+    return _paginate_fields(fields, title=title, color=0x5865F2, footer=footer)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -219,305 +255,32 @@ class RPGInventory(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    # ─── prefix: dtn inv ────────────────────────────────────
+
     @commands.command(name="inv")
     async def inv(self, ctx):
-        uid  = str(ctx.author.id)
+        uid     = str(ctx.author.id)
         user, _ = get_user(uid)
-
-        item_lines, crate_lines = [], []
-
-        # ── Items & Crates ────────────────────────────────────────────────────
-        for item_id, qty in user["inv"].items():
-            if item_id.startswith("crate_"):
-                cid   = item_id.split("_", 1)[1]
-                crate = CRATES.get(cid)
-                emoji = crate["emoji"] if crate else "📦"
-                name  = crate["name"]  if crate else item_id
-                crate_lines.append(f"{emoji} {name} x{qty}")
-                continue
-            item = get_item_by_id(item_id)
-            if item:
-                tier = _rarity_tier(item["rarity"])
-                item_lines.append(
-                    f"{item['emoji']} `{item_id}` **{item['name']}** x{qty}  _{tier}_"
-                )
-
-        # ── Build paginated fields ────────────────────────────────────────────
-        fields: list[tuple] = []
-        fields += _split_field(
-            "<:2851:1495250164116492469> Vật phẩm", item_lines
-        )
-        if crate_lines:
-            fields += _split_field("📦 Crate", crate_lines)
-
-        title  = f"<:Backpack:1495462021377032202> Kho đồ của {ctx.author.display_name}"
-        footer = f"Số dư: {get_balance(ctx.author.id):,} {COIN_EMOJI}"
-        embeds = _paginate_fields(fields, title=title, color=0x5865F2, footer=footer)
+        balance = get_balance(ctx.author.id)
+        embeds  = _build_inv_embeds(ctx.author.display_name, balance, user)
         await _send_paged(ctx, embeds)
 
+    # ─── slash: /inv ────────────────────────────────────────
 
-# ═══════════════════════════════════════════════════════════
-# SELL WEAPON — MODULE-LEVEL HELPER
-# ═══════════════════════════════════════════════════════════
-
-def _resolve_sell_weapon_targets(
-    user: dict,
-    weapon_arg: str,
-    amount: int,
-) -> tuple[list[str], str | None]:
-    """
-    Identify which weapon bag entries to sell.
-
-    Returns (targets, None) on success.
-    Returns ([], error_message) on any validation failure.
-
-    Priority
-    ────────
-    Pass 1 — exact UID match  : weapon_arg literally in weapons list
-                                → amount must be 1
-    Pass 2 — base-ID match    : get_base_id(entry) == get_base_id(weapon_arg)
-                                → collect up to <amount> non-equipped copies
-
-    Equipped check
-    ──────────────
-    Done per bag entry via `entry not in equipped`.
-    equipped stores the EXACT string that was slotted (UID or base_id).
-    Two entries sharing a base_id are evaluated independently:
-    only the one whose exact string is in equipped is blocked.
-    """
-    if amount <= 0:
-        return [], "Số lượng phải lớn hơn 0."
-
-    # Both are list[str] per existing data contract
-    weapons:  list[str] = user.get("weapons", [])
-    equipped: list[str] = user.get("equipped", [])
-
-    # ── Pass 1: weapon_arg là UID thật sự → dùng WeaponID.is_unique() ────────
-    # KHÔNG dùng `weapon_arg in weapons` để phân nhánh — base ID cũng có thể
-    # nằm trong weapons list và sẽ bị nhầm sang UID path, gây lỗi khi bán nhiều.
-    if WeaponID.is_unique(weapon_arg):
-        if weapon_arg not in weapons:
-            return [], f"Không có vũ khí `{weapon_arg}` trong kho."
-        if weapon_arg in equipped:
-            return [], (
-                f"Vũ khí `{weapon_arg}` đang được trang bị — "
-                f"hãy bỏ trang bị trước khi bán."
-            )
-        if amount != 1:
-            return [], (
-                "Khi bán bằng UID chỉ có thể bán 1 cái. "
-                "Dùng base ID nếu muốn bán nhiều."
-            )
-        return [weapon_arg], None
-
-    # ── Pass 2: weapon_arg là base ID → stackable path ───────────────────────
-    target_base = get_base_id(weapon_arg)
-
-    # Iterate a snapshot so removal elsewhere never affects this scan
-    candidates: list[str] = []
-    for entry in list(weapons):
-        if get_base_id(entry) == target_base and entry not in equipped:
-            candidates.append(entry)
-
-    if not candidates:
-        # Distinguish "never existed" vs "all copies are equipped"
-        all_copies = [w for w in weapons if get_base_id(w) == target_base]
-        if all_copies:
-            return [], (
-                f"Tất cả bản sao của vũ khí `{weapon_arg}` đang được trang bị — "
-                f"hãy bỏ trang bị trước khi bán."
-            )
-        return [], f"Không có vũ khí `{weapon_arg}` trong kho."
-
-    if amount > len(candidates):
-        return [], (
-            f"Bạn chỉ có **{len(candidates)}** bản sao có thể bán "
-            f"(không tính bản đang trang bị), "
-            f"nhưng yêu cầu bán **{amount}**."
-        )
-
-    # Slice exactly <amount> entries from the front of the candidate list
-    return candidates[:amount], None
-
-
-# ═══════════════════════════════════════════════════════════
-# COG: SELL
-# ═══════════════════════════════════════════════════════════
-
-class RPGSell(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-
-    @commands.group(name="sell", invoke_without_command=True)
-    async def sell(self, ctx):
-        await ctx.send(
-            f"{COIN_EMOJI} **Cách dùng lệnh sell:**\n"
-            f"• `dtn sell item <id> [amount|all]` — bán vật phẩm\n"
-            f"• `dtn sell weapon <id>` — bán vũ khí trong kho\n"
-            f"• `dtn sell all` — bán toàn bộ vật phẩm"
-        )
-
-    @sell.command(name="item")
-    async def sell_item(self, ctx, item_id: str, amount: str = "1"):
-        uid  = str(ctx.author.id)
-        user, upgraded_weapons = get_user(uid)
-
-        if item_id not in user["inv"]:
-            return await ctx.send(f"{ERR} | Bạn không có vật phẩm này.")
-
-        item = get_item_by_id(item_id)
-        if not item:
-            return await ctx.send(f"{ERR} | Item không tồn tại.")
-
-        owned = user["inv"][item_id]
-        if amount.lower() == "all":
-            qty = owned
-        else:
-            try:
-                qty = int(amount)
-            except ValueError:
-                return await ctx.send(f"{ERR} | Số lượng không hợp lệ.")
-
-        if qty <= 0 or qty > owned:
-            return await ctx.send(f"{ERR} | Bạn chỉ có {owned} cái, không đủ.")
-
-        effects = parse_effects(user.get("equipped", []), user)
-        total   = calc_sell_value(item, qty, effects)
-
-        if not remove_item(user, item_id, qty):
-            return await ctx.send(f"{ERR} | Không thể bán.")
-
-        if not save_user(uid, user, upgraded_weapons):
-            return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
-        await update_balance_safe(ctx.author.id, total)
-        add_quest_progress(ctx.author.id, "items_sold", qty)
-
-        await ctx.send(
-            f"{COIN_EMOJI} | Đã bán **{qty}x** {item['emoji']} {item['name']} "
-            f"→ nhận **{total:,}** {COIN_EMOJI}"
-        )
-
-    @sell.command(name="weapon", aliases=["w"])
-    async def sell_weapon(self, ctx, weapon_arg: str, amount: str = "1"):
-        """
-        Bán vũ khí trong kho.
-
-        Syntax
-        ──────
-          dtn sell weapon <uid>              — bán đúng instance (amount = 1)
-          dtn sell weapon <base_id>          — bán 1 bản sao
-          dtn sell weapon <base_id> <amount> — bán nhiều bản sao cùng lúc
-
-        Equipped safety
-        ───────────────
-          Chỉ block bán nếu ĐÚNG INSTANCE đó đang được trang bị.
-          Bản sao khác có cùng base_id vẫn bán được bình thường.
-        """
-        # ── 0. Parse & basic validate amount ──────────────────────────
+    @app_commands.command(name="inv", description="Xem kho đồ (vật phẩm & crate)")
+    async def slash_inv(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         try:
-            qty = int(amount)
-        except ValueError:
-            return await ctx.send(f"{ERR} | Số lượng không hợp lệ — phải là số nguyên.")
-
-        uid = str(ctx.author.id)
-
-        async with get_user_lock(uid):
-            user, upgraded_weapons = get_user(uid)  # fresh read inside lock — prevents stale data
-
-            # ── 1. Resolve targets (all validation happens here) ───────
-            targets, err = _resolve_sell_weapon_targets(user, weapon_arg, qty)
-            if err:
-                return await ctx.send(f"{ERR} | {err}")
-
-            # ── 2. Resolve display entity (representative = targets[0]) ─
-            entity = get_weapon_entity(user, targets[0])
-            if entity is None:
-                # Item passes bag check but has no DB entry — corrupted state
-                return await ctx.send(
-                    f"{ERR} | Không tìm thấy dữ liệu vũ khí `{targets[0]}` "
-                    f"trong database. Liên hệ admin nếu lỗi tiếp tục."
-                )
-
-            # ── 3. Calculate total price (per-item, not flat multiply) ──
-            # get_price() may differ between upgraded UIDs and base copies,
-            # so we resolve each target individually and sum.
-            total_value = 0
-            for t in targets:
-                t_entity = get_weapon_entity(user, t)
-                # Fallback to representative price if a target has no entity
-                # (should not happen — targets were validated — but be safe)
-                total_value += t_entity.get_price() if t_entity else entity.get_price()
-
-            # ── 4. Remove each target from bag ─────────────────────────
-            # Iterates `targets` (separate list) — never mutates weapons
-            # mid-iteration unsafely. remove_weapon_from_bag handles the
-            # actual list mutation internally.
-            for t in targets:
-                removed = remove_weapon_from_bag(user, t)
-                if not removed:
-                    # True unexpected state — bag was valid at step 1
-                    return await ctx.send(
-                        f"{ERR} | Lỗi nội bộ khi xoá vũ khí `{t}`. Thử lại."
-                    )
-
-                # Clean up upgrade record for unique weapons
-                if WeaponID.is_unique(t):
-                    user["upgraded_weapons"] = [
-                        uw for uw in user["upgraded_weapons"] if uw.get("uid") != t
-                    ]
-
-            # ── 5. Persist → reward (order matters) ───────────────────
-            if not save_user(uid, user, upgraded_weapons):   # sync, no await
-                return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
-            await update_balance_safe(ctx.author.id, total_value)
-            add_quest_progress(ctx.author.id, "weapons_sold", qty)
-
-        # ── 6. Confirm to user (outside lock — no shared state access) ─
-        qty_label = f"**{qty}x** " if qty > 1 else ""
-        await ctx.send(
-            f"{COIN_EMOJI} | Đã bán {qty_label}{entity.fmt_name()} "
-            f"→ nhận **{total_value:,}** {COIN_EMOJI}"
-        )
-
-    @sell.command(name="all")
-    async def sell_all(self, ctx):
-        uid  = str(ctx.author.id)
-        user, upgraded_weapons = get_user(uid)
-
-        sell_ids = [k for k in user["inv"] if not k.startswith("crate_")]
-        if not sell_ids:
-            return await ctx.send(
-                "<:Backpack:1495462021377032202> Không có vật phẩm nào để bán (crate không tính)."
+            uid     = str(interaction.user.id)
+            user, _ = get_user(uid)
+            balance = get_balance(interaction.user.id)
+            embeds  = _build_inv_embeds(interaction.user.display_name, balance, user)
+            await _send_paged(interaction, embeds)
+        except Exception as e:
+            await interaction.followup.send(
+                f"<:X_:1495466670616219819> Có lỗi xảy ra khi tải inventory: `{e}`",
+                ephemeral=True,
             )
-
-        effects     = parse_effects(user.get("equipped", []), user)
-        grand_total = 0
-        lines       = []
-        total_qty   = 0
-
-        for item_id in sell_ids:
-            item = get_item_by_id(item_id)
-            if not item:
-                continue
-            qty   = user["inv"][item_id]
-            total = calc_sell_value(item, qty, effects)
-            grand_total += total
-            total_qty   += qty
-            lines.append(f"{item['emoji']} {item['name']} x{qty} → **{total:,}** {COIN_EMOJI}")
-            remove_item(user, item_id, qty)
-
-        if not save_user(uid, user, upgraded_weapons):
-            return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
-        await update_balance_safe(ctx.author.id, grand_total)
-        add_quest_progress(ctx.author.id, "items_sold", total_qty)
-
-        embed = discord.Embed(
-            title="<:2245:1493575277605949480> | Bán tất cả vật phẩm",
-            description="\n".join(lines),
-            color=0xFFD700,
-        )
-        embed.set_footer(text=f"Tổng nhận: {grand_total:,} {COIN_EMOJI}")
-        await ctx.send(embed=embed)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -526,4 +289,3 @@ class RPGSell(commands.Cog):
 
 async def setup(bot):
     await bot.add_cog(RPGInventory(bot))
-    await bot.add_cog(RPGSell(bot))

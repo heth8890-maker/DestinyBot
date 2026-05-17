@@ -10,10 +10,20 @@ COMMAND MAP
   dtn shop buy <slot>                  — ★ mua weapon từ weapon shop
   dtn shop event                       — xem shop event (Soul Crate)
   dtn ebuy 004 [amount]               — mua Soul Crate bằng Linh hoả (MongoDB)
+
+SLASH COMMANDS
+──────────────────────────────────────────────────────────
+  /shop crate
+  /shop item
+  /shop weapon
+  /shop buy slot:<int>
+  /shop event
+  /ebuy item_id:<str> amount:<int>
 ──────────────────────────────────────────────────────────
 """
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from rpg_core import (
@@ -162,11 +172,13 @@ class CrateShopView(discord.ui.View):
     View phân trang cho shop crate.
     Tự động disable nút khi ở trang đầu/cuối.
     Timeout 60s — sau đó các nút bị khoá tự động.
+    Chỉ author gốc mới được bấm nút.
     """
 
-    def __init__(self, page: int = 0):
+    def __init__(self, page: int = 0, author_id: int | None = None):
         super().__init__(timeout=60)
-        self.page = max(0, min(page, _total_crate_pages() - 1))
+        self.page      = max(0, min(page, _total_crate_pages() - 1))
+        self.author_id = author_id
         self._sync_buttons()
 
     def _sync_buttons(self) -> None:
@@ -174,8 +186,18 @@ class CrateShopView(discord.ui.View):
         self.prev_btn.disabled = (self.page == 0)
         self.next_btn.disabled = (self.page >= total - 1)
 
+    async def _check_author(self, interaction: discord.Interaction) -> bool:
+        if self.author_id and interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "❌ Chỉ người dùng lệnh mới được bấm nút này.", ephemeral=True
+            )
+            return False
+        return True
+
     @discord.ui.button(label="◀ Trước", style=discord.ButtonStyle.secondary)
     async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_author(interaction):
+            return
         self.page -= 1
         self._sync_buttons()
         await interaction.response.edit_message(
@@ -184,6 +206,8 @@ class CrateShopView(discord.ui.View):
 
     @discord.ui.button(label="Tiếp ▶", style=discord.ButtonStyle.primary)
     async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_author(interaction):
+            return
         self.page += 1
         self._sync_buttons()
         await interaction.response.edit_message(
@@ -196,6 +220,132 @@ class CrateShopView(discord.ui.View):
 
 
 # ═══════════════════════════════════════════════════════════
+# HELPERS — dùng chung cho prefix & slash
+# ═══════════════════════════════════════════════════════════
+
+def _build_shop_help_text() -> str:
+    return (
+        "<:Shop:1495464183037165763> **Shop:**\n"
+        "• `dtn shop crate`        — mua crate / xem drop rate\n"
+        "• `dtn shop item`         — danh sách vật phẩm & giá bán\n"
+        "• `dtn shop weapon`       — ★ weapon shop (reset 6h, 10 slot)\n"
+        "• `dtn shop event`        — shop event Soul Crate"
+    )
+
+
+async def _do_shop_crate(send_fn, author_id: int | None = None):
+    """Gửi embed shop crate. send_fn nhận (embed=, view=)."""
+    view  = CrateShopView(page=0, author_id=author_id)
+    embed = _build_crate_page_embed(0)
+    await send_fn(embed=embed, view=view)
+
+
+def _build_shop_item_embeds() -> list[discord.Embed]:
+    """Trả về danh sách embed item shop (sync, dùng chung prefix & slash)."""
+    rarity_order = ["common", "uncommon", "rare", "epic", "legendary", "legend"]
+    grouped: dict[str, list] = {r: [] for r in rarity_order}
+    for item in ITEMS:
+        r = item["rarity"]
+        if r not in grouped:
+            grouped[r] = []
+        grouped[r].append(item)
+
+    fields: list[tuple] = []
+    for rarity in rarity_order:
+        items_in_tier = grouped.get(rarity, [])
+        if not items_in_tier:
+            continue
+        lines = []
+        for item in items_in_tier:
+            pr = (
+                f"{item['min']:,} – {item['max']:,}"
+                if item["min"] != item["max"] else f"{item['min']:,}"
+            )
+            lines.append(
+                f"{item['emoji']} `{item['id']}` **{item['name']}** — {pr} {COIN_EMOJI}"
+            )
+        fields += _split_field(_rarity_tier(rarity), lines)
+
+    title  = "<:2851:1495250164116492469> Danh sách Vật phẩm"
+    desc   = "Vật phẩm kiếm được qua `dtn hunt`. Bán bằng `dtn sell item <id>`."
+    footer = "Giá thực tế ngẫu nhiên trong range. Weapon trang bị tăng giá bán."
+    return _paginate_fields(fields, title=title, description=desc, color=0x5865F2, footer=footer)
+
+
+def _build_weapon_shop_embeds() -> list[discord.Embed]:
+    """Trả về danh sách embed weapon shop (dùng chung cho prefix & slash)."""
+    shop      = load_weapon_shop()
+    remaining = seconds_to_shop_reset()
+    h, m      = divmod(remaining // 60, 60)
+
+    desc = (
+        f"⏳️ |  Reset sau **{h}h {m}m**  •  Dùng `dtn shop buy <slot>` hoặc `/shop buy` để mua.\n"
+        f"<:Coin:1495831576397742241> |  Giá = base × (100% − drop rate) × 80%"
+    )
+    title = "<:Hamer:1495462570469888069> |  Weapon Shop"
+
+    slot_fields: list[tuple] = []
+    for s in shop["slots"]:
+        w             = get_weapon_by_id(s["weapon_id"])
+        effects       = w.get("effects", {}) if w else {}
+        current_emoji = w.get("emoji", s['emoji']) if w else s['emoji']
+        eff_str       = " | ".join(
+            fmt_effect_val(k, v) for k, v in effects.items()
+        ) or "—"
+        rarity_e = _rarity_tier(s["rarity"])
+        slot_fields.append((
+            f"`[{s['slot']:02d}]` {current_emoji} {s['name']}  {rarity_e}",
+            (
+                f"<:2245:1493575277605949480> | **{s['price']:,}** {COIN_EMOJI}  "
+                f"_(drop rate: {s['drop_rate']}%)_\n"
+                f"ID: `{s['weapon_id']}`\n"
+                f"<:Effect:1495466103047061679> {eff_str}"
+            ),
+            True,
+        ))
+
+    _SLOTS_PER_PAGE = 6
+    chunks = [
+        slot_fields[i : i + _SLOTS_PER_PAGE]
+        for i in range(0, len(slot_fields), _SLOTS_PER_PAGE)
+    ]
+    total  = len(chunks)
+    embeds = []
+    for i, chunk in enumerate(chunks):
+        page_tag = f" • Trang {i + 1}/{total}" if total > 1 else ""
+        embed = discord.Embed(
+            title=title + page_tag,
+            description=desc,
+            color=0xE74C3C,
+        )
+        for fname, fvalue, finline in chunk:
+            embed.add_field(name=fname, value=fvalue, inline=finline)
+        embeds.append(embed)
+    return embeds
+
+
+def _build_event_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="<:Shop:1495464183037165763> Shop Event",
+        description=(
+            "Dùng Linh hoả để đổi Soul Crate hiếm!\n"
+            "Ma Hỏa Thống Soái 0.3% | Linh Diệm Sát Thần 0.3% | "
+            "Hồn Giáp Bất Diệt 0.3% | Linh Hoả 35% | 64.4% 2000–6000 Coin"
+        ),
+        color=0xCCFFCC,
+    )
+    embed.add_field(
+        name="<:Soulcrate:1498617031501807646> | Soul Crate (ID: 004)",
+        value=(
+            "**Giá:** 25x <:Linh_hoa:1498614127386562601> Linh hoả\n"
+            "**Lệnh mua:** `dtn ebuy 004 [số lượng]`  hoặc  `/ebuy item_id:004`"
+        ),
+        inline=False,
+    )
+    return embed
+
+
+# ═══════════════════════════════════════════════════════════
 # COG: SHOP  (crate + item + weapon shop + event shop)
 # ═══════════════════════════════════════════════════════════
 
@@ -203,179 +353,135 @@ class RPGShop(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    # ──────────────────────────────────────────────────────
+    # PREFIX COMMANDS
+    # ──────────────────────────────────────────────────────
+
     # ─── HELP ───
     @commands.group(name="shop", invoke_without_command=True)
     async def shop(self, ctx):
-        await ctx.send(
-            "<:Shop:1495464183037165763> **Shop:**\n"
-            "• `dtn shop crate`        — mua crate / xem drop rate\n"
-            "• `dtn shop item`         — danh sách vật phẩm & giá bán\n"
-            "• `dtn shop weapon`       — ★ weapon shop (reset 6h, 10 slot)\n"
-            "• `dtn shop buy <slot>`   — ★ mua weapon từ slot\n"
-            "• `dtn shop event`        — shop event Soul Crate\n"
-            "• `dtn ebuy 004 [số]`     — mua Soul Crate bằng Linh hoả"
-        )
+        await ctx.send(_build_shop_help_text())
 
     # ─── CRATE ───
     @shop.command(name="crate")
     async def shop_crate(self, ctx):
-        view  = CrateShopView(page=0)
-        embed = _build_crate_page_embed(0)
-        await ctx.send(embed=embed, view=view)
+        await _do_shop_crate(ctx.send, author_id=ctx.author.id)
 
     # ─── ITEM ───
     @shop.command(name="item")
     async def shop_item(self, ctx):
-        rarity_order = ["common", "uncommon", "rare", "epic", "legendary", "legend"]
-        grouped: dict[str, list] = {r: [] for r in rarity_order}
-        for item in ITEMS:
-            r = item["rarity"]
-            if r not in grouped:
-                grouped[r] = []
-            grouped[r].append(item)
-
-        fields: list[tuple] = []
-        for rarity in rarity_order:
-            items_in_tier = grouped.get(rarity, [])
-            if not items_in_tier:
-                continue
-            lines = []
-            for item in items_in_tier:
-                pr = (
-                    f"{item['min']:,} – {item['max']:,}"
-                    if item["min"] != item["max"] else f"{item['min']:,}"
-                )
-                lines.append(
-                    f"{item['emoji']} `{item['id']}` **{item['name']}** — {pr} {COIN_EMOJI}"
-                )
-            fields += _split_field(_rarity_tier(rarity), lines)
-
-        title  = "<:2851:1495250164116492469> Danh sách Vật phẩm"
-        desc   = "Vật phẩm kiếm được qua `dtn hunt`. Bán bằng `dtn sell item <id>`."
-        footer = "Giá thực tế ngẫu nhiên trong range. Weapon trang bị tăng giá bán."
-        embeds = _paginate_fields(fields, title=title, description=desc, color=0x5865F2, footer=footer)
-        await _send_paged(ctx, embeds)
+        await _send_paged(ctx, _build_shop_item_embeds())
 
     # ─── WEAPON SHOP ───
     @shop.command(name="weapon")
     async def shop_weapon(self, ctx):
         """Xem 10 weapon đang bán (reset mỗi 6 tiếng)."""
-        shop      = load_weapon_shop()
-        remaining = seconds_to_shop_reset()
-        h, m      = divmod(remaining // 60, 60)
-
-        desc = (
-            f"⏳️ |  Reset sau **{h}h {m}m**  •  Dùng `dtn shop buy <slot>` để mua.\n"
-            f"<:Coin:1495831576397742241> |  Giá = base × (100% − drop rate) × 80%"
-        )
-        title = "<:Hamer:1495462570469888069> |  Weapon Shop"
-
-        slot_fields: list[tuple] = []
-        for s in shop["slots"]:
-            w             = get_weapon_by_id(s["weapon_id"])
-            effects       = w.get("effects", {}) if w else {}
-            current_emoji = w.get("emoji", s['emoji']) if w else s['emoji']
-            eff_str       = " | ".join(
-                fmt_effect_val(k, v) for k, v in effects.items()
-            ) or "—"
-            rarity_e = _rarity_tier(s["rarity"])
-            slot_fields.append((
-                f"`[{s['slot']:02d}]` {current_emoji} {s['name']}  {rarity_e}",
-                (
-                    f"<:2245:1493575277605949480> | **{s['price']:,}** {COIN_EMOJI}  "
-                    f"_(drop rate: {s['drop_rate']}%)_\n"
-                    f"ID: `{s['weapon_id']}`\n"
-                    f"<:Effect:1495466103047061679> {eff_str}"
-                ),
-                True,
-            ))
-
-        _SLOTS_PER_PAGE = 6
-        chunks = [
-            slot_fields[i : i + _SLOTS_PER_PAGE]
-            for i in range(0, len(slot_fields), _SLOTS_PER_PAGE)
-        ]
-        total  = len(chunks)
-        embeds = []
-        for i, chunk in enumerate(chunks):
-            page_tag = f" • Trang {i + 1}/{total}" if total > 1 else ""
-            embed = discord.Embed(
-                title=title + page_tag,
-                description=desc,
-                color=0xE74C3C,
-            )
-            for fname, fvalue, finline in chunk:
-                embed.add_field(name=fname, value=fvalue, inline=finline)
-            embeds.append(embed)
-
-        await _send_paged(ctx, embeds)
+        await _send_paged(ctx, _build_weapon_shop_embeds())
 
     # ─── BUY (weapon shop) ───
     @shop.command(name="buy")
     async def shop_buy(self, ctx, slot: int):
         """Mua weapon từ slot trong Weapon Shop. `dtn shop buy <slot>`"""
-        slot_data = get_shop_slot(slot)
-        if not slot_data:
-            return await ctx.send(f"{ERR} | Slot `{slot}` không tồn tại. Xem `dtn shop weapon`.")
-
-        price = slot_data["price"]
-        bal   = get_balance(ctx.author.id)
-        if bal < price:
-            return await ctx.send(
-                f"{ERR} | Không đủ tiền. Cần **{price:,}** {COIN_EMOJI} "
-                f"(bạn có **{bal:,}** {COIN_EMOJI})."
-            )
-
-        uid  = str(ctx.author.id)
-        user, upgraded_weapons = get_user(uid)
-
-        await update_balance_safe(ctx.author.id, -price)
-        # ── ALWAYS stackable: shop must never produce a UID ──────────────────
-        add_weapon(user, slot_data["weapon_id"], make_unique=False)
-        mark_shop_slot_sold(slot)
-        if not save_user(uid, user, upgraded_weapons):
-            return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
-
-        w     = get_weapon_by_id(slot_data["weapon_id"])
-        color = RARITY_COLOR.get(slot_data["rarity"], 0x5865F2)
-        current_emoji = w.get("emoji", slot_data['emoji']) if w else slot_data['emoji']
-        embed = discord.Embed(title="🛒 Mua weapon Thành Công!", color=color)
-        embed.add_field(name="Vũ Khí", value=f"{current_emoji} **{slot_data['name']}**", inline=True)
-        embed.add_field(name="ID",     value=f"`{slot_data['weapon_id']}`",               inline=True)
-        embed.add_field(name="Đã trả", value=f"{price:,} {COIN_EMOJI}",                   inline=True)
-        if w:
-            eff_str = " | ".join(
-                fmt_effect_val(k, v) for k, v in w.get("effects", {}).items()
-            ) or "—"
-            embed.add_field(
-                name="<:Effect:1495466103047061679> | Hiệu ứng",
-                value=eff_str, inline=False,
-            )
-        embed.set_footer(text=f"Số dư: {get_balance(ctx.author.id):,} {COIN_EMOJI}")
-        await ctx.send(embed=embed)
+        await _handle_shop_buy(ctx.author, slot, ctx.send)
 
     # ─── EVENT SHOP (xem) ───
     @shop.command(name="event")
     async def shop_event(self, ctx):
         """Xem shop event Soul Crate. `dtn shop event`"""
-        embed = discord.Embed(
-            title="<:Shop:1495464183037165763> Shop Event",
-            description=(
-                "Dùng Linh hoả để đổi Soul Crate hiếm!\n"
-                "Ma Hỏa Thống Soái 0.3% | Linh Diệm Sát Thần 0.3% | "
-                "Hồn Giáp Bất Diệt 0.3% | Linh Hoả 35% | 64.4% 2000–6000 Coin"
-            ),
-            color=0xCCFFCC,
+        await ctx.send(embed=_build_event_embed())
+
+    # ──────────────────────────────────────────────────────
+    # SLASH COMMANDS
+    # ──────────────────────────────────────────────────────
+
+    shop_slash = app_commands.Group(
+        name="shop",
+        description="Các lệnh shop RPG",
+        guild_only=True,
+    )
+
+    @shop_slash.command(name="crate", description="Xem shop crate và bảng drop rate")
+    async def slash_shop_crate(self, interaction: discord.Interaction):
+        view  = CrateShopView(page=0, author_id=interaction.user.id)
+        embed = _build_crate_page_embed(0)
+        await interaction.response.send_message(embed=embed, view=view)
+
+    @shop_slash.command(name="item", description="Xem danh sách vật phẩm và giá bán")
+    async def slash_shop_item(self, interaction: discord.Interaction):
+        embeds = _build_shop_item_embeds()
+        if not embeds:
+            await interaction.response.send_message("Không có dữ liệu item.", ephemeral=True)
+            return
+        await interaction.response.send_message(embed=embeds[0])
+        for e in embeds[1:]:
+            await interaction.followup.send(embed=e)
+
+    @shop_slash.command(name="weapon", description="Xem 10 weapon đang bán (reset mỗi 6 tiếng)")
+    async def slash_shop_weapon(self, interaction: discord.Interaction):
+        embeds = _build_weapon_shop_embeds()
+        await interaction.response.send_message(embed=embeds[0])
+        for e in embeds[1:]:
+            await interaction.followup.send(embed=e)
+
+    @shop_slash.command(name="buy", description="Mua weapon từ slot trong Weapon Shop")
+    @app_commands.describe(slot="Số thứ tự slot (xem /shop weapon)")
+    async def slash_shop_buy(self, interaction: discord.Interaction, slot: int):
+        await interaction.response.defer()
+        await _handle_shop_buy(
+            interaction.user,
+            slot,
+            interaction.followup.send,
         )
+
+    @shop_slash.command(name="event", description="Xem shop event Soul Crate")
+    async def slash_shop_event(self, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=_build_event_embed())
+
+
+# ═══════════════════════════════════════════════════════════
+# HELPER — xử lý logic mua weapon (dùng chung prefix & slash)
+# ═══════════════════════════════════════════════════════════
+
+async def _handle_shop_buy(member: discord.Member | discord.User, slot: int, send_fn) -> None:
+    slot_data = get_shop_slot(slot)
+    if not slot_data:
+        return await send_fn(f"{ERR} | Slot `{slot}` không tồn tại. Xem `dtn shop weapon` hoặc `/shop weapon`.")
+
+    price = slot_data["price"]
+    bal   = get_balance(member.id)
+    if bal < price:
+        return await send_fn(
+            f"{ERR} | Không đủ tiền. Cần **{price:,}** {COIN_EMOJI} "
+            f"(bạn có **{bal:,}** {COIN_EMOJI})."
+        )
+
+    uid  = str(member.id)
+    user, upgraded_weapons = get_user(uid)
+
+    await update_balance_safe(member.id, -price)
+    # ── ALWAYS stackable: shop must never produce a UID ──────────────────
+    add_weapon(user, slot_data["weapon_id"], make_unique=False)
+    mark_shop_slot_sold(slot)
+    if not save_user(uid, user, upgraded_weapons):
+        return await send_fn(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
+
+    w     = get_weapon_by_id(slot_data["weapon_id"])
+    color = RARITY_COLOR.get(slot_data["rarity"], 0x5865F2)
+    current_emoji = w.get("emoji", slot_data['emoji']) if w else slot_data['emoji']
+    embed = discord.Embed(title="🛒 Mua weapon Thành Công!", color=color)
+    embed.add_field(name="Vũ Khí", value=f"{current_emoji} **{slot_data['name']}**", inline=True)
+    embed.add_field(name="ID",     value=f"`{slot_data['weapon_id']}`",               inline=True)
+    embed.add_field(name="Đã trả", value=f"{price:,} {COIN_EMOJI}",                   inline=True)
+    if w:
+        eff_str = " | ".join(
+            fmt_effect_val(k, v) for k, v in w.get("effects", {}).items()
+        ) or "—"
         embed.add_field(
-            name="<:Soulcrate:1498617031501807646> | Soul Crate (ID: 004)",
-            value=(
-                "**Giá:** 25x <:Linh_hoa:1498614127386562601> Linh hoả\n"
-                "**Lệnh mua:** `dtn ebuy 004 [số lượng]`"
-            ),
-            inline=False,
+            name="<:Effect:1495466103047061679> | Hiệu ứng",
+            value=eff_str, inline=False,
         )
-        await ctx.send(embed=embed)
+    embed.set_footer(text=f"Số dư: {get_balance(member.id):,} {COIN_EMOJI}")
+    await send_fn(embed=embed)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -386,47 +492,91 @@ class RPGEventBuy(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    # ─── PREFIX ───
     @commands.command(name="eventbuy", aliases=["ebuy"])
     async def event_buy(self, ctx, item_id: str = None, amount: int = 1):
         """Mua Soul Crate bằng Linh hoả. `dtn ebuy 004 [số lượng]`"""
-        if not item_id or item_id != "004":
-            return await ctx.send(
-                f"{ERR} | ID vật phẩm không đúng. Sử dụng: `dtn ebuy 004 [số lượng]`"
-            )
-        if amount <= 0:
-            return await ctx.send(f"{ERR} | Số lượng không hợp lệ.")
+        await _handle_event_buy(ctx.author, item_id, amount, ctx.send)
 
-        uid           = str(ctx.author.id)
-        currency_id   = "5200"   # Linh hoả
-        crate_id      = "004"    # Soul Crate
-        cost_per_unit = 25
-        total_cost    = cost_per_unit * amount
-
-        # ── Tải user từ MongoDB ──
-        data = load_core_data(uid)
-        user = data["user"]
-
-        user_inv = user.get("inv", {})
-        if user_inv.get(currency_id, 0) < total_cost:
-            missing = total_cost - user_inv.get(currency_id, 0)
-            return await ctx.send(
-                f"{ERR} | Bạn thiếu **{missing}** "
-                f"<:Linh_hoa:1498614127386562601> Linh hoả (ID: 5200) "
-                f"để thực hiện giao dịch này."
-            )
-
-        # ── Trừ Linh hoả, thêm Soul Crate ──
-        user["inv"][currency_id] -= total_cost
-        add_item(user, f"crate_{crate_id}", amount)
-
-        # ── Lưu lên MongoDB ──
-        if not save_core_data(uid, user):
-            return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
-
-        await ctx.send(
-            f"{OK} | Chúc mừng bạn đã đổi thành công **{total_cost}** Linh hoả "
-            f"lấy **{amount}x** <:Soulcrate:1498617031501807646> **Soul Crate**!"
+    # ─── SLASH ───
+    @app_commands.command(name="ebuy", description="Mua Soul Crate bằng Linh hoả")
+    @app_commands.guild_only()
+    @app_commands.describe(
+        item_id="ID vật phẩm (hiện tại chỉ hỗ trợ: 004)",
+        amount="Số lượng muốn mua (mặc định: 1)",
+    )
+    async def slash_ebuy(
+        self,
+        interaction: discord.Interaction,
+        item_id: str,
+        amount: int = 1,
+    ):
+        await interaction.response.defer()
+        await _handle_event_buy(
+            interaction.user,
+            item_id,
+            amount,
+            interaction.followup.send,
         )
+
+    @slash_ebuy.autocomplete("item_id")
+    async def ebuy_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        choices = [
+            app_commands.Choice(name="Soul Crate (004)", value="004"),
+        ]
+        return [c for c in choices if current.lower() in c.name.lower()]
+
+
+# ═══════════════════════════════════════════════════════════
+# HELPER — xử lý logic ebuy (dùng chung prefix & slash)
+# ═══════════════════════════════════════════════════════════
+
+async def _handle_event_buy(
+    member: discord.Member | discord.User,
+    item_id: str | None,
+    amount: int,
+    send_fn,
+) -> None:
+    if not item_id or item_id != "004":
+        return await send_fn(
+            f"{ERR} | ID vật phẩm không đúng. Sử dụng: `dtn ebuy 004 [số lượng]` hoặc `/ebuy item_id:004`"
+        )
+    if amount <= 0:
+        return await send_fn(f"{ERR} | Số lượng không hợp lệ.")
+
+    uid           = str(member.id)
+    currency_id   = "5200"   # Linh hoả
+    crate_id      = "004"    # Soul Crate
+    cost_per_unit = 25
+    total_cost    = cost_per_unit * amount
+
+    # ── Tải user từ MongoDB ──
+    data = load_core_data(uid)
+    user = data["user"]
+
+    user_inv = user.get("inv", {})
+    if user_inv.get(currency_id, 0) < total_cost:
+        missing = total_cost - user_inv.get(currency_id, 0)
+        return await send_fn(
+            f"{ERR} | Bạn thiếu **{missing}** "
+            f"<:Linh_hoa:1498614127386562601> Linh hoả (ID: 5200) "
+            f"để thực hiện giao dịch này."
+        )
+
+    # ── Trừ Linh hoả, thêm Soul Crate ──
+    user["inv"][currency_id] -= total_cost
+    add_item(user, f"crate_{crate_id}", amount)
+
+    # ── Lưu lên MongoDB ──
+    if not save_core_data(uid, user):
+        return await send_fn(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
+
+    await send_fn(
+        f"{OK} | Chúc mừng bạn đã đổi thành công **{total_cost}** Linh hoả "
+        f"lấy **{amount}x** <:Soulcrate:1498617031501807646> **Soul Crate**!"
+    )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -434,5 +584,16 @@ class RPGEventBuy(commands.Cog):
 # ═══════════════════════════════════════════════════════════
 
 async def setup(bot):
-    await bot.add_cog(RPGShop(bot))
-    await bot.add_cog(RPGEventBuy(bot))
+    shop_cog      = RPGShop(bot)
+    event_buy_cog = RPGEventBuy(bot)
+
+    await bot.add_cog(shop_cog)
+    await bot.add_cog(event_buy_cog)
+
+    # Guard chống CommandAlreadyRegistered khi reload extension
+    for cmd, name in (
+        (shop_cog.shop_slash,        "shop"),
+        (event_buy_cog.slash_ebuy,   "ebuy"),
+    ):
+        if bot.tree.get_command(name) is None:
+            bot.tree.add_command(cmd)
