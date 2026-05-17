@@ -193,14 +193,19 @@ def _register_app_groups(ext_name: str) -> None:
 
     Không cần gọi bot.tree.add_command() trong từng setup() nữa.
     """
-    for cog in bot.cogs.values():
+    for cog_name, cog in bot.cogs.items():
         # Chỉ xét cog thuộc extension vừa load
         if type(cog).__module__ != ext_name:
             continue
-        for attr in vars(type(cog)).values():
+        
+        logger.info(f"   [DEBUG] Scanning cog: {cog_name}")
+        
+        for name, attr in vars(type(cog)).items():
+            logger.info(f"   [DEBUG]  - {name}: {type(attr).__name__}")
+            
             if isinstance(attr, app_commands.Group):
+                logger.info(f"   ↳ REGISTER GROUP: /{attr.name}")
                 bot.tree.add_command(attr, override=True)
-                logger.info(f"   ↳ Registered app_commands.Group: /{attr.name}")
 
 
 async def load_extensions():
