@@ -70,7 +70,7 @@ CRATE_OPEN_ICON: dict[str, str] = {
 }
 
 CRATE_OPEN_COOLDOWN = 9   # seconds
-CRATE_OPEN_MAX      =    # silent cap per batch
+CRATE_OPEN_MAX      = 12   # silent cap per batch
 
 
 def _rarity_tier(rarity: str) -> str:

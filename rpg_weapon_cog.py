@@ -255,12 +255,18 @@ class RPGWeapon(commands.Cog):
 
         # ── dtn weapon (no args) — danh sách tất cả ─────────────────
         equipped     = user.get("equipped", [None, None, None])
-        equipped_set = {w for w in equipped if w}
+        equipped_set = {w for w in equipped if w}   # dùng để lọc storage
+        # equipped_ordered: list (slot_idx 1-based, wid) — giữ nguyên thứ tự slot
+        equipped_ordered = [
+            (i + 1, wid)
+            for i, wid in enumerate(equipped)
+            if wid
+        ]
         storage_list = [
             w for w in user.get("weapons", [])
             if w not in equipped_set
         ]
-        all_weapons  = list(equipped_set) + storage_list
+        all_weapons = [wid for _, wid in equipped_ordered] + storage_list
 
         if not all_weapons:
             return await ctx.send(
@@ -278,21 +284,31 @@ class RPGWeapon(commands.Cog):
 
         # Build lines — 2 nhóm riêng
         equipped_lines = []
-        for wid in equipped_set:
+        for slot_idx, wid in equipped_ordered:
+            base_id = get_base_id(str(wid)) or str(wid)
+            w       = get_weapon_by_id(base_id)
+            nm      = w["name"]  if w else base_id
+            em      = w["emoji"] if w else "⚔️"
+            wi      = wi_map.get(wid)
+            lv      = wi.get("level", 1) if wi else 1
+            p       = resolve_passive(wi.get("passive", {})) if isinstance(wi, dict) else None
+            p_icon  = p.get("emoji", "") if p and p.get("id") else ""
             equipped_lines.append(
-                self._weapon_line(
-                    wid, wi_map, equipped_set,
-                    get_base_id, get_weapon_by_id,
-                )
+                f"**[Ô {slot_idx}]** {em}{p_icon} **{nm}** • Lv {lv}\n`{wid}`"
             )
 
         storage_lines = []
         for wid in storage_list:
+            base_id = get_base_id(str(wid)) or str(wid)
+            w       = get_weapon_by_id(base_id)
+            nm      = w["name"]  if w else base_id
+            em      = w["emoji"] if w else "⚔️"
+            wi      = wi_map.get(wid)
+            lv      = wi.get("level", 1) if wi else 1
+            p       = resolve_passive(wi.get("passive", {})) if isinstance(wi, dict) else None
+            p_icon  = p.get("emoji", "") if p and p.get("id") else ""
             storage_lines.append(
-                self._weapon_line(
-                    wid, wi_map, equipped_set,
-                    get_base_id, get_weapon_by_id,
-                )
+                f"{em}{p_icon} **{nm}** • Lv {lv}\n`{wid}`"
             )
 
         # Pagination dựa trên storage_lines (equipped ít, luôn hiện hết)
@@ -318,6 +334,8 @@ class RPGWeapon(commands.Cog):
                     value=equipped_value,
                     inline=False,
                 )
+                # Separator — tạo khoảng cách rõ giữa 2 field
+                e.add_field(name="\u200b", value="\u200b", inline=False)
             page_storage = pages[page_idx] if pages[page_idx] else []
             storage_value = "\n\n".join(page_storage) if page_storage else "-# Kho trống."
             e.add_field(
