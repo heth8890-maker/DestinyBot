@@ -6,12 +6,15 @@ FIXES APPLIED:
 3. Logging format chuẩn hơn (timestamp + level)
 4. on_command_error: xử lý thêm MissingRequiredArgument, CommandNotFound
 5. on_ready: log đầy đủ guild count
-6. EXCLUDE_MODULES giữ nguyên (đúng)
+6. EXCLUDE_MODULES: thêm rpg_weapon_data
 7. Thêm health check route /health cho Render uptime monitor
 8. Slash command sync: guild sync ngay lập tức + global sync chạy nền
+9. Auto-register app_commands.Group sau mỗi extension load (override=True)
+   → Không cần bot.tree.add_command() trong từng setup()
 """
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 import asyncio
 import os
@@ -30,7 +33,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-# Set SERVER_ID trong Environment Variables trên Render (hoặc hardcode nếu cần)
 SERVER_ID = int(os.environ.get("SERVER_ID", 0))
 
 # ─── Keep-alive Flask Server ─────────────────────────────────────────────────
@@ -125,7 +127,6 @@ async def on_ready():
     if SERVER_ID:
         try:
             guild_obj = discord.Object(id=SERVER_ID)
-            # Copy toàn bộ global commands vào guild để test ngay
             bot.tree.copy_global_to(guild=guild_obj)
             guild_synced = await bot.tree.sync(guild=guild_obj)
             logger.info(f"[Sync] Guild sync OK — {len(guild_synced)} slash command(s) → guild {SERVER_ID}")
@@ -185,21 +186,38 @@ async def on_command_error(ctx, error):
 
 # ─── Extension Loader ─────────────────────────────────────────────────────────
 
+def _register_app_groups(ext_name: str) -> None:
+    """
+    Sau khi load extension, scan tất cả Cog vừa được add,
+    tìm app_commands.Group và đăng ký vào bot.tree với override=True.
+
+    Không cần gọi bot.tree.add_command() trong từng setup() nữa.
+    """
+    for cog in bot.cogs.values():
+        # Chỉ xét cog thuộc extension vừa load
+        if type(cog).__module__ != ext_name:
+            continue
+        for attr in vars(type(cog)).values():
+            if isinstance(attr, app_commands.Group):
+                bot.tree.add_command(attr, override=True)
+                logger.info(f"   ↳ Registered app_commands.Group: /{attr.name}")
+
+
 async def load_extensions():
     """
     Load tất cả Cog hợp lệ trong thư mục hiện tại.
 
-    Cogs có slash command: rpg_sell, rpg_game, rpg_weapon, rpg_shop, rpg_crate, rpg_trade
-    Các file này sẽ được tự động load cùng với các Cog khác.
-
-    EXCLUDE_MODULES: các module utility thuần túy, KHÔNG phải Cog.
+    EXCLUDE_MODULES: các module utility/data thuần túy, KHÔNG phải Cog.
+    Sau mỗi extension load thành công, tự động đăng ký app_commands.Group
+    vào bot.tree (override=True) — không cần khai báo trong từng setup().
     """
 
     EXCLUDE_MODULES = {
-        "main",       # File này — không phải Cog
-        "rpg_core",   # Library: DB I/O + game logic
-        "rpg_addon",  # Library: shared utility helpers
-        "rpg_item",   # Data module: item definitions
+        "main",            # File này — không phải Cog
+        "rpg_core",        # Library: DB I/O + game logic
+        "rpg_addon",       # Library: shared utility helpers
+        "rpg_item",        # Data module: item definitions
+        "rpg_weapon_data", # Data module: weapon/crate definitions
     }
 
     loaded_count  = 0
@@ -219,6 +237,7 @@ async def load_extensions():
 
         try:
             await bot.load_extension(ext_name)
+            _register_app_groups(ext_name)
             logger.info(f"✅ Loaded Cog: {filename}")
             loaded_count += 1
 
