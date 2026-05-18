@@ -104,6 +104,9 @@ _CUSTOM_DROPS: dict[str, str] = {
         "  <:Linh_hoa:1498614127386562601> **Linh Hoả** (x4–18) — 35%\n"
         "  <:Coin:1495831576397742241> **Coin** (2,000–6,000) — 64.4%"
     ),
+    "006": "  <a:4572:1499013638319505530> **Hồn Giáp Bất Diệt** — 100%  _★ Special_",
+    "007": "  <a:4573:1499013635555463198> **Linh Diệm Sát Thần** — 100%  _★ Special_",
+    "008": "  <a:4574:1499013628672610334> **Tam Hoả Thống Soái** — 100%  _★ Special_",
     "009": (
         "  <a:5610:1505051859537104906> **Lôi thần Indra** — 33.33%  _Mythical_\n"
         "  <a:5611:1505052271182872576> **Thần thời gian Chronus** — 33.33%  _Mythical_\n"
@@ -112,21 +115,70 @@ _CUSTOM_DROPS: dict[str, str] = {
     ),
 }
 
-CRATE_PAGE_SIZE = 2   # số crate hiển thị mỗi trang
+CRATE_PAGE_SIZE = 2   # số crate hiển thị mỗi trang (cho crate thường)
+
+# ★ Nhóm crate hiển thị INLINE trên cùng 1 trang (hàng ngang)
+# Thêm/bớt ID tại đây nếu muốn gộp thêm crate vào trang đặc biệt
+_INLINE_GROUP: list[str] = ["006", "007", "008"]
+
+
+def _build_crate_pages() -> list[list[tuple[str, dict]]]:
+    """
+    Tạo danh sách các trang, mỗi trang là list[(crate_id, crate)].
+    - Các crate thuộc _INLINE_GROUP được gộp chung 1 trang (inline).
+    - Các crate còn lại chia theo CRATE_PAGE_SIZE như bình thường.
+    """
+    crates_list = list(CRATES.items())
+
+    inline_page  : list[tuple[str, dict]] = []
+    normal_items : list[tuple[str, dict]] = []
+
+    for crate_id, crate in crates_list:
+        if crate_id in _INLINE_GROUP:
+            inline_page.append((crate_id, crate))
+        else:
+            normal_items.append((crate_id, crate))
+
+    # Chia normal_items theo CRATE_PAGE_SIZE
+    normal_pages: list[list[tuple[str, dict]]] = []
+    for i in range(0, max(1, len(normal_items)), CRATE_PAGE_SIZE):
+        chunk = normal_items[i : i + CRATE_PAGE_SIZE]
+        if chunk:
+            normal_pages.append(chunk)
+
+    # Chèn trang inline vào đúng vị trí (theo thứ tự xuất hiện của ID đầu tiên trong _INLINE_GROUP)
+    # Tìm index của crate đầu tiên trong _INLINE_GROUP trong danh sách gốc
+    all_ids = [cid for cid, _ in crates_list]
+    insert_at = len(normal_pages)  # mặc định cuối
+    for crate_id in _INLINE_GROUP:
+        if crate_id in all_ids:
+            pos = all_ids.index(crate_id)
+            # Đếm có bao nhiêu normal_items nằm trước pos này
+            normal_before = sum(
+                1 for cid, _ in crates_list[:pos] if cid not in _INLINE_GROUP
+            )
+            insert_at = normal_before // CRATE_PAGE_SIZE
+            break
+
+    if inline_page:
+        normal_pages.insert(insert_at, inline_page)
+
+    return normal_pages if normal_pages else [[]]
 
 
 def _total_crate_pages() -> int:
-    return max(1, (len(CRATES) + CRATE_PAGE_SIZE - 1) // CRATE_PAGE_SIZE)
+    return len(_build_crate_pages())
 
 
 def _build_crate_page_embed(page: int) -> discord.Embed:
     """Tạo embed cho trang <page> của shop crate (0-indexed)."""
-    crates_list = list(CRATES.items())
-    total_pages = _total_crate_pages()
+    pages       = _build_crate_pages()
+    total_pages = len(pages)
     page        = max(0, min(page, total_pages - 1))
+    page_items  = pages[page]
 
-    start      = page * CRATE_PAGE_SIZE
-    page_items = crates_list[start : start + CRATE_PAGE_SIZE]
+    # Trang này có phải trang inline không?
+    is_inline_page = all(crate_id in _INLINE_GROUP for crate_id, _ in page_items)
 
     embed = discord.Embed(
         title="<:Shop:1495464183037165763> Shop Crate",
@@ -144,11 +196,20 @@ def _build_crate_page_embed(page: int) -> discord.Embed:
             drop_text = _CUSTOM_DROPS[crate_id]
         else:
             pool = _CRATE_POOL.get(crate_id, WEAPONS)
-            drop_text = "\n".join(
-                f"  {w['emoji']} **{_SHORT.get(w['name'], w['name'])}** "
-                f"— {w['chance']}%  _{_rarity_tier(w['rarity'])}_"
-                for w in pool
-            )
+            # Crate 100% (pool chỉ 1 weapon): hiển thị gọn trên 1 dòng
+            if len(pool) == 1:
+                w = pool[0]
+                drop_text = (
+                    f"{w['emoji']} **{_SHORT.get(w['name'], w['name'])}**"
+                    f" — {w['chance']}%  _{_rarity_tier(w['rarity'])}_"
+                )
+            else:
+                drop_text = "\n".join(
+                    f"  {w['emoji']} **{_SHORT.get(w['name'], w['name'])}** "
+                    f"— {w['chance']}%  _{_rarity_tier(w['rarity'])}_"
+                    for w in pool
+                )
+
         embed.add_field(
             name=f"{crate['emoji']} {crate['name']}  |  ID: `{crate_id}`",
             value=(
@@ -158,9 +219,9 @@ def _build_crate_page_embed(page: int) -> discord.Embed:
                     if crate_id == "009"
                     else f"**{crate['price']:,}** {COIN_EMOJI}"
                 )
-                + "\n\n**Bảng drop rate:**\n" + drop_text
+                + "\n\n**Drop rate:**\n" + drop_text
             ),
-            inline=False,
+            inline=is_inline_page,  # inline=True → hàng ngang; False → hàng dọc
         )
 
     embed.set_footer(text="dtn crate buy <id> [amount]  |  dtn crate open <id>")

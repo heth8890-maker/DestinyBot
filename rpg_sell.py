@@ -55,6 +55,8 @@ from rpg_weapon_data import (
     RARITY_LABEL as W_RARITY_LABEL,
     RARITY_COLOR as W_RARITY_COLOR,
     parse_rarity_alias,
+    get_sell_candidates,       # FIX: dùng thay _resolve_rarity_candidates
+    get_weapon_by_id as _get_weapon_def,  # FIX: phát hiện passive icon
 )
 from rpg_addon import fmt_effect_val
 from rpg_quest import add_quest_progress
@@ -143,38 +145,23 @@ def _resolve_sell_weapon_targets(
     return candidates[:amount], None
 
 
-def _resolve_rarity_candidates(
-    user: dict,
-    rarity: str,
-) -> list[dict]:
+def _get_passive_emoji(base_id: str) -> str:
     """
-    Trả về list[dict] mô tả weapon theo rarity có thể bán.
-    Mỗi dict: {uid, name, level, price, rarity}
-    Không bao gồm weapon đang equipped.
+    Trả về '🔮' nếu weapon có ít nhất 1 passive_* effect,
+    ngược lại trả về chuỗi rỗng.
+    Dùng để hiển thị icon passive trong embed sell preview.
     """
-    weapons:  list[str] = user.get("weapons", [])
-    equipped: set[str]  = set(user.get("equipped", []))
-    result = []
+    w = _get_weapon_def(base_id)
+    if not w:
+        return ""
+    return "🔮" if any(k.startswith("passive_") for k in w.get("effects", {})) else ""
 
-    for entry in weapons:
-        if entry in equipped:
-            continue
-        entity = get_weapon_entity(user, entry)
-        if entity is None:
-            continue
-        w_data = entity.data if hasattr(entity, "data") else {}
-        w_rarity = w_data.get("rarity", "")
-        if w_rarity != rarity:
-            continue
-        result.append({
-            "uid":    entry,
-            "name":   entity.fmt_name() if hasattr(entity, "fmt_name") else str(entry),
-            "level":  getattr(entity, "level", 0),
-            "price":  entity.get_price() if hasattr(entity, "get_price") else 0,
-            "rarity": w_rarity,
-        })
 
-    return result
+# NOTE: _resolve_rarity_candidates đã bị xoá.
+# Thay thế: dùng get_sell_candidates(user, rarity=...) từ rpg_weapon_data.
+# get_sell_candidates xử lý đúng "legend"/"legendary" via _norm_rarity,
+# tra weapon định nghĩa trực tiếp từ WEAPONS lists (không dùng entity.data),
+# và trả về thêm trường "emoji" + "base_id" cần cho display.
 
 
 def _build_rarity_sell_embed(
@@ -182,21 +169,43 @@ def _build_rarity_sell_embed(
     rarity: str,
     color: int,
 ) -> discord.Embed:
-    """Tạo embed preview bán weapon theo rarity."""
-    total = sum(c["price"] for c in candidates)
-    rlabel = W_RARITY_LABEL.get(rarity, rarity.capitalize())
+    """
+    Tạo embed preview bán weapon theo rarity.
+    Hiển thị tối đa 5 weapon — mỗi dòng có icon passive (nếu có) + icon vũ khí.
+    Phần còn lại gom thành '... và X weapon khác'.
+
+    candidates phải có các trường: uid, name, level, price, emoji, base_id
+    (được trả về bởi get_sell_candidates từ rpg_weapon_data).
+    """
+    total   = sum(c["price"] for c in candidates)
+    rlabel  = W_RARITY_LABEL.get(rarity, rarity.capitalize())
+    display = candidates[:5]
+    hidden  = len(candidates) - len(display)
 
     lines = []
-    for c in candidates:
-        lines.append(f"• {c['name']} — **{c['price']:,}** {_COIN}")
+    for c in display:
+        w_emoji      = c.get("emoji", "⚔️")
+        passive_icon = _get_passive_emoji(c.get("base_id", c["uid"]))
+        # Hiển thị: [🔮][emoji vũ khí] **Tên** │ Lv X
+        #           -# uid │ price coin
+        icon_prefix = f"{passive_icon}{w_emoji}"
+        lines.append(
+            f"{icon_prefix} **{c['name']}** │ Lv **{c['level']}**\n"
+            f"-# `{c['uid']}` │ **{c['price']:,}** {_COIN}"
+        )
 
-    desc = "\n".join(lines) if lines else "_Không có weapon_"
+    desc = "\n\n".join(lines)
+    if hidden > 0:
+        desc += f"\n\n-# _... và **{hidden}** weapon khác_"
+
     embed = discord.Embed(
         title=f"{_SELL_ICON} | Bán tất cả — {rlabel}",
         description=desc,
         color=color,
     )
-    embed.set_footer(text=f"Tổng: {total:,} {_COIN}  •  {len(candidates)} weapon")
+    embed.set_footer(
+        text=f"Tổng: {total:,} {_COIN}  •  {len(candidates)} weapon  •  Hết hạn sau 30 giây"
+    )
     return embed
 
 
@@ -416,7 +425,10 @@ async def _do_sell_rarity(
     """
     user, _ = get_user(uid)
 
-    candidates = _resolve_rarity_candidates(user, rarity)
+    # FIX: dùng get_sell_candidates (rpg_weapon_data) thay _resolve_rarity_candidates.
+    # get_sell_candidates tra weapon definition trực tiếp từ WEAPONS lists,
+    # xử lý "legend"/"legendary" qua _norm_rarity, và trả thêm "emoji"/"base_id".
+    candidates = get_sell_candidates(user, rarity=rarity)
     if not candidates:
         rlabel = W_RARITY_LABEL.get(rarity, rarity.capitalize())
         return await send_fn(
@@ -443,7 +455,10 @@ async def _do_sell_rarity(
     view.message = await send_fn(embed=embed, view=view)
     await view.wait()
 
-    if not view.confirmed:
+    # FIX: `not view.confirmed` bắt nhầm None (timeout) lẫn False (cancel).
+    # on_timeout() đã edit message rồi — nếu vào đây lần nữa sẽ gây double-edit.
+    # Chỉ abort khi user chủ động không confirm (False hoặc None).
+    if view.confirmed is not True:
         for child in view.children:
             child.disabled = True
         await edit_fn(view.message, content=f"{ERR} | Đã huỷ bán.", embed=None, view=view)

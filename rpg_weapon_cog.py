@@ -1,33 +1,4 @@
-"""
-===== FILE: rpg_weapon_cog.py =====
-Chứa: class RPGWeapon(commands.Cog) + setup().
-Import toàn bộ data/helpers từ rpg_weapon_data.py.
 
-Tách từ rpg_weapon.py để tránh phình to.
-
-Patches áp dụng (từ rpg_weapon_audit.md):
-  - PATCH 4: display_weapon_info — detect instance_missing, guard fmt_instance_info,
-             guard EXP bar, không fabricate {} default
-  - PATCH 5: weapon <uid> detail — guard fmt_instance_info empty return,
-             guard exp_to_next <= 0 (tránh fake 100% bar)
-  - UI UPDATE:
-      dtn weapon <id> <slot>  — equip nhanh (thay dtn weapon equip)
-      dtn unequip <slot>      — top-level command (thay dtn weapon unequip)
-      dtn weapon <id>         — lệnh nhanh hiển thị đầu embed
-      dtn wi / dtn myweapon   — footer tóm tắt lệnh
-      PAGE_SIZE               — 12 → 6 vũ khí/trang (tránh giới hạn 1024 ký tự)
-
-Thay đổi (bản này):
-  - SELL tách sang file riêng — xoá weapon_sell + imports không còn dùng
-  - Tất cả commands chuyển sang hybrid (prefix + slash), trừ givew (prefix only)
-  - FIX: give_weapon kiểm tra return value của save_user
-  - FIX: weapon_unequip thêm error handler cho bad argument + catch exception chung
-  - FIX: WeaponPages timeout không còn bị ghi đè bởi cancel handler
-  - XOÁ: lệnh wid (weapon_id_list) — không được người chơi dùng
-  - UI: weapon (no args) — xoá hint khỏi description, tách Equipped/Kho thành 2 field riêng
-  - UI: WeaponPages — luôn hiển thị (kể cả 1 trang), thêm button [?] ephemeral help
-  - givew — đổi sang prefix-only (không đăng ký slash command)
-"""
 
 import discord
 from discord.ext import commands
@@ -305,7 +276,7 @@ class RPGWeapon(commands.Cog):
             )
 
         # Pagination dựa trên storage_lines (equipped ít, luôn hiện hết)
-        PAGE_SIZE    = 6
+        PAGE_SIZE    = 9
         pages        = [storage_lines[i:i+PAGE_SIZE] for i in range(0, max(len(storage_lines), 1), PAGE_SIZE)]
         total_pages  = len(pages)
 
@@ -314,10 +285,12 @@ class RPGWeapon(commands.Cog):
         # Help text — hiện khi nhấn button [?]
         _HELP_MSG = (
             "**Hướng dẫn lệnh vũ khí:**\n"
-            "`dtn weapon <uid> <slot>` — trang bị vũ khí vào ô slot\n"
-            "`dtn unequip <slot>` — tháo vũ khí khỏi ô\n"
-            "`dtn repair` — sửa vũ khí đang trang bị\n"
-            "`dtn wi` / `dtn myweapon` — xem vũ khí đang trang bị"
+            "`dtn weapon <uid>` — xem chi tiết vũ khí (level, durability, passive, effect)\n"
+            "`dtn weapon <uid> <slot>` — trang bị vũ khí vào ô slot (1/2/3)\n"
+            "`dtn unequip <slot>` — tháo vũ khí khỏi ô về kho\n"
+            "`dtn repair` — sửa độ bền vũ khí đang trang bị\n"
+            "`dtn wi` / `dtn myweapon` — xem 3 ô trang bị & tổng effect\n"
+            "`dtn weapon` — danh sách toàn bộ vũ khí trong kho"
         )
 
         def build_embed(page_idx: int) -> discord.Embed:
@@ -328,6 +301,17 @@ class RPGWeapon(commands.Cog):
                 ),
                 color=0xE91E63,
             )
+            # Lệnh nhanh — luôn ở đầu embed, [?] để mở help đầy đủ
+            e.add_field(
+                name="•  [?] Commands",
+                value=(
+                    "`dtn weapon <uid>` chi tiết  •  "
+                    "`dtn weapon <uid> <slot>` trang bị  •  "
+                    "`dtn unequip <slot>` tháo  •  "
+                    "`dtn wi` xem trang bị"
+                ),
+                inline=False,
+            )
             # Field equipped chỉ hiện ở trang đầu
             if page_idx == 0:
                 e.add_field(
@@ -335,8 +319,6 @@ class RPGWeapon(commands.Cog):
                     value=equipped_value,
                     inline=False,
                 )
-                # Separator — tạo khoảng cách rõ giữa 2 field
-                e.add_field(name="\u200b", value="\u200b", inline=False)
             page_storage = pages[page_idx] if pages[page_idx] else []
             storage_value = "\n\n".join(page_storage) if page_storage else "-# Kho trống."
             e.add_field(
@@ -347,7 +329,6 @@ class RPGWeapon(commands.Cog):
             footer = f"Trang {page_idx+1}/{total_pages}"
             if total_pages > 1:
                 footer += "  │  ◀ ▶ để chuyển trang"
-            footer += "  │  [?] hướng dẫn"
             e.set_footer(text=footer)
             return e
 
@@ -517,6 +498,13 @@ class RPGWeapon(commands.Cog):
                 show_passive=False,
             )
 
+            # ── Scale % so với giá trị gốc ──
+            if not instance_missing:
+                scale     = round(0.60 + (level - 1) * 0.02857, 3)
+                scale_str = f"**{scale:.0%}** gốc"
+            else:
+                scale_str = "—"
+
             # ── EXP bar ──
             if instance_missing:
                 exp_bar_line = "-# ⚠️ Instance record not found — level & EXP unknown"
@@ -528,15 +516,42 @@ class RPGWeapon(commands.Cog):
                 else:
                     filled       = int(exp / exp_next * 10)
                     bar          = "█" * filled + "░" * (10 - filled)
-                    exp_bar_line = f"Lv **{level}** / 50 │ `{bar}` {exp}/{exp_next} EXP"
+                    exp_bar_line = (
+                        f"Lv **{level}** / 50 │ `{bar}` {exp}/{exp_next} EXP"
+                        f" │ {scale_str}"
+                    )
 
-            # ── Durability — raw text ──
+            # ── Durability ──
             dur_line = None
             if not instance_missing:
                 dur     = wi_safe.get("durability", None)
                 dur_max = wi_safe.get("durability_max", None)
                 if dur is not None and dur_max:
-                    dur_line = f"-# Durability: {dur}/{dur_max}"
+                    dur_line = f"-# Độ bền: {dur}/{dur_max}"
+
+            # ── Quality ──
+            quality_line = None
+            if not instance_missing:
+                quality = wi_safe.get("quality", None)
+                if quality:
+                    quality_line = f"-# Quality: {quality}"
+
+            # ── Passive với tên đầy đủ ──
+            passive_line = None
+            if _p and _p.get("id"):
+                p_emoji = _p.get("emoji", "🔮")
+                p_name  = _p.get("name", "Passive")
+                p_desc  = _p.get("description") or _p.get("effect") or "—"
+                passive_line = f"-# {p_emoji} **{p_name}**: {p_desc}"
+
+            # ── Effects rút gọn — inline, không xuống dòng ──
+            effects_condensed = None
+            if effect_lines:
+                effects_condensed = " • ".join(
+                    ln.strip().lstrip("- ").replace("\n", " ")
+                    for ln in effect_lines
+                    if ln.strip()
+                )
 
             field_parts = [
                 f"{em}{_p_icon} **{nm}** — {rlabel}",
@@ -545,8 +560,12 @@ class RPGWeapon(commands.Cog):
             ]
             if dur_line:
                 field_parts.append(dur_line)
-            if effect_lines:
-                field_parts.extend(effect_lines)
+            if quality_line:
+                field_parts.append(quality_line)
+            if passive_line:
+                field_parts.append(passive_line)
+            if effects_condensed:
+                field_parts.append(f"-# {effects_condensed}")
 
             # Guard: Discord giới hạn 1024 ký tự / field value
             field_value = "\n".join(field_parts)
