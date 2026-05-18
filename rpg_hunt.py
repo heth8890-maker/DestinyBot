@@ -1,6 +1,5 @@
 """
-===== FIXED HUNT COMMAND (from rpg_game.py) =====
-FIX #4: Wrap ENTIRE hunt command in try/except
+===== HUNT COMMAND =====
 
 GUARANTEES:
 - No silent failures (errors visible in Discord)
@@ -16,9 +15,7 @@ GUARANTEES:
 - Thông báo bonus gửi là tin nhắn RIÊNG, không gắn vào embed
 
 [SLASH COMMANDS]
-- /hunt        → hunt bình thường
-- /hunt log    → xem lịch sử
-- /hunt bonus  → xem số lần bonus còn lại
+- /hunt → hunt bình thường  (plain command, không dùng Group)
 """
 
 import time
@@ -53,7 +50,6 @@ ERR = "<:X_:1495466670616219819>"
 OK  = "<:Tick:1495466684520206528>"
 
 # ─────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────
 # PER-USER LOCK  (tránh race condition khi 2 lệnh đồng thời)
 # ─────────────────────────────────────────────────────────
 _USER_LOCKS: dict[str, asyncio.Lock] = {}
@@ -65,7 +61,7 @@ def _get_user_lock(uid: str) -> asyncio.Lock:
 
 
 # ─────────────────────────────────────────────────────────
-# SLASH CHECKS  (guild_only — prefix pipeline không áp dụng cho slash)
+# SLASH CHECKS  (guild_only)
 # ─────────────────────────────────────────────────────────
 def _slash_guild_only():
     async def predicate(interaction: discord.Interaction) -> bool:
@@ -78,22 +74,26 @@ def _slash_guild_only():
     return app_commands.check(predicate)
 
 
+# ─────────────────────────────────────────────────────────
 # BONUS SYSTEM — CONSTANTS
 # ─────────────────────────────────────────────────────────
-CRATE_DROP_CHANCE   = 1       # %
-COIN_DROP_CHANCE    = 1.75    # %
-BONUS_MAX           = 10      # tối đa lần bonus mỗi chu kỳ
-BONUS_RESET_SEC     = 6 * 3600  # 6 tiếng
+CRATE_DROP_CHANCE = 1       # %
+COIN_DROP_CHANCE  = 1.75    # %
+BONUS_MAX         = 10      # tối đa lần bonus mỗi chu kỳ
+BONUS_RESET_SEC   = 6 * 3600  # 6 tiếng
 
-# Bảng tỉ lệ crate (cộng dồn, tổng = 100%)
+# Bảng tỉ lệ crate — tổng = 100%
+# Others cố định: 003=5, 004=2, 006=1, 009=0.001 → tổng = 8.001
+# → 001 + 002 = 91.999
 CRATE_POOL = [
-    ("001", 67.9999),   # Common      — 68%
-    ("002", 22),   # Rare        — 18%
-    ("003",  5),   # Dark        —  3%
-    ("004",  2),   # Soul        —  2%
-    ("006",  1),   # (crate 006) —  9%
-    ("009",  0.001)
+    ("001", 69.999),   # Common      — ~70%
+    ("002", 22),       # Rare        —  22%
+    ("003",  5),       # Dark        —   5%
+    ("004",  2),       # Soul        —   2%
+    ("006",  1),       # (crate 006) —   1%
+    ("009",  0.001),   # (crate 009) —  ~0%
 ]
+# Tổng: 69.999 + 22 + 5 + 2 + 1 + 0.001 = 100.000 ✓
 
 # Tên fallback nếu CRATES chưa load được
 _CRATE_FALLBACK = {
@@ -102,7 +102,7 @@ _CRATE_FALLBACK = {
     "003": {"name": "Dark Crate",    "emoji": "🖤"},
     "004": {"name": "Soul Crate",    "emoji": "💠"},
     "006": {"name": "Crate 006",     "emoji": "🎁"},
-     "009": {"name": "Crate 009",     "emoji": "🧺"},
+    "009": {"name": "Crate 009",     "emoji": "🧺"},
 }
 
 
@@ -216,9 +216,8 @@ def _equipped_display(equipped: list, user: dict | None = None) -> str:
 def _grant_exp_to_equipped(user: dict, found: list, equipped: list) -> None:
     """
     Grant EXP cho tất cả weapon đang equipped.
-    Toàn bộ equipped đã là UID (đảm bảo bởi migrate_all_weapons_to_uid).
     Chỉ grant cho UID có dấu "-".
-    Mutate user in-place. Không trả về gì.
+    Mutate user in-place.
     """
     if not found:
         return
@@ -251,14 +250,9 @@ async def _run_hunt(
     author_id: int,
     author_mention: str,
     display_name: str,
-    send_fn,          # async (embed=) → None
+    send_fn,          # async (content=, embed=) → None
     send_bonus_fn,    # async (content=) → None  (tin nhắn riêng)
 ) -> None:
-    """
-    Toàn bộ luồng hunt dùng chung cho prefix và slash.
-    send_fn       : gửi embed kết quả
-    send_bonus_fn : gửi tin nhắn bonus riêng
-    """
     uid = str(author_id)
 
     async with _get_user_lock(uid):
@@ -348,6 +342,7 @@ async def _run_hunt(
                                 )
                     embed.description = "\n".join(lines) if lines else "_Lỗi hiển thị vật phẩm_"
 
+                # ── Equipped field ──────────────────────────────
                 try:
                     embed.add_field(
                         name=f"{SWORD_EMOJI} Vũ khí đang trang bị",
@@ -362,6 +357,31 @@ async def _run_hunt(
                         inline=False,
                     )
 
+                # ── Broken weapon notification ──────────────────
+                try:
+                    if just_broken:
+                        wi_map = {
+                            wi["uid"]: wi
+                            for wi in user.get("weapon_instances", [])
+                            if isinstance(wi, dict) and "uid" in wi
+                        }
+                        broken_lines = []
+                        for wid in just_broken:
+                            wi      = wi_map.get(str(wid), {})
+                            base_id = wi.get("base_id", "")
+                            w       = get_weapon_by_id(base_id) if base_id else None
+                            name    = w["name"]  if w else str(wid)
+                            em      = w["emoji"] if w else "⚔️"
+                            broken_lines.append(f"💔 {em} ~~**{name}**~~ vừa bị **Broken**!")
+                        embed.add_field(
+                            name="⚠️ Vũ khí hỏng",
+                            value="\n".join(broken_lines),
+                            inline=False,
+                        )
+                except Exception as e:
+                    print(f"⚠️  Warning: broken weapon display failed: {e}")
+
+                # ── Footer ──────────────────────────────────────
                 try:
                     active_fx = [k for k, v in effects_full.items() if v]
                     if active_fx:
@@ -379,19 +399,7 @@ async def _run_hunt(
             except Exception as e:
                 return await send_fn(content=f"{ERR} | Failed to build response: `{e}`")
 
-            # ── Hunt log & cooldown ─────────────────────────────
-            try:
-                user.setdefault("hunt_log", [])
-                user["hunt_log"].append({
-                    "timestamp":   now,
-                    "items":       [{"id": it["id"], "name": it["name"]} for it in found],
-                    "found_count": len(found),
-                })
-                if len(user["hunt_log"]) > 50:
-                    user["hunt_log"] = user["hunt_log"][-50:]
-            except Exception as e:
-                print(f"⚠️  Warning: hunt_log update failed: {e}")
-
+            # ── Cooldown save ───────────────────────────────────
             try:
                 user["hunt_cd"] = now
             except Exception as e:
@@ -491,9 +499,9 @@ async def _run_hunt(
 async def _run_hunt_bonus(author_id: int, display_name: str, send_fn) -> None:
     """Core logic hunt bonus — dùng chung prefix + slash."""
     try:
-        uid    = str(author_id)
+        uid     = str(author_id)
         user, _ = get_user(uid)
-        now    = int(time.time())
+        now     = int(time.time())
 
         old_reset  = user.get("hunt_bonus", {}).get("reset_at", 0)
         bonus      = _get_bonus_data(user, now)
@@ -558,18 +566,16 @@ class RPGHunt(commands.Cog):
         )
 
     # ══════════════════════════════════════════════════════
-    # SLASH COMMANDS
+    # SLASH COMMANDS  — plain commands, không dùng Group
+    # → /hunt invoke trực tiếp, không cần /hunt go
+    # (slash /hunt bonus không khả thi nếu không có Group,
+    #  dùng prefix "hunt bonus" thay thế)
     # ══════════════════════════════════════════════════════
 
-    hunt_group = app_commands.Group(
-        name="hunt",
-        description="Đi săn vật phẩm",
-    )
-
-    @hunt_group.command(name="go", description="Đi săn vật phẩm")
+    @app_commands.command(name="hunt", description="Đi săn vật phẩm")
     @_slash_guild_only()
     async def slash_hunt(self, interaction: discord.Interaction):
-        """/hunt go"""
+        """/hunt"""
         await interaction.response.defer()
 
         async def _send(content=None, embed=None, **_):
@@ -586,34 +592,13 @@ class RPGHunt(commands.Cog):
             send_bonus_fn  = _send_bonus,
         )
 
-    @hunt_group.command(name="bonus", description="Xem số lần bonus hunt còn lại trong chu kỳ")
-    @_slash_guild_only()
-    async def slash_hunt_bonus(self, interaction: discord.Interaction):
-        """/hunt bonus"""
-        await interaction.response.defer()
-
-        async def _send(content=None, **_):
-            await interaction.followup.send(content=content)
-
-        await _run_hunt_bonus(
-            author_id    = interaction.user.id,
-            display_name = interaction.user.display_name,
-            send_fn      = _send,
-        )
-
 
 # ─────────────────────────────────────────────────────────
 # SETUP
 # ─────────────────────────────────────────────────────────
 async def setup(bot):
-    """Setup Cog."""
-    cog = RPGHunt(bot)
-    await bot.add_cog(cog)
-    # Xoá command cũ trước (idempotent khi reload)
-    bot.tree.remove_command("hunt", type=discord.AppCommandType.chat_input)
-    bot.tree.add_command(cog.hunt_group)
+    await bot.add_cog(RPGHunt(bot))
 
 
 async def teardown(bot):
-    """Teardown Cog — dọn slash command khi unload/reload."""
-    bot.tree.remove_command("hunt", type=discord.AppCommandType.chat_input)
+    await bot.remove_cog("RPGHunt")
