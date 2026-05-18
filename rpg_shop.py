@@ -408,18 +408,20 @@ class RPGShop(commands.Cog):
 
     @shop_slash.command(name="item", description="Xem danh sách vật phẩm và giá bán")
     async def slash_shop_item(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         embeds = _build_shop_item_embeds()
         if not embeds:
-            await interaction.response.send_message("Không có dữ liệu item.", ephemeral=True)
+            await interaction.followup.send("Không có dữ liệu item.", ephemeral=True)
             return
-        await interaction.response.send_message(embed=embeds[0])
+        await interaction.followup.send(embed=embeds[0])
         for e in embeds[1:]:
             await interaction.followup.send(embed=e)
 
     @shop_slash.command(name="weapon", description="Xem 10 weapon đang bán (reset mỗi 6 tiếng)")
     async def slash_shop_weapon(self, interaction: discord.Interaction):
+        await interaction.response.defer()
         embeds = _build_weapon_shop_embeds()
-        await interaction.response.send_message(embed=embeds[0])
+        await interaction.followup.send(embed=embeds[0])
         for e in embeds[1:]:
             await interaction.followup.send(embed=e)
 
@@ -590,10 +592,10 @@ async def setup(bot):
     await bot.add_cog(shop_cog)
     await bot.add_cog(event_buy_cog)
 
-    # Guard chống CommandAlreadyRegistered khi reload extension
+    # Luôn remove trước rồi add lại — tránh slash bị stale sau reload extension
     for cmd, name in (
         (shop_cog.shop_slash,        "shop"),
         (event_buy_cog.slash_ebuy,   "ebuy"),
     ):
-        if bot.tree.get_command(name) is None:
-            bot.tree.add_command(cmd)
+        bot.tree.remove_command(name)
+        bot.tree.add_command(cmd)
