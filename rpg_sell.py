@@ -9,7 +9,12 @@ PREFIX COMMANDS
   dtn sell item <id> [amount|all]       → bán item cụ thể
   dtn sell all                          → bán tất cả item (không tính crate)
   dtn sell weapon <uid|base_id> [qty]   → bán weapon theo UID hoặc base_id
-  dtn sell rarity <rarity> [qty|all]    → bán weapon theo rarity (bulk, confirm UI)
+  dtn sell rw [qty|all]                 → bán rare weapon   (bulk, confirm UI)
+  dtn sell cw [qty|all]                 → bán common weapon
+  dtn sell uw [qty|all]                 → bán uncommon weapon
+  dtn sell ew [qty|all]                 → bán epic weapon
+  dtn sell lw [qty|all]                 → bán legend weapon
+  dtn sell sw [qty|all]                 → bán special weapon
 
 SLASH COMMANDS
 ──────────────
@@ -20,11 +25,10 @@ SLASH COMMANDS
 
 NOTES
 ─────
-  - sell weapon / sell rarity dùng get_weapon_entity() — fix UID mismatch
-  - sell rarity hiển thị preview embed + confirm button trước khi thực hiện
+  - sell weapon / sell <rarity>w dùng get_weapon_entity() — fix UID mismatch
+  - sell <rarity>w hiển thị preview embed + confirm button trước khi thực hiện
   - Equipped weapons không bao giờ bị bán (kiểm tra per-entry)
-  - Sau khi tách: rpg_game.py chỉ còn RPGInventory + _resolve_sell_weapon_targets
-    (nếu cần giữ ở đó). Nạp file này qua bot.load_extension("rpg_sell").
+  - Slash commands được khai báo trong class RPGSell (fix IndentationError + self bug)
 """
 
 import random
@@ -60,6 +64,16 @@ from cash import update_balance_safe, get_balance
 _COIN = COIN_EMOJI
 _BACKPACK = "<:Backpack:1495462021377032202>"
 _SELL_ICON = "<:2245:1493575277605949480>"
+
+# ── Rarity shortcut map ────────────────────────────────────
+_RARITY_SHORTCUT: dict[str, str] = {
+    "cw": "common",
+    "uw": "uncommon",
+    "rw": "rare",
+    "ew": "epic",
+    "lw": "legend",
+    "sw": "special",
+}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -450,7 +464,6 @@ async def _do_sell_rarity(
         return
 
     actual_total = 0
-    sold_set     = set(sold_uids)
 
     from rpg_core import remove_weapon_from_bag
     for uid_w in sold_uids:
@@ -527,10 +540,13 @@ def _help_embed() -> discord.Embed:
     embed.add_field(
         name="⚔️ Weapon — theo Rarity",
         value=(
-            "`dtn sell rarity <rarity>` — bán toàn bộ weapon rarity đó\n"
-            "`dtn sell rarity <rarity> <số lượng>` — bán N weapon (level thấp trước)\n"
-            "-# Rarity: `common` `c` | `uncommon` `u` | `rare` `r` | `epic` `e` | `legend` `l` | `special` `s`\n"
-            f"-# Ví dụ: `dtn sell rarity rare` hoặc `dtn sell rarity r 5`"
+            "`dtn sell rw` — bán tất cả **rare** weapon\n"
+            "`dtn sell cw` — common  │  `dtn sell uw` — uncommon\n"
+            "`dtn sell ew` — epic    │  `dtn sell lw` — legend\n"
+            "`dtn sell sw` — special\n"
+            "`dtn sell rw <số lượng>` — bán N weapon (level thấp trước)\n"
+            "-# Tất cả đều hiện preview + nút xác nhận trước khi bán\n"
+            f"-# Ví dụ: `dtn sell rw` hoặc `dtn sell rw 5`"
         ),
         inline=False,
     )
@@ -555,6 +571,12 @@ def _help_embed() -> discord.Embed:
 class RPGSell(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    # ── Slash group — khai báo trong class để tránh IndentationError + self bug ──
+    sell_slash = app_commands.Group(
+        name="sell",
+        description="Bán vật phẩm hoặc vũ khí",
+    )
 
     # ──────────────────────────────────────────────────────
     # PREFIX GROUP: dtn sell
@@ -623,30 +645,29 @@ class RPGSell(commands.Cog):
             send_fn=lambda content=None, embed=None, **_: ctx.send(content=content, embed=embed),
         )
 
-    # ─── rarity ─────────────────────────────────────────────
+    # ─── sell <rarity>w — shortcuts ─────────────────────────
+    # dtn sell rw [qty|all]  →  bán rare weapon
+    # dtn sell cw / uw / ew / lw / sw — tương tự
+    # ctx.invoked_with cho biết shortcut nào được dùng
 
-    @sell.command(name="rarity", aliases=["r", "rar"])
-    async def sell_rarity(self, ctx, rarity_arg: str = None, amount: str = None):
+    @sell.command(name="rw", aliases=["cw", "uw", "ew", "lw", "sw"])
+    async def sell_rarity_shortcut(self, ctx, amount: str = None):
         """
-        dtn sell rarity <rarity> [amount|all]
-        Bán weapon theo rarity — hiển thị preview + confirm button.
+        dtn sell rw [amount|all]   — bán rare weapon
+        dtn sell cw/uw/ew/lw/sw   — tương tự cho rarity khác
+        Hiển thị preview + confirm button trước khi thực hiện.
         """
-        if rarity_arg is None:
+        shortcut = ctx.invoked_with.lower()
+        rarity   = _RARITY_SHORTCUT.get(shortcut)
+        if not rarity:
+            # Không nên xảy ra, nhưng fallback an toàn
             return await ctx.send(
-                f"{ERR} | Cú pháp: `dtn sell rarity <rarity> [số lượng|all]`\n"
-                f"-# Rarity: common/uncommon/rare/epic/legend/special\n"
+                f"{ERR} | Lệnh không hợp lệ. Dùng: `rw cw uw ew lw sw`\n"
                 f"-# Xem thêm: `dtn sell help`"
             )
 
-        parsed = parse_rarity_alias(rarity_arg)
-        if not parsed:
-            return await ctx.send(
-                f"{ERR} | Rarity không hợp lệ: `{rarity_arg}`\n"
-                f"-# Dùng: `common` `c` | `uncommon` `u` | `rare` `r` | `epic` `e` | `legend` `l` | `special` `s`"
-            )
-
         qty: int | None
-        if amount is None or (isinstance(amount, str) and amount.lower() == "all"):
+        if amount is None or amount.lower() == "all":
             qty = None
         else:
             try:
@@ -664,20 +685,15 @@ class RPGSell(commands.Cog):
         async def _edit(msg: discord.Message, **kwargs):
             await msg.edit(**kwargs)
 
-        await _do_sell_rarity(ctx.author.id, uid, parsed, qty, _send, _edit)
+        await _do_sell_rarity(ctx.author.id, uid, rarity, qty, _send, _edit)
 
     # ──────────────────────────────────────────────────────
-    # SLASH COMMANDS
+    # SLASH COMMANDS — khai báo trong class, dùng sell_slash group
     # ──────────────────────────────────────────────────────
-
-    sell_group = app_commands.Group(
-        name="sell",
-        description="Bán vật phẩm hoặc vũ khí",
-    )
 
     # ─── /sell item ─────────────────────────────────────────
 
-    @sell_group.command(name="item", description="Bán item cụ thể theo ID")
+    @sell_slash.command(name="item", description="Bán item cụ thể theo ID")
     @app_commands.describe(
         item_id="ID của item (vd: herb, stone)",
         amount="Số lượng muốn bán, hoặc 'all' để bán hết",
@@ -698,7 +714,7 @@ class RPGSell(commands.Cog):
 
     # ─── /sell all ──────────────────────────────────────────
 
-    @sell_group.command(name="all", description="Bán toàn bộ vật phẩm trong kho (không tính crate)")
+    @sell_slash.command(name="all", description="Bán toàn bộ vật phẩm trong kho (không tính crate)")
     async def slash_sell_all(self, interaction: discord.Interaction):
         await interaction.response.defer()
         uid = str(interaction.user.id)
@@ -710,7 +726,7 @@ class RPGSell(commands.Cog):
 
     # ─── /sell weapon ───────────────────────────────────────
 
-    @sell_group.command(name="weapon", description="Bán weapon theo base_id hoặc UID")
+    @sell_slash.command(name="weapon", description="Bán weapon theo base_id hoặc UID")
     @app_commands.describe(
         weapon_arg="base_id (vd: 463) hoặc UID của weapon",
         amount="Số lượng muốn bán (mặc định: 1)",
@@ -731,7 +747,7 @@ class RPGSell(commands.Cog):
 
     # ─── /sell rarity ───────────────────────────────────────
 
-    @sell_group.command(name="rarity", description="Bán weapon theo rarity (preview + xác nhận)")
+    @sell_slash.command(name="rarity", description="Bán weapon theo rarity (preview + xác nhận)")
     @app_commands.describe(
         rarity="Rarity: common/uncommon/rare/epic/legend/special",
         amount="Số lượng (bỏ trống = bán tất cả rarity đó)",
@@ -767,4 +783,5 @@ class RPGSell(commands.Cog):
 # SETUP
 # ═══════════════════════════════════════════════════════════
 async def setup(bot):
+    # add_cog tự động đăng ký sell_slash app_commands.Group vào tree
     await bot.add_cog(RPGSell(bot))
