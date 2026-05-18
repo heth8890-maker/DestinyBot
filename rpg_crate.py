@@ -65,7 +65,7 @@ CRATE_OPEN_ICON: dict[str, str] = {
     "001": "<:Uncomon:1495277191867400284>",
     "002": "<:Craterare:1496191910765920406>",
     "003": "<:Darkcrateopen:1498988761936302210>",
-    "006": "<:Paradise_crate_open:1505052527157051454>",
+    "005": "<:Paradise_crate_open:1505052527157051454>",
     "009": "<:Paradise_crate_open:1505052527157051454>",
 }
 
@@ -346,9 +346,102 @@ class RPGCrate(commands.Cog):
             return
 
         # ══════════════════════════════════════════════════
-        # PARADISE CRATE (id "006")
+        # CRATE OF 魔火統帥 (id "008") — 100% Tam hoả thống soái
+        # ══════════════════════════════════════════════════
+        if crate_id == "008":
+            from rpg_core import get_weapon_entity
+            anim_msg = await self._play_open_animation(ctx, CRATES[crate_id])
+            await anim_msg.edit(content=f"{author_tag} | opens a **Crate of 魔火統帥**")
+
+            for _ in range(count):
+                user, _ = get_user(uid)
+                new_uid = add_weapon(user, "5001")
+                passive_emoji = _get_passive_emoji(user, new_uid)
+                save_user(uid, user)
+                add_quest_progress(ctx.author.id, "crates_opened")
+
+                entity = get_weapon_entity(user, new_uid)
+                embed = entity.build_embed()
+                embed.title = "<:Opensoulcrate:1498617029077499935> | Crate of 魔火統帥"
+                embed.color = 0xFF6600
+                embed.description = (
+                    f"Chúc mừng {ctx.author.mention} đã triệu hồi thành công "
+                    f"**Tam hoả thống soái** từ crate!"
+                )
+                await ctx.send(embed=embed)
+                await ctx.send(
+                    f"{LIGHT_ICON} **Congratulation!** {LIGHT_ICON}\n"
+                    f"{ctx.author.mention}"
+                )
+                await asyncio.sleep(0.125)
+            return
+
+        # ══════════════════════════════════════════════════
+        # CRATE OF 靈焰殺神 (id "007") — 100% Linh diệm sát thần
+        # ══════════════════════════════════════════════════
+        if crate_id == "007":
+            from rpg_core import get_weapon_entity
+            anim_msg = await self._play_open_animation(ctx, CRATES[crate_id])
+            await anim_msg.edit(content=f"{author_tag} | opens a **Crate of 靈焰殺神**")
+
+            for _ in range(count):
+                user, _ = get_user(uid)
+                new_uid = add_weapon(user, "5003")
+                passive_emoji = _get_passive_emoji(user, new_uid)
+                save_user(uid, user)
+                add_quest_progress(ctx.author.id, "crates_opened")
+
+                entity = get_weapon_entity(user, new_uid)
+                embed = entity.build_embed()
+                embed.title = "<:Opensoulcrate:1498617029077499935> | Crate of 靈焰殺神"
+                embed.color = 0xAA00FF
+                embed.description = (
+                    f"Chúc mừng {ctx.author.mention} đã triệu hồi thành công "
+                    f"**Linh diệm sát thần** từ crate!"
+                )
+                await ctx.send(embed=embed)
+                await ctx.send(
+                    f"{LIGHT_ICON} **Congratulation!** {LIGHT_ICON}\n"
+                    f"{ctx.author.mention}"
+                )
+                await asyncio.sleep(0.125)
+            return
+
+        # ══════════════════════════════════════════════════
+        # CRATE OF 魂甲不滅 (id "006") — 100% Hồn giáp bất diệt
         # ══════════════════════════════════════════════════
         if crate_id == "006":
+            from rpg_core import get_weapon_entity
+            anim_msg = await self._play_open_animation(ctx, CRATES[crate_id])
+            await anim_msg.edit(content=f"{author_tag} | opens a **Crate of 魂甲不滅**")
+
+            for _ in range(count):
+                user, _ = get_user(uid)
+                new_uid = add_weapon(user, "5002")
+                passive_emoji = _get_passive_emoji(user, new_uid)
+                save_user(uid, user)
+                add_quest_progress(ctx.author.id, "crates_opened")
+
+                entity = get_weapon_entity(user, new_uid)
+                embed = entity.build_embed()
+                embed.title = "<:Opensoulcrate:1498617029077499935> | Crate of 魂甲不滅"
+                embed.color = 0x00CCFF
+                embed.description = (
+                    f"Chúc mừng {ctx.author.mention} đã triệu hồi thành công "
+                    f"**Hồn giáp bất diệt** từ crate!"
+                )
+                await ctx.send(embed=embed)
+                await ctx.send(
+                    f"{LIGHT_ICON} **Congratulation!** {LIGHT_ICON}\n"
+                    f"{ctx.author.mention}"
+                )
+                await asyncio.sleep(0.125)
+            return
+
+        # ══════════════════════════════════════════════════
+        # PARADISE CRATE (id "005")
+        # ══════════════════════════════════════════════════
+        if crate_id == "005":
             anim_msg = await self._play_open_animation(ctx, CRATES[crate_id])
             await anim_msg.edit(content=f"{author_tag} | opens a **Crate of Paradise**")
 
@@ -357,7 +450,7 @@ class RPGCrate(commands.Cog):
                 weapon = roll_paradise_crate_weapon()
 
                 # Special: roll ra Book of Godly → mở ngay crate 009
-                if weapon["id"] == "006_book":
+                if weapon["id"] == "005_book":
                     godly_weapon = roll_book_of_godly_weapon()
                     new_uid = add_weapon(user, godly_weapon["id"])
                     passive_emoji = _get_passive_emoji(user, new_uid)

@@ -91,7 +91,7 @@ _CRATE_POOL: dict[str, list] = {
     "001": WEAPONS,
     "002": RARE_CRATE_WEAPONS,
     "003": DARK_CRATE_WEAPON,
-    "006": PARADISE_CRATE_WEAPONS,
+    "005": PARADISE_CRATE_WEAPONS,
     # "005": FUTURE_CRATE_WEAPONS,  ← ví dụ thêm sau
 }
 
@@ -421,6 +421,9 @@ class RPGShop(commands.Cog):
     async def slash_shop_weapon(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embeds = _build_weapon_shop_embeds()
+        if not embeds:
+            await interaction.followup.send("Weapon shop hiện trống.", ephemeral=True)
+            return
         await interaction.followup.send(embed=embeds[0])
         for e in embeds[1:]:
             await interaction.followup.send(embed=e)
@@ -458,13 +461,13 @@ async def _handle_shop_buy(member: discord.Member | discord.User, slot: int, sen
         )
 
     uid  = str(member.id)
-    user, upgraded_weapons = get_user(uid)
+    user, _ = get_user(uid)
 
     await update_balance_safe(member.id, -price)
     # ── ALWAYS stackable: shop must never produce a UID ──────────────────
     add_weapon(user, slot_data["weapon_id"], make_unique=False)
     mark_shop_slot_sold(slot)
-    if not save_user(uid, user, upgraded_weapons):
+    if not save_user(uid, user):
         return await send_fn(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
 
     w     = get_weapon_by_id(slot_data["weapon_id"])
@@ -586,16 +589,12 @@ async def _handle_event_buy(
 # ═══════════════════════════════════════════════════════════
 
 async def setup(bot):
-    shop_cog      = RPGShop(bot)
-    event_buy_cog = RPGEventBuy(bot)
+    # Remove trước để tránh slash bị stale sau reload extension
+    for name in ("shop", "ebuy"):
+        try:
+            bot.tree.remove_command(name)
+        except Exception:
+            pass
 
-    await bot.add_cog(shop_cog)
-    await bot.add_cog(event_buy_cog)
-
-    # Luôn remove trước rồi add lại — tránh slash bị stale sau reload extension
-    for cmd, name in (
-        (shop_cog.shop_slash,        "shop"),
-        (event_buy_cog.slash_ebuy,   "ebuy"),
-    ):
-        bot.tree.remove_command(name)
-        bot.tree.add_command(cmd)
+    await bot.add_cog(RPGShop(bot))
+    await bot.add_cog(RPGEventBuy(bot))

@@ -15,7 +15,7 @@ Patches áp dụng (từ rpg_weapon_audit.md):
       dtn unequip <slot>      — top-level command (thay dtn weapon unequip)
       dtn weapon <id>         — lệnh nhanh hiển thị đầu embed
       dtn wi / dtn myweapon   — footer tóm tắt lệnh
-      PAGE_SIZE               — 16 → 12 vũ khí/trang
+      PAGE_SIZE               — 12 → 6 vũ khí/trang (tránh giới hạn 1024 ký tự)
 
 Thay đổi (bản này):
   - SELL tách sang file riêng — xoá weapon_sell + imports không còn dùng
@@ -24,7 +24,8 @@ Thay đổi (bản này):
   - FIX: weapon_unequip thêm error handler cho bad argument + catch exception chung
   - FIX: WeaponPages timeout không còn bị ghi đè bởi cancel handler
   - XOÁ: lệnh wid (weapon_id_list) — không được người chơi dùng
-  - UI: weapon (no args) — thêm hint subtext, tách Equipped/Kho thành 2 field riêng
+  - UI: weapon (no args) — xoá hint khỏi description, tách Equipped/Kho thành 2 field riêng
+  - UI: WeaponPages — luôn hiển thị (kể cả 1 trang), thêm button [?] ephemeral help
   - givew — đổi sang prefix-only (không đăng ký slash command)
 """
 
@@ -274,14 +275,6 @@ class RPGWeapon(commands.Cog):
                 f"chưa có vũ khí nào."
             )
 
-        # Hướng dẫn lệnh nhanh — subtext mờ ở description
-        hint = (
-            "-# [?] `dtn weapon <uid> <slot>` để trang bị vũ khí\n"
-            "-# `dtn repair` để sửa vũ khí đang trang bị\n"
-            "-# `dtn wi` / `dtn myweapon` để xem vũ khí đang trang bị\n"
-            "-# `dtn unequip <slot>` để tháo vũ khí"
-        )
-
         # Build lines — 2 nhóm riêng
         equipped_lines = []
         for slot_idx, wid in equipped_ordered:
@@ -312,11 +305,20 @@ class RPGWeapon(commands.Cog):
             )
 
         # Pagination dựa trên storage_lines (equipped ít, luôn hiện hết)
-        PAGE_SIZE    = 12
+        PAGE_SIZE    = 6
         pages        = [storage_lines[i:i+PAGE_SIZE] for i in range(0, max(len(storage_lines), 1), PAGE_SIZE)]
         total_pages  = len(pages)
 
         equipped_value = "\n\n".join(equipped_lines) if equipped_lines else "-# Chưa trang bị vũ khí nào."
+
+        # Help text — hiện khi nhấn button [?]
+        _HELP_MSG = (
+            "**Hướng dẫn lệnh vũ khí:**\n"
+            "`dtn weapon <uid> <slot>` — trang bị vũ khí vào ô slot\n"
+            "`dtn unequip <slot>` — tháo vũ khí khỏi ô\n"
+            "`dtn repair` — sửa vũ khí đang trang bị\n"
+            "`dtn wi` / `dtn myweapon` — xem vũ khí đang trang bị"
+        )
 
         def build_embed(page_idx: int) -> discord.Embed:
             e = discord.Embed(
@@ -324,7 +326,6 @@ class RPGWeapon(commands.Cog):
                     f"<:Hamer:1495462570469888069> "
                     f"Weapon của {ctx.author.display_name}"
                 ),
-                description=hint,
                 color=0xE91E63,
             )
             # Field equipped chỉ hiện ở trang đầu
@@ -345,14 +346,12 @@ class RPGWeapon(commands.Cog):
             )
             footer = f"Trang {page_idx+1}/{total_pages}"
             if total_pages > 1:
-                footer += "  │  dùng ◀ ▶ để chuyển trang"
+                footer += "  │  ◀ ▶ để chuyển trang"
+            footer += "  │  [?] hướng dẫn"
             e.set_footer(text=footer)
             return e
 
-        if total_pages == 1:
-            return await ctx.send(embed=build_embed(0))
-
-        # Multi-page
+        # WeaponPages — luôn dùng view (kể cả 1 trang) để có button [?]
         class WeaponPages(discord.ui.View):
             def __init__(self):
                 super().__init__(timeout=60)
@@ -391,7 +390,16 @@ class RPGWeapon(commands.Cog):
                     embed=build_embed(self.page)
                 )
 
-        view         = WeaponPages()
+            @discord.ui.button(label="?", style=discord.ButtonStyle.primary)
+            async def help_btn(self, interaction: discord.Interaction,
+                               button: discord.ui.Button):
+                await interaction.response.send_message(_HELP_MSG, ephemeral=True)
+
+        view = WeaponPages()
+        # Tắt nav nếu chỉ 1 trang
+        if total_pages == 1:
+            view.prev.disabled = True
+            view.next.disabled = True
         view.message = await ctx.send(embed=build_embed(0), view=view)
 
     # ─────────────────────────────────────────────────────────

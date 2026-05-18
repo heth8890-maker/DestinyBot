@@ -625,7 +625,7 @@ CRATES = {
             "Ma Hỏa Thống Soái 0.3% | Linh Diệm Sát Thần 0,3% | Hồn Giáp Bất Diệt 0,3% | Linh Hoả 35% | 64,4% 2000-6000 Coin"
         ),
     },
-    "006": {
+    "005": {
         "name": "Crate of Paradise",
         "emoji": "<:Paradise_crate:1505052530613289080>",
         "open_emoji": "<:Paradise_crate_open:1505052527157051454>",
@@ -645,6 +645,39 @@ CRATES = {
         "description": (
             "Cuốn sách của các vị thần.\n"
             "100% ra 1 trong 3 Mythical: Lôi thần Indra | Thần thời gian Chronus | Surtr bản ngã hoàng kim"
+        ),
+    },
+    "008": {
+        "name": "Crate of 魔火統帥",
+        "emoji": "<:5780:1505604440688689152>",
+        "open_emoji": "<:Opensoulcrate:1498617029077499935>",
+        "price": 3200000,
+        "rarity": "special",
+        "description": (
+            "Rương triệu hồi nguyên soái tam hoả.\n"
+            "Tam hoả thống soái 100%"
+        ),
+    },
+    "007": {
+        "name": "Crate of 靈焰殺神",
+        "emoji": "<:5779:1505604444568686725>",
+        "open_emoji": "<:Opensoulcrate:1498617029077499935>",
+        "price": 3200000,
+        "rarity": "special",
+        "description": (
+            "Rương triệu hồi thần sát linh diệm.\n"
+            "Linh diệm sát thần 100%"
+        ),
+    },
+    "006": {
+        "name": "Crate of 魂甲不滅",
+        "emoji": "<:5778:1505604447286464593>",
+        "open_emoji": "<:Opensoulcrate:1498617029077499935>",
+        "price": 3200000,
+        "rarity": "special",
+        "description": (
+            "Rương triệu hồi giáp hồn bất diệt.\n"
+            "Hồn giáp bất diệt 100%"
         ),
     },
 }
