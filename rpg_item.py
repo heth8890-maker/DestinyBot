@@ -8,7 +8,7 @@ import random
 
 # ═══════════════════════════════════════════════════════════
 # ITEM DEFINITIONS
-# Rarity: common / uncommon / rare / epic / legendary
+# Rarity: common / uncommon / rare / epic / legendary / special / ancient
 # ═══════════════════════════════════════════════════════════
 
 ITEMS = [
@@ -336,20 +336,33 @@ ITEMS = [
         "id": "5304",
         "name": "Tinh thể thạch anh xanh",
         "emoji": "<:5330:1503843369187672104>",
-        "rarity": "epic",
+        "rarity": "rare",
         "min": 35,
         "max": 52,
         "drop_chance": 0.0009,
     },
 
+    # ── SPECIAL ──
+    # Special: không rớt khi hunt thông thường (drop_chance = 0.0)
+    # Chỉ nhận được qua phân rã, sự kiện, hoặc cơ chế đặc biệt khác
+    {
+        "id": "1099",
+        "name": "Enchant shard",
+        "emoji": "<:Enchant_shard:1506136888988405782>",
+        "rarity": "special",
+        "min": 230,
+        "max": 320,
+        "drop_chance": 0.0,  # Không rớt khi hunt – nhận từ phân rã/sự kiện
+    },
 
-
-
+    # ── ANCIENT ──
+    # Placeholder cho tương lai – thêm item vào đây khi có
 ]
 
 # ═══════════════════════════════════════════════════════════
 # RARITY CONFIG – base rates (%) per hunt slot
 # Epic / Legendary chỉ xuất hiện khi có weapon tăng rare_bias
+# Special / Ancient không bao giờ xuất hiện khi hunt thông thường
 # ═══════════════════════════════════════════════════════════
 
 BASE_RARITY_RATES = {
@@ -358,6 +371,25 @@ BASE_RARITY_RATES = {
     "rare":      10.5,
     "epic":      1.0,    # locked without weapon effect
     "legendary": 0.0,    # locked without weapon effect
+    "special":   0.0,    # không drop khi hunt – chỉ qua cơ chế đặc biệt
+    "ancient":   0.0,    # không drop khi hunt – chỉ qua cơ chế đặc biệt
+}
+
+# Rarity không bao giờ được chọn trong hunt thông thường
+NON_HUNT_RARITIES = {"special", "ancient"}
+
+# Thứ tự hiển thị rarity (thấp → cao)
+RARITY_ORDER = ["common", "uncommon", "rare", "epic", "legendary", "special", "ancient"]
+
+# Màu embed Discord theo rarity
+RARITY_COLORS = {
+    "common":    0xAAAAAA,
+    "uncommon":  0x55FF55,
+    "rare":      0x5555FF,
+    "epic":      0xAA00AA,
+    "legendary": 0xFFAA00,
+    "special":   0xFF4444,
+    "ancient":   0x00FFEE,
 }
 
 # ═══════════════════════════════════════════════════════════
@@ -369,21 +401,31 @@ def get_item_by_id(item_id: str) -> dict | None:
     return next((i for i in ITEMS if i["id"] == item_id), None)
 
 
+def get_items_by_rarity(rarity: str) -> list[dict]:
+    """Trả về danh sách tất cả item của một rarity nhất định."""
+    return [i for i in ITEMS if i["rarity"] == rarity]
+
+
+def is_obtainable_from_hunt(item: dict) -> bool:
+    """
+    Kiểm tra item có thể rớt khi hunt thông thường không.
+    Trả về False nếu rarity thuộc NON_HUNT_RARITIES hoặc drop_chance == 0.
+    """
+    return item["rarity"] not in NON_HUNT_RARITIES and item.get("drop_chance", 0.0) > 0.0
+
+
 def _pick_item_from_rarity(rarity: str) -> dict | None:
     """
     Chọn ngẫu nhiên 1 item từ pool của rarity nhất định.
-    Dùng drop_chance làm weight. Trả về None nếu pool rỗng.
+    Dùng drop_chance làm weight.
+    - Special / Ancient: chỉ có thể gọi trực tiếp (không qua hunt thông thường).
+    - Trả về None nếu pool rỗng hoặc tất cả drop_chance == 0.
     """
-    pool = [i for i in ITEMS if i["rarity"] == rarity]
+    pool = [i for i in ITEMS if i["rarity"] == rarity and i.get("drop_chance", 0.0) > 0.0]
     if not pool:
         return None
     weights = [i["drop_chance"] for i in pool]
     return random.choices(pool, weights=weights, k=1)[0]
-
-# ═══════════════════════════════════════════════════════════
-# [GIỮ NGUYÊN TOÀN BỘ NỘI DUNG GỐC CỦA rpg_item.py Ở ĐÂY]
-# Bao gồm: ITEMS, BASE_RARITY_RATES, get_item_by_id, _pick_item_from_rarity
-# ═══════════════════════════════════════════════════════════
 
 
 # ═══════════════════════════════════════════════════════════

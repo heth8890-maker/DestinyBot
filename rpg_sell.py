@@ -314,10 +314,16 @@ async def _do_sell_all(
     """Bán tất cả item (không tính crate)."""
     user, upgraded_weapons = get_user(uid)
 
-    sell_ids = [k for k in user["inv"] if not k.startswith("crate_")]
+    # Loại bỏ crate và item rarity special/ancient — chỉ bán được bằng ID trực tiếp
+    _NON_SELL_ALL_RARITIES = {"special", "ancient"}
+    sell_ids = [
+        k for k in user["inv"]
+        if not k.startswith("crate_")
+        and (get_item_by_id(k) or {}).get("rarity") not in _NON_SELL_ALL_RARITIES
+    ]
     if not sell_ids:
         return await send_fn(
-            content=f"{_BACKPACK} Không có vật phẩm nào để bán (crate không tính)."
+            content=f"{_BACKPACK} Không có vật phẩm nào để bán (crate và item đặc biệt không tính)."
         )
 
     effects     = parse_effects(user.get("equipped", []), user)

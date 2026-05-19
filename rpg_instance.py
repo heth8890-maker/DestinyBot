@@ -3,13 +3,18 @@ import random
 import logging
 
 from rpg_weapon_data import get_weapon_by_id, RARITY_LABEL
+from rpg_passive import (
+    PASSIVE_POOL, PASSIVE_INDEX, PASSIVE_TIER_WEIGHTS,
+    roll_passive, resolve_passive, _is_valid_passive,
+)
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "QUALITY_TIERS", "QUALITY_WEIGHTS", "DURABILITY_BY_RARITY",
+    "QUALITY_MIN", "QUALITY_MAX", "QUALITY_COLOR_THRESHOLDS", "DURABILITY_BY_RARITY",
     "PASSIVE_POOL", "PASSIVE_INDEX", "PASSIVE_TIER_WEIGHTS",
-    "roll_quality", "roll_passive", "resolve_passive",
+    "roll_quality", "quality_label", "quality_color",
+    "roll_passive", "resolve_passive",
     "build_weapon_effects",
     "migrate_weapon_instance_fields",
     "decrease_durability",
@@ -20,31 +25,57 @@ __all__ = [
 #  CONSTANTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-QUALITY_TIERS = {
-    "very_low":    {"label": "Rất Thấp",   "multiplier": 0.55, "color": 0x808080},
-    "low":         {"label": "Thấp",       "multiplier": 0.75, "color": 0xA0A0A0},
-    "medium_low":  {"label": "Khá Thấp",   "multiplier": 0.90, "color": 0xC0C0C0},
-    "medium":      {"label": "Trung Bình", "multiplier": 1.00, "color": 0xFFFFFF},
-    "medium_high": {"label": "Khá Cao",    "multiplier": 1.12, "color": 0x90EE90},
-    "high":        {"label": "Cao",        "multiplier": 1.25, "color": 0x00BFFF},
-    "very_high":   {"label": "Rất Cao",    "multiplier": 1.45, "color": 0xFF8C00},
-    "extreme":     {"label": "Cực Cao",    "multiplier": 1.70, "color": 0xFF0000},
+# Quality lưu dưới dạng float: 1.00 = 100% = chỉ số gốc không đổi.
+# Phạm vi hợp lệ: [0.50, 1.50] — tức 50% đến 150%.
+QUALITY_MIN: float = 0.50
+QUALITY_MAX: float = 1.50
+
+# Ngưỡng màu hiển thị cho Discord embed.
+# Mỗi entry: (ngưỡng_trên_exclusive, hex_color).
+# Duyệt từ đầu — lấy màu của entry đầu tiên mà quality < ngưỡng.
+QUALITY_COLOR_THRESHOLDS: list[tuple[float, int]] = [
+    (0.65, 0x696969),   # < 65%   : xám đậm
+    (0.75, 0xA0A0A0),   # 65–75%  : bạc
+    (0.85, 0xC0C0C0),   # 75–85%  : trắng bạc
+    (0.95, 0xFFFFFF),   # 85–95%  : trắng
+    (1.05, 0x90EE90),   # 95–105% : xanh lá nhạt (quanh base)
+    (1.20, 0x00BFFF),   # 105–120%: xanh dương
+    (1.35, 0xFF8C00),   # 120–135%: cam
+    (1.51, 0xFF0000),   # 135–150%: đỏ
+]
+
+# ── Beta distribution params cho từng rarity ─────────────────────────────────
+#
+# Dùng Beta(α, β) scaled tuyến tính lên [QUALITY_MIN, QUALITY_MAX]:
+#   quality = QUALITY_MIN + betavariate(α, β) * (QUALITY_MAX - QUALITY_MIN)
+#
+# Công thức nhanh (trong khoảng [0.50, 1.50]):
+#   mode  = QUALITY_MIN + (α−1)/(α+β−2) * 1.00
+#   mean  = QUALITY_MIN + α/(α+β)       * 1.00
+#
+# common    Beta(2, 4): mode≈75%,  mean≈83%  ← đỉnh phân phối tại 75%
+# uncommon  Beta(2.3, 4): mode≈76%, mean≈84%
+# rare      Beta(2.7, 4): mode≈78%, mean≈85%
+# epic      Beta(3.2, 4): mode≈81%, mean≈86%
+# legendary Beta(3.8, 4): mode≈84%, mean≈88%
+# mythical  Beta(5.0, 4): mode≈89%, mean≈91%
+# special / soul  Beta(4.5, 4): mode≈87%, mean≈89%
+#
+# Vì α < β trong mọi trường hợp → phân phối lệch phải (đuôi dài về phía cao),
+# tức là xác suất đạt 140–150% rất hiếm — đúng ý đồ thiết kế.
+_QUALITY_BETA_PARAMS: dict[str, tuple[float, float]] = {
+    "common":    (2.0, 4.0),
+    "uncommon":  (2.3, 4.0),
+    "rare":      (2.7, 4.0),
+    "epic":      (3.2, 4.0),
+    "legendary": (3.8, 4.0),
+    "legend":    (3.8, 4.0),
+    "mythical":  (5.0, 4.0),
+    "special":   (4.5, 4.0),
+    "soul":      (4.5, 4.0),
 }
 
-# Phân phối hình chuông lệch phải — medium là đỉnh
-# very_low (0.2%) hiếm hơn extreme (0.3%) — CỐ Ý
-QUALITY_WEIGHTS = {
-    "very_low":    0.2,
-    "low":         5.0,
-    "medium_low":  18.0,
-    "medium":      35.0,
-    "medium_high": 25.0,
-    "high":        12.0,
-    "very_high":   4.5,
-    "extreme":     0.3,
-}
-
-DURABILITY_BY_RARITY = {
+DURABILITY_BY_RARITY: dict[str, int] = {
     "common":    30,
     "uncommon":  50,
     "rare":      80,
@@ -56,191 +87,80 @@ DURABILITY_BY_RARITY = {
     "soul":      300,
 }
 
-# Tỉ lệ chọn passive tier theo weapon rarity
-PASSIVE_TIER_WEIGHTS = {
-    "common":    {"common": 70,  "uncommon": 25, "rare": 4,  "epic": 0.8, "legendary": 0.2},
-    "uncommon":  {"common": 50,  "uncommon": 35, "rare": 10, "epic": 4,   "legendary": 1},
-    "rare":      {"common": 30,  "uncommon": 35, "rare": 25, "epic": 8,   "legendary": 2},
-    "epic":      {"common": 15,  "uncommon": 25, "rare": 35, "epic": 20,  "legendary": 5},
-    "legendary": {"common": 5,   "uncommon": 15, "rare": 30, "epic": 35,  "legendary": 15},
-    "special":   {"common": 3,   "uncommon": 10, "rare": 25, "epic": 37,  "legendary": 25},
-    "soul":      {"common": 2,   "uncommon": 8,  "rare": 20, "epic": 35,  "legendary": 35},
+# ── Legacy mapping: tier string cũ → float tương đương khi migrate ───────────
+# "extreme" (1.70) bị clamp xuống QUALITY_MAX (1.50) khi áp dụng.
+_LEGACY_QUALITY_TO_FLOAT: dict[str, float] = {
+    "very_low":    0.55,
+    "low":         0.75,
+    "medium_low":  0.90,
+    "medium":      1.00,
+    "medium_high": 1.12,
+    "high":        1.25,
+    "very_high":   1.45,
+    "extreme":     1.50,   # clamp từ 1.70 → 1.50 (trần mới)
 }
 
-# Pool 21 passive — gắn vào weapon instance, KHÔNG phải weapon trang bị được
-# Giá trị âm là CỐ Ý trade-off design — không sửa, không abs()
-PASSIVE_POOL = [
-    {"id": "5234", "name": "Bánh Xe Tai Ương", "emoji": "<:5234:1503397777579708547>", "rarity": "legendary", 
-     "desc": "Vòng xoay không vận hành bằng may mắn, nó nghiền nát linh hồn để đổi lấy thiên cơ.", 
-     "effects": {"rare_bias": 0.01,  "luck_up": 0.03}},
 
-    {"id": "5233", "name": "Cổ Nha", "emoji": "<:5233:1503397779589042326>", "rarity": "legendary", 
-     "desc": "Nanh vuốt che chắn cho kẻ kế thừa trước những bước chân lầm lạc.", 
-     "effects": {"reduce_fail": 0.05, "sell_bonus": 0.05}},
+# ══════════════════════════════════════════════════════════════════════════════
+#  DISPLAY HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
 
-    {"id": "5232", "name": "Ảnh Trảm", "emoji": "<:5232:1503397781325217933>", "rarity": "uncommon", 
-     "desc": "Nhát chém cắt đứt sợi dây của thời gian, để lại thực tại một vết mờ hư ảo.", 
-     "effects": {"reduce_cooldown": 0.08}},
+def quality_color(quality: float) -> int:
+    """Trả về Discord embed color (int hex) tương ứng với quality float."""
+    for threshold, color in QUALITY_COLOR_THRESHOLDS:
+        if quality < threshold:
+            return color
+    return QUALITY_COLOR_THRESHOLDS[-1][1]
 
-    {"id": "5231", "name": "Kẻ Dối Trá", "emoji": "<:5231:1503397783699456140>", "rarity": "rare", 
-     "desc": "Nụ cười che giấu quân bài rác; trong thế giới này, sự chân thật là một sai lầm.", 
-     "effects": {"extra_slot": 1,    "sell_bonus": 0.02}},
 
-    {"id": "5230", "name": "Sự Hối Lỗi", "emoji": "<:5230:1503397785964249148>", "rarity": "rare", 
-     "desc": "Lời cầu nguyện muộn màng trước giá treo cổ đôi khi khiến thần chết mủi lòng.", 
-     "effects": {"reduce_fail": 0.04}},
+def quality_label(quality: float) -> str:
+    """
+    Trả về chuỗi hiển thị quality kèm emoji màu.
+    Ví dụ: 0.834 → '⬜ 83%'
 
-    {"id": "5229", "name": "Nắm Chặt", "emoji": "<:5229:1503397788107673710>", "rarity": "rare", 
-     "desc": "Ghì chặt định mệnh trong lòng bàn tay, dù đôi chân phải quỵ ngã vì sức nặng.", 
-     "effects": {"reduce_fail": 0.10, "reduce_cooldown": -0.01}},
-
-    {"id": "5228", "name": "Lá Vàng", "emoji": "<:5228:1503397789852504155>", "rarity": "rare", 
-     "desc": "Mảnh vụn từ vương miện của một vị vua mất nước; hào nhoáng nhưng đầy phù du.", 
-     "effects": {"sell_bonus": 0.06,  "luck_up": 0.01}},
-
-    {"id": "5227", "name": "Trói Buộc", "emoji": "<:5227:1503397792062898237>", "rarity": "epic", 
-     "desc": "Chấp nhận giam mình trong lồng sắt để nhìn thấu những bí mật của thế gian.", 
-     "effects": {"reduce_cooldown": -0.03, "rare_bias": 0.03, "sell_bonus": 0.01}},
-
-    {"id": "5226", "name": "Búa Vỡ", "emoji": "<:5226:1503397793421594907>", "rarity": "uncommon", 
-     "desc": "Đập tan trật tự cũ để tìm thấy cơ hội trong những mảnh vụn đổ nát.", 
-     "effects": {"sell_bonus": 0.03,  "reduce_fail": 0.02}},
-
-    {"id": "5225", "name": "Kẻ Ngốc", "emoji": "<:5225:1503397796684894380>", "rarity": "legendary", 
-     "desc": "Bước qua vực thẳm với nụ cười vô tri, nơi quy luật trần thế không còn chạm tới.", 
-     "effects": {"sell_bonus": 0.10,  "reduce_fail": 0.03}},
-
-    {"id": "5224", "name": "Nhật Kí Của Oneiroi", "emoji": "<:5224:1503397799406997585>", "rarity": "epic", 
-     "desc": "Những trang giấy từ cõi mộng, nơi thực tại bị bóp méo bởi lời thì thầm điên loạn.", 
-     "effects": {"passive_oneiroi": 0.02}},
-
-    {"id": "5223", "name": "Khiêu Chiến", "emoji": "<:5223:1503397801588162591>", "rarity": "uncommon", 
-     "desc": "Ném găng tay vào mặt định mệnh; sự ngạo mạn chính là tấm khiên vững chãi nhất.", 
-     "effects": {"reduce_fail": 0.03}},
-
-    {"id": "5222", "name": "Lòng Tham Và Sự Dối Trá", "emoji": "<:5222:1503397811801034905>", "rarity": "epic", 
-     "desc": "Bản khế ước viết bằng máu khô, hứa hẹn sự sống nhưng giấu nhẹm đi cái giá.", 
-     "effects": {"reduce_fail": 0.03, "luck_up": 0.02, "reduce_cooldown": 0.01}},
-
-    {"id": "5221", "name": "Lôi Đỏ", "emoji": "<:5221:1503397814930116608>", "rarity": "rare", 
-     "desc": "Tiếng sấm từ bầu trời máu; điềm báo của sự thịnh vượng xây trên tro tàn.", 
-     "effects": {"sell_bonus": 0.04}},
-
-    {"id": "5220", "name": "Dao Găm Của Lựa Chọn Cuối Cùng", "emoji": "<:5220:1503397819262963893>", "rarity": "epic", 
-     "desc": "Lưỡi dao chỉ sắc khi kẻ cầm nó không còn đường lui; một canh bạc sinh tử.", 
-     "effects": {"luck_up": 0.05}},
-
-    {"id": "5219", "name": "Bảo Thủ", "emoji": "<:5219:1503397821888335902>", "rarity": "uncommon", 
-     "desc": "An toàn trong chiếc lồng của quá khứ, mù quáng trước ánh sáng của tương lai.", 
-     "effects": {"luck_up": -0.02,   "reduce_cooldown": 0.03}},
-
-    {"id": "5218", "name": "Hoả Lâu", "emoji": "<:5218:1503397824098996284>", "rarity": "epic", 
-     "desc": "Hộp sọ rực cháy lửa tội đồ, soi sáng những kho báu bị nguyền rủa.", 
-     "effects": {"sell_bonus": 0.01,  "luck_up": 0.01,  "double_drop": 0.01}},
-
-    {"id": "5217", "name": "Mưa Tên", "emoji": "<:5217:1503397826150010961>", "rarity": "rare", 
-     "desc": "Khi cái chết đổ xuống từ hư không, kẻ tĩnh lặng nhất mới tìm thấy lối thoát.", 
-     "effects": {"reduce_fail": 0.02}},
-
-    {"id": "5216", "name": "Tín Đồ", "emoji": "<:5216:1503397828238774362>", "rarity": "rare", 
-     "desc": "Sự sùng bái mù quáng mở ra những cánh cửa mà lý trí không bao giờ chạm tới.", 
-     "effects": {"luck_up": 0.02,    "rare_bias": 0.01}},
-
-    {"id": "5212", "name": "Tham Lam", "emoji": "<:5212:1503397837449330698>", "rarity": "epic", 
-     "desc": "Cơn đói vĩnh cửu; bạn thấy được mọi báu vật nhưng đôi tay mãi mãi run rẩy.", 
-     "effects": {"sell_bonus": -0.06, "rare_bias": 0.04}},
-
-    {"id": "5210", "name": "Sự Cứu Rỗi", "emoji": "<:5210:1503397842180509878>", "rarity": "uncommon", 
-     "desc": "Tia sáng yếu ớt nơi đáy ngục; nó không cứu mạng bạn, chỉ giữ bạn không bỏ cuộc.", 
-     "effects": {"sell_bonus": 0.03}},
-]
-
-# O(1) lookup theo id
-PASSIVE_INDEX: dict[str, dict] = {p["id"]: p for p in PASSIVE_POOL}
+    Emoji map (khớp với QUALITY_COLOR_THRESHOLDS):
+        ⬛ < 65%  |  🔘 65–75%  |  ⬜ 75–85%  |  🟢 85–95%
+        🔵 95–105% |  🟡 105–120%  |  🟠 120–135%  |  🔴 135–150%
+    """
+    pct = round(quality * 100)
+    if quality < 0.65:
+        emoji = "⬛"
+    elif quality < 0.75:
+        emoji = "🔘"
+    elif quality < 0.85:
+        emoji = "⬜"
+    elif quality < 0.95:
+        emoji = "🟢"
+    elif quality < 1.05:
+        emoji = "🔵"
+    elif quality < 1.20:
+        emoji = "🟡"
+    elif quality < 1.35:
+        emoji = "🟠"
+    else:
+        emoji = "🔴"
+    return f"{emoji} **{pct}%**"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ROLL FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def roll_quality(rarity: str = "common") -> str:
+def roll_quality(rarity: str = "common") -> float:
     """
-    Roll quality tier cho weapon instance mới.
-    Weapon rarity cao → cộng bonus weight vào các tier tốt.
+    Roll quality cho weapon instance mới.
+    Trả về float trong [QUALITY_MIN, QUALITY_MAX] (0.50 → 1.50).
 
-    Rarity bonus (cộng vào medium_high, high, very_high, extreme):
-        common:0  uncommon:+1  rare:+3  epic:+6  legendary:+10  special/soul:+15
+    Dùng Beta distribution: phân phối liên tục hình chuông lệch trái —
+    đỉnh xác suất quanh 75–80%, đuôi dài về phía cao (>100% hiếm, >130% rất hiếm).
+    Weapon rarity cao → alpha lớn hơn → toàn bộ phân phối dịch phải.
+
+    100.00% = chỉ số gốc không đổi.
     """
-    _bonus_map = {
-        "common": 0, "uncommon": 1, "rare": 3,
-        "epic": 6,   "legendary": 10, "special": 15, "soul": 15,
-    }
-    bonus   = _bonus_map.get(rarity, 0)
-    weights = dict(QUALITY_WEIGHTS)
-    for tier in ("medium_high", "high", "very_high", "extreme"):
-        weights[tier] = weights.get(tier, 0) + bonus
-    tiers = list(weights.keys())
-    w     = list(weights.values())
-    return random.choices(tiers, weights=w, k=1)[0]
-
-
-def roll_passive(weapon_rarity: str = "common", quality: str = "medium") -> dict:
-    """
-    Roll 1 passive cho weapon instance mới.
-    Lưu compact {"id", "roll"} — resolve full data tại runtime qua resolve_passive().
-
-    Quality ảnh hưởng nhỏ lên roll multiplier.
-    Roll lẻ trong [0.88, 1.12] × quality_bonus → giá trị độc nhất mỗi instance.
-
-    Returns: {"id": "5228", "roll": 1.0573}
-    """
-    tier_weights = PASSIVE_TIER_WEIGHTS.get(weapon_rarity, PASSIVE_TIER_WEIGHTS["common"])
-    tiers   = list(tier_weights.keys())
-    w       = list(tier_weights.values())
-    tier    = random.choices(tiers, weights=w, k=1)[0]
-
-    pool = [p for p in PASSIVE_POOL if p["rarity"] == tier]
-    if not pool:
-        pool = [p for p in PASSIVE_POOL if p["rarity"] == "uncommon"] or PASSIVE_POOL
-
-    chosen    = random.choice(pool)
-    q_multi   = QUALITY_TIERS.get(quality, {}).get("multiplier", 1.0)
-    base_roll = random.uniform(0.88, 1.12)
-    roll      = round(base_roll * (1 + q_multi * 0.05), 6)
-
-    return {"id": chosen["id"], "roll": roll}
-
-
-def resolve_passive(passive_stored: dict) -> dict | None:
-    """
-    Resolve passive {"id", "roll"} → full display data tại runtime.
-    Nhân roll vào numeric effects để tạo giá trị thực của instance này.
-    Trả về None nếu passive_stored không hợp lệ hoặc id không tìm thấy.
-    """
-    if not isinstance(passive_stored, dict):
-        return None
-    pid  = str(passive_stored.get("id", ""))
-    roll = float(passive_stored.get("roll", 1.0))
-    base = PASSIVE_INDEX.get(pid)
-    if not base:
-        return None
-
-    resolved_effects: dict = {}
-    for k, v in base["effects"].items():
-        if isinstance(v, (int, float)) and k != "extra_slot":
-            resolved_effects[k] = round(v * roll, 6)
-        else:
-            resolved_effects[k] = v
-
-    return {
-        "id":      base["id"],
-        "name":    base["name"],
-        "emoji":   base["emoji"],
-        "rarity":  base["rarity"],
-        "desc":    base.get("desc", ""),
-        "effects": resolved_effects,
-        "roll":    roll,
-    }
+    alpha, beta_param = _QUALITY_BETA_PARAMS.get(rarity, _QUALITY_BETA_PARAMS["common"])
+    raw     = random.betavariate(alpha, beta_param)            # [0.0, 1.0]
+    quality = QUALITY_MIN + raw * (QUALITY_MAX - QUALITY_MIN)  # scale → [0.50, 1.50]
+    return round(quality, 4)   # độ chính xác 0.01%
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -255,8 +175,8 @@ def build_weapon_effects(base_effects: dict, wi: dict | None = None) -> dict:
 
     Pipeline:
         1. Scale theo weapon level   (0.60 + (lv-1) * 0.02857)
-        2. Nhân quality multiplier
-        3. Cộng passive effects (resolved từ roll)
+        2. Nhân quality multiplier   (float [0.50, 1.50] — trực tiếp từ wi["quality"])
+        3. Cộng passive effects      (resolved từ roll)
 
     Args:
         base_effects: dict effects từ WEAPON_EFFECTS (chưa scale)
@@ -278,8 +198,12 @@ def build_weapon_effects(base_effects: dict, wi: dict | None = None) -> dict:
             effects[k] = effects[k] * lv_scale
 
     # --- Step 2: quality multiplier ---
-    quality = wi.get("quality", "medium") if wi else "medium"
-    q_multi = QUALITY_TIERS.get(quality, {}).get("multiplier", 1.0)
+    # quality lưu dưới dạng float: 1.00 = 100% base, 0.75 = 75%, 1.30 = 130%, v.v.
+    raw_quality = wi.get("quality", 1.0) if wi else 1.0
+    if isinstance(raw_quality, (int, float)) and not isinstance(raw_quality, bool):
+        q_multi = max(QUALITY_MIN, min(QUALITY_MAX, float(raw_quality)))
+    else:
+        q_multi = 1.0   # fallback an toàn khi gặp giá trị corrupt
     for k in list(effects.keys()):
         if isinstance(effects[k], (int, float)) and k != "extra_slot":
             effects[k] = effects[k] * q_multi
@@ -305,47 +229,32 @@ def build_weapon_effects(base_effects: dict, wi: dict | None = None) -> dict:
 
 def _is_valid_quality(quality: object) -> bool:
     """
-    A quality value is valid iff it is an exact key in QUALITY_TIERS.
-    Does NOT accept None, empty-string, or any unknown tier name.
+    Quality hợp lệ khi và chỉ khi là số thực (int hoặc float, không phải bool)
+    nằm trong [QUALITY_MIN, QUALITY_MAX].
+    Không chấp nhận None, chuỗi tier cũ, hay bất kỳ giá trị ngoài phạm vi.
     """
-    return isinstance(quality, str) and quality in QUALITY_TIERS
-
-
-def _is_valid_passive(passive: object) -> bool:
-    """
-    A passive is structurally valid iff:
-      - it is a non-empty dict
-      - its "id" is present in PASSIVE_INDEX (known pool entry)
-      - its "roll" is a numeric value (int or float)
-
-    Intentionally rejects {} (empty dict) — the invisible-passive corruption
-    where setdefault previously silently preserved a useless value.
-    A valid passive is NEVER rerolled; only structurally broken ones are replaced.
-    """
-    if not isinstance(passive, dict) or not passive:
+    if isinstance(quality, bool):
         return False
-    pid  = str(passive.get("id", ""))
-    roll = passive.get("roll")
-    return pid in PASSIVE_INDEX and isinstance(roll, (int, float))
+    if not isinstance(quality, (int, float)):
+        return False
+    return QUALITY_MIN <= float(quality) <= QUALITY_MAX
 
 
 def _dur_max_floor(rarity: str) -> int:
     """
-    The absolute minimum durability_max that any legitimate roll could produce
-    for a given rarity: base_durability × very_low_multiplier (0.55).
+    Ngưỡng sàn tuyệt đối của durability_max cho một rarity nhất định:
+    base_durability × QUALITY_MIN (0.50).
 
-    Any stored durability_max at or above this floor is considered legitimate
-    (i.e. was produced by a real roll_quality call) and will not be repaired.
-    Any value *below* the floor is impossible and indicates corruption.
+    Mọi durability_max được lưu tại hoặc trên ngưỡng này đều hợp lệ.
+    Giá trị dưới ngưỡng là dữ liệu corrupt và sẽ bị sửa.
     """
     base = DURABILITY_BY_RARITY.get(rarity, DURABILITY_BY_RARITY["common"])
-    lowest_multiplier = QUALITY_TIERS["very_low"]["multiplier"]   # 0.55 — never changes
-    return max(1, int(base * lowest_multiplier))
+    return max(1, int(base * QUALITY_MIN))
 
 
-def _dur_max_expected(rarity: str, quality: str) -> int:
-    """Canonical durability_max for a given (rarity, quality) pair."""
-    q_multi = QUALITY_TIERS.get(quality, {}).get("multiplier", 1.0)
+def _dur_max_expected(rarity: str, quality: float) -> int:
+    """Canonical durability_max cho cặp (rarity, quality) — đúng với công thức hiện tại."""
+    q_multi = max(QUALITY_MIN, min(QUALITY_MAX, float(quality)))
     return int(DURABILITY_BY_RARITY.get(rarity, DURABILITY_BY_RARITY["common"]) * q_multi)
 
 
@@ -359,26 +268,26 @@ def migrate_weapon_instance_fields(user: dict) -> bool:
 
     Design principles
     -----------------
-    REPAIR-CAPABLE  — each field is validated for *correctness*, not just presence.
-                      Fields that exist but contain corrupt values are fixed.
-    SURGICAL        — only fields that fail their specific invariant are written;
-                      everything else is left exactly as the player earned it.
-    IDEMPOTENT      — running twice produces identical output to running once.
-    ADDITIVE        — missing instances for bag/equipped UIDs are created as stubs
-                      and then repaired in the same pass; no UID is left orphaned.
-    SAFE CLEANUP    — orphan detection requires only a valid uid anchor; instances
-                      missing base_id but with a known uid are kept and repaired,
-                      not destroyed.
+    REPAIR-CAPABLE  — mỗi field được kiểm tra tính đúng đắn, không chỉ sự tồn tại.
+                      Field tồn tại nhưng chứa giá trị corrupt sẽ được sửa.
+    SURGICAL        — chỉ các field vi phạm invariant mới bị ghi lại;
+                      mọi thứ còn lại giữ nguyên như người chơi đã kiếm được.
+    IDEMPOTENT      — chạy hai lần cho kết quả giống hệt chạy một lần.
+    ADDITIVE        — instance thiếu cho UID trong bag/equipped được tạo mới dạng stub
+                      rồi repair trong cùng pass; không UID nào bị bỏ sót.
+    SAFE CLEANUP    — orphan detection chỉ cần uid hợp lệ; instance thiếu base_id
+                      nhưng có uid đã biết sẽ được giữ lại và repair, không bị xóa.
+    LEGACY MIGRATE  — quality dạng string tier cũ (vd: "high") được chuyển đổi sang
+                      float tương đương thay vì reroll, bảo toàn tiến trình người chơi.
 
-    Repair order (each field may depend on the previous):
+    Repair order (mỗi field có thể phụ thuộc field trước):
         quality → durability_max → durability → broken → passive
 
-    Returns True if any field was written (caller should persist the user record).
+    Returns True nếu có bất kỳ field nào được ghi (caller nên persist lại user record).
     """
     changed = False
 
     # ── Step 0: Build the authoritative UID set ──────────────────────────────
-    # Accept only string UIDs; silently skip malformed entries.
     valid_uids: set[str] = set()
     for uid in user.get("weapons", []):
         if isinstance(uid, str):
@@ -388,14 +297,13 @@ def migrate_weapon_instance_fields(user: dict) -> bool:
             valid_uids.add(uid)
 
     # ── Step 1: Safer orphan cleanup ─────────────────────────────────────────
-    # Remove an instance only when we are CERTAIN it is orphaned:
-    #   (a) not a dict                     — structurally unusable
-    #   (b) uid key missing                — cannot anchor to any inventory slot
-    #   (c) uid present but not in bag/equipped — genuine orphan
+    # Xóa instance khi chắc chắn là orphan:
+    #   (a) không phải dict            — không dùng được về cấu trúc
+    #   (b) thiếu key uid              — không thể neo vào slot nào
+    #   (c) uid có nhưng không có trong bag/equipped — orphan thực sự
     #
-    # Critically: we do NOT require base_id here.  An instance that has a valid
-    # uid but is missing base_id can still be repaired in Step 3 (it falls back
-    # to "common" rarity).  Destroying it would silently wipe player progression.
+    # KHÔNG yêu cầu base_id ở đây. Instance có uid hợp lệ nhưng thiếu base_id
+    # vẫn có thể repair ở Step 3 (fallback về rarity "common").
     raw_instances = user.get("weapon_instances", [])
     kept: list[dict] = []
     removed_count = 0
@@ -423,10 +331,6 @@ def migrate_weapon_instance_fields(user: dict) -> bool:
     user["weapon_instances"] = kept
 
     # ── Step 2: Create stub instances for UIDs that have none ─────────────────
-    # A UID in the player's bag or equipped slots with no matching instance is
-    # a data gap — the instance was never written or was accidentally deleted.
-    # We create a minimal stub {"uid": uid} so Step 3 repairs it fully.
-    # Sorted for determinism (consistent ordering across saves).
     existing_uids = {wi["uid"] for wi in user["weapon_instances"]}
     for uid in sorted(valid_uids - existing_uids):
         base_id = uid.split("-")[0] if "-" in uid else uid
@@ -438,12 +342,11 @@ def migrate_weapon_instance_fields(user: dict) -> bool:
     # ── Step 3: Surgical per-field repair ────────────────────────────────────
     for wi in user["weapon_instances"]:
         if not isinstance(wi, dict):
-            continue  # paranoia guard; Step 1 already filtered these
+            continue
 
         uid = wi.get("uid", "<unknown>")
 
-        # Resolve rarity from weapon definition — safe fallback to "common".
-        # If base_id is missing or unknown, all calculations use "common" values.
+        # Resolve rarity từ weapon definition — fallback an toàn về "common".
         try:
             w_data = get_weapon_by_id(wi.get("base_id", "")) or {}
         except Exception as exc:
@@ -452,32 +355,41 @@ def migrate_weapon_instance_fields(user: dict) -> bool:
         rarity: str = w_data.get("rarity", "common")
 
         # ── quality ──────────────────────────────────────────────────────────
-        # Invariant: must be a key in QUALITY_TIERS.
-        # Repair:    reroll using the weapon's rarity for correct probability.
-        # False-positive guard: only invalid tier names trigger a reroll;
-        #   any recognised key (e.g. "high") is preserved unconditionally.
+        # Invariant: float trong [QUALITY_MIN, QUALITY_MAX].
+        #
+        # Migration path:
+        #   - Đã là float hợp lệ    → giữ nguyên (không reroll)
+        #   - String tier cũ        → chuyển đổi sang float tương đương (bảo toàn tiến trình)
+        #   - Giá trị không nhận ra → reroll mới theo rarity
         quality_stored = wi.get("quality")
         if not _is_valid_quality(quality_stored):
-            try:
-                new_quality = roll_quality(rarity)
-            except Exception as exc:
-                logger.warning(f"migrate: uid={uid!r} roll_quality failed: {exc}")
-                new_quality = "medium"
+            if isinstance(quality_stored, str) and quality_stored in _LEGACY_QUALITY_TO_FLOAT:
+                # Chuyển đổi legacy tier → float, clamp vào [QUALITY_MIN, QUALITY_MAX]
+                legacy_float = _LEGACY_QUALITY_TO_FLOAT[quality_stored]
+                new_quality  = round(max(QUALITY_MIN, min(QUALITY_MAX, legacy_float)), 4)
+                logger.info(
+                    f"migrate: uid={uid!r} quality migrated (legacy) "
+                    f"{quality_stored!r} → {new_quality:.2%}"
+                )
+            else:
+                try:
+                    new_quality = roll_quality(rarity)
+                except Exception as exc:
+                    logger.warning(f"migrate: uid={uid!r} roll_quality failed: {exc}")
+                    new_quality = 1.0
+                logger.info(
+                    f"migrate: uid={uid!r} quality repaired "
+                    f"{quality_stored!r} → {new_quality:.2%}"
+                )
             wi["quality"] = new_quality
-            logger.info(
-                f"migrate: uid={uid!r} quality repaired {quality_stored!r} → {new_quality!r}"
-            )
             changed = True
-        quality: str = wi["quality"]  # guaranteed valid from this point
+        quality: float = float(wi["quality"])   # guaranteed in [QUALITY_MIN, QUALITY_MAX]
 
         # ── durability_max ───────────────────────────────────────────────────
         # Invariant: int ≥ _dur_max_floor(rarity).
-        # Repair:    recalculate from (rarity, quality) — the same formula used
-        #            at instance creation.
-        # False-positive guard: the floor is the minimum any real roll could ever
-        #   produce (base × 0.55).  A stored value at or above the floor is kept,
-        #   even if it doesn't match the exact current formula, because the player
-        #   may legitimately have rolled that tier before rounding changed.
+        # Repair: recalculate từ (rarity, quality).
+        # False-positive guard: giá trị tại hoặc trên floor là hợp lệ và được giữ,
+        #   dù không khớp chính xác với công thức hiện tại.
         dur_max_stored = wi.get("durability_max")
         dur_floor      = _dur_max_floor(rarity)
         if not isinstance(dur_max_stored, int) or dur_max_stored < dur_floor:
@@ -488,17 +400,13 @@ def migrate_weapon_instance_fields(user: dict) -> bool:
             )
             wi["durability_max"] = new_dur_max
             changed = True
-        dur_max: int = wi["durability_max"]  # guaranteed ≥ dur_floor
+        dur_max: int = wi["durability_max"]   # guaranteed ≥ dur_floor
 
         # ── durability ───────────────────────────────────────────────────────
-        # Invariant: int in [0, dur_max].
-        # Missing    → full (treat as a freshly issued weapon).
-        # Negative   → clamp to 0 (impossible value; may have come from a
-        #               subtraction bug elsewhere).
-        # > dur_max  → clamp to dur_max (e.g. dur_max was *reduced* by repair
-        #               above from a corrupted value; preserve as much as possible).
-        # NOTE: we never invent durability > dur_max even to "restore" the weapon;
-        #       that would silently grant free durability.
+        # Invariant: int trong [0, dur_max].
+        # Thiếu   → full (vũ khí mới cấp).
+        # Âm      → clamp về 0.
+        # > max   → clamp về dur_max.
         dur_stored = wi.get("durability")
         if not isinstance(dur_stored, int):
             wi["durability"] = dur_max
@@ -518,18 +426,13 @@ def migrate_weapon_instance_fields(user: dict) -> bool:
                 f"migrate: uid={uid!r} durability clamped {dur_stored} → {dur_max}"
             )
             changed = True
-        durability: int = wi["durability"]  # guaranteed in [0, dur_max]
+        durability: int = wi["durability"]   # guaranteed in [0, dur_max]
 
         # ── broken ───────────────────────────────────────────────────────────
-        # Invariant: bool; broken MUST be True when durability == 0.
-        # `broken` is a derived field — decrease_durability() sets it at the
-        # moment durability hits zero.  Any disagreement between broken and
-        # durability is therefore corruption, not a legitimate game state.
-        #
-        # We fix BOTH impossible cases:
-        #   durability == 0  and  broken == False  → weapon should be broken
-        #   durability  > 0  and  broken == True   → weapon can't be broken with HP
-        broken_stored = wi.get("broken")
+        # Invariant: bool; broken PHẢI là True khi durability == 0.
+        # `broken` là derived field — decrease_durability() set nó khi durability về 0.
+        # Mọi bất đồng là corrupt, không phải game state hợp lệ.
+        broken_stored  = wi.get("broken")
         correct_broken = (durability == 0)
         if not isinstance(broken_stored, bool):
             wi["broken"] = correct_broken
@@ -548,22 +451,15 @@ def migrate_weapon_instance_fields(user: dict) -> bool:
 
         # ── passive ──────────────────────────────────────────────────────────
         # Invariant: {"id": <id in PASSIVE_INDEX>, "roll": <numeric>}.
-        # Invalid states (all trigger a fresh roll):
-        #   - key absent in wi entirely
-        #   - {} empty dict  ← the "invisible passive" silent corruption
-        #   - id missing or not in PASSIVE_INDEX (unknown passive, possibly from
-        #     a content removal)
-        #   - roll missing or not numeric
-        #
-        # Valid passives are NEVER rerolled.  The check is strict equality
-        # against PASSIVE_INDEX — no fuzzy matching.
+        # Mọi state không hợp lệ → roll passive mới.
+        # Passive hợp lệ KHÔNG BAO GIỜ bị reroll.
         passive_stored = wi.get("passive")
         if not _is_valid_passive(passive_stored):
             try:
                 new_passive = roll_passive(rarity, quality)
             except Exception as exc:
                 logger.warning(f"migrate: uid={uid!r} roll_passive failed: {exc}")
-                new_passive = roll_passive("common", "medium")
+                new_passive = roll_passive("common", 1.0)
             wi["passive"] = new_passive
             logger.info(
                 f"migrate: uid={uid!r} passive repaired "
@@ -595,7 +491,7 @@ def decrease_durability(user: dict, equipped: list, effects: dict | None = None)
     """
     if effects is None:
         effects = {}
-    unbreaking = effects.get("unbreaking", 0.0)   # xác suất skip [0.0, 1.0]
+    unbreaking = effects.get("unbreaking", 0.0)
 
     wi_map: dict[str, dict] = {
         wi["uid"]: wi
@@ -610,7 +506,6 @@ def decrease_durability(user: dict, equipped: list, effects: dict | None = None)
         wi = wi_map.get(wid)
         if not wi or wi.get("broken", False):
             continue
-        # unbreaking: roll skip trước khi trừ durability
         if unbreaking > 0 and random.random() < unbreaking:
             continue
         wi["durability"] = max(0, wi.get("durability", 1) - 1)
@@ -636,29 +531,37 @@ def fmt_instance_info(wi: dict) -> str:
     if not isinstance(wi, dict):
         return ""
 
-    quality = wi.get("quality", "medium")
-    q_label = QUALITY_TIERS.get(quality, {}).get("label", quality)
+    # ── quality ──
+    raw_quality = wi.get("quality", 1.0)
+    if isinstance(raw_quality, (int, float)) and not isinstance(raw_quality, bool):
+        q_float = max(QUALITY_MIN, min(QUALITY_MAX, float(raw_quality)))
+    else:
+        q_float = 1.0
+    q_str = quality_label(q_float)   # vd: "🟡 112%"
+
+    # ── durability ──
     dur_max = wi.get("durability_max", 0)
     if not isinstance(dur_max, int) or dur_max <= 0:
         logger.warning(
             f"fmt_instance_info: uid={wi.get('uid')!r} has invalid "
             f"durability_max={dur_max!r} — rendering with fallback"
         )
-        dur_max = 1  # safe fallback: render partial info rather than hide all
-    dur     = wi.get("durability", dur_max)  # FIX: default = full durability, không phải 0
-    broken  = wi.get("broken", False)
-    fill    = int(dur / max(dur_max, 1) * 10)
+        dur_max = 1
+    dur    = wi.get("durability", dur_max)
+    broken = wi.get("broken", False)
+    fill   = int(dur / max(dur_max, 1) * 10)
     dur_bar = "█" * fill + "░" * (10 - fill)
 
     lines = [
         "",
-        f"Phẩm chất: **{q_label}**",
+        f"Phẩm chất: {q_str}",
     ]
     if broken:
         lines.append("Độ bền: ⚠️ **HỎng** — cần sửa chữa")
     else:
         lines.append(f"Độ bền: `{dur_bar}` {dur}/{dur_max}")
 
+    # ── passive ──
     passive_stored = wi.get("passive")
     if passive_stored:
         resolved = resolve_passive(passive_stored)

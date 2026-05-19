@@ -14,7 +14,7 @@ from rpg_weapon_data import (
     _fmt_combined_effects,
     _rarity_tier,
 )
-from rpg_instance import resolve_passive
+from rpg_instance import resolve_passive, quality_label
 
 
 # ═══════════════════════════════════════════════════════════
@@ -179,10 +179,10 @@ class RPGWeapon(commands.Cog):
 
                 # Quality
                 quality = wi.get("quality", None)
-                if quality:
+                if quality is not None:
                     embed.add_field(
                         name="Quality",
-                        value=str(quality),
+                        value=quality_label(quality),
                         inline=True,
                     )
 
@@ -527,14 +527,14 @@ class RPGWeapon(commands.Cog):
                 dur     = wi_safe.get("durability", None)
                 dur_max = wi_safe.get("durability_max", None)
                 if dur is not None and dur_max:
-                    dur_line = f"-# Độ bền: {dur}/{dur_max}"
+                    dur_line = f"Độ bền: {dur}/{dur_max}"
 
             # ── Quality ──
             quality_line = None
             if not instance_missing:
                 quality = wi_safe.get("quality", None)
-                if quality:
-                    quality_line = f"-# Quality: {quality}"
+                if quality is not None:
+                    quality_line = f"Quality: {quality_label(quality)}"
 
             # ── Passive với tên đầy đủ ──
             passive_line = None
@@ -542,7 +542,7 @@ class RPGWeapon(commands.Cog):
                 p_emoji = _p.get("emoji", "🔮")
                 p_name  = _p.get("name", "Passive")
                 p_desc  = _p.get("description") or _p.get("effect") or "—"
-                passive_line = f"-# {p_emoji} **{p_name}**: {p_desc}"
+                passive_line = f"{p_emoji} **{p_name}**: {p_desc}"
 
             # ── Effects rút gọn — inline, không xuống dòng ──
             effects_condensed = None
