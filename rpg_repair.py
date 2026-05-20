@@ -24,7 +24,7 @@ _QUALITY_LABEL_FALLBACK = {
     "extreme":     "Cực Cao",
 }
 
-FORGE_IMAGE_PATH = "https://cdn.discordapp.com/attachments/1491821822562406654/1505008330492477460/IMG_forge.png?ex=6a090fbb&is=6a07be3b&hm=6c71bcb142cfaf2764c735d4c9b6f5c73f1a0eab9c5433e6829b5e4bf2a58c26&"
+REPAIR_IMAGE_PATH = "https://cdn.discordapp.com/attachments/1491821822562406654/1505008330492477460/IMG_forge.png?ex=6a090fbb&is=6a07be3b&hm=6c71bcb142cfaf2764c735d4c9b6f5c73f1a0eab9c5433e6829b5e4bf2a58c26&"
 COIN_EMOJI       = "<:Coin:1495831576397742241>"
 ERR              = "<:X_:1495466670616219819>"
 OK               = "<:Tick:1495466684520206528>"
@@ -97,7 +97,7 @@ def _calc_repair_cost(wi: dict, w_data: dict) -> int | None:
     err = _validate_instance(wi)
     if err:
         # Do NOT fall through with defaults — return sentinel so caller aborts.
-        print(f"[FORGE INTEGRITY] _calc_repair_cost refused: {err} | wi={wi!r}")
+        print(f"[REPAIR INTEGRITY] _calc_repair_cost refused: {err} | wi={wi!r}")
         return _CORRUPT
 
     broken  = wi.get("broken", False)
@@ -113,7 +113,7 @@ def _calc_repair_cost(wi: dict, w_data: dict) -> int | None:
     return max(missing, 1) * cost_pp
 
 
-def _build_forge_embed(
+def _build_repair_embed(
     slots_info: list,
     total_cost: int,
     author_name: str,
@@ -202,7 +202,7 @@ def _build_forge_embed(
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
-class RPGForge(commands.Cog):
+class RPGRepair(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
@@ -261,7 +261,7 @@ class RPGForge(commands.Cog):
             wi = wi_map.get(uid)  # None if absent, not {}
             if wi is None:
                 print(
-                    f"[FORGE INTEGRITY] uid={uid!r} equipped in slot {slot_idx} "
+                    f"[REPAIR INTEGRITY] uid={uid!r} equipped in slot {slot_idx} "
                     f"but has no weapon_instance record. Marking corrupt."
                 )
                 slots_info.append({
@@ -294,7 +294,7 @@ class RPGForge(commands.Cog):
             cost = _calc_repair_cost(wi, w)
             if cost is _CORRUPT:
                 print(
-                    f"[FORGE INTEGRITY] uid={uid!r} failed durability validation. "
+                    f"[REPAIR INTEGRITY] uid={uid!r} failed durability validation. "
                     f"Slot {slot_idx} marked corrupt."
                 )
                 slots_info.append({
@@ -352,9 +352,9 @@ class RPGForge(commands.Cog):
 
         # ── Không có gì cần repair ────────────────────────────────────
         if total_cost == 0:
-            embed = _build_forge_embed(slots_info, 0, ctx.author.display_name)
+            embed = _build_repair_embed(slots_info, 0, ctx.author.display_name)
             try:
-                file = discord.File(FORGE_IMAGE_PATH, filename="IMG_forge.png")
+                file = discord.File(REPAIR_IMAGE_PATH, filename="IMG_forge.png")
                 return await ctx.send(embed=embed, file=file)
             except Exception:
                 return await ctx.send(embed=embed)
@@ -365,7 +365,7 @@ class RPGForge(commands.Cog):
         can_afford = balance >= total_cost
 
         # ── Embed xác nhận ────────────────────────────────────────────
-        embed = _build_forge_embed(
+        embed = _build_repair_embed(
             slots_info, total_cost, ctx.author.display_name
         )
 
@@ -383,7 +383,7 @@ class RPGForge(commands.Cog):
             )
 
         # ── Confirm View ──────────────────────────────────────────────
-        class ForgeConfirmView(discord.ui.View):
+        class RepairConfirmView(discord.ui.View):
             def __init__(self_v):
                 super().__init__(timeout=30)
                 self_v.confirmed = None
@@ -442,9 +442,9 @@ class RPGForge(commands.Cog):
                 self_v.stop()
                 await interaction.response.defer()
 
-        view = ForgeConfirmView()
+        view = RepairConfirmView()
         try:
-            file = discord.File(FORGE_IMAGE_PATH, filename="IMG_forge.png")
+            file = discord.File(REPAIR_IMAGE_PATH, filename="IMG_forge.png")
             view.message = await ctx.send(embed=embed, file=file, view=view)
         except Exception:
             view.message = await ctx.send(embed=embed, view=view)
@@ -498,7 +498,7 @@ class RPGForge(commands.Cog):
             if wi_live is None:
                 # Instance vanished between confirm and now — do not repair or charge.
                 print(
-                    f"[FORGE INTEGRITY] uid={uid!r} present in pre-confirm snapshot "
+                    f"[REPAIR INTEGRITY] uid={uid!r} present in pre-confirm snapshot "
                     f"but missing after re-fetch. Skipping repair for this slot."
                 )
                 continue
@@ -507,7 +507,7 @@ class RPGForge(commands.Cog):
             err = _validate_instance(wi_live)
             if err:
                 print(
-                    f"[FORGE INTEGRITY] uid={uid!r} failed post-confirm validation: "
+                    f"[REPAIR INTEGRITY] uid={uid!r} failed post-confirm validation: "
                     f"{err}. Skipping repair for this slot."
                 )
                 continue
@@ -522,7 +522,7 @@ class RPGForge(commands.Cog):
             for child in view.children:
                 child.disabled = True
             print(
-                f"[FORGE INTEGRITY] user={author_uid} confirmed repair but "
+                f"[REPAIR INTEGRITY] user={author_uid} confirmed repair but "
                 f"repaired_count=0. Aborting charge."
             )
             return await view.message.edit(
@@ -544,7 +544,7 @@ class RPGForge(commands.Cog):
                 if s["uid"] in repaired_uids
             )
             print(
-                f"[FORGE INTEGRITY] user={author_uid} partial repair: "
+                f"[REPAIR INTEGRITY] user={author_uid} partial repair: "
                 f"expected={len(expected_repairs)} actual={repaired_count}. "
                 f"Charging {actual_cost} instead of {total_cost}."
             )
