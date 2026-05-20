@@ -581,4 +581,4 @@ class RPGForge(commands.Cog):
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
 async def setup(bot):
-    await bot.add_cog(RPGForge(bot))
+    await bot.add_cog(RPGRepair(bot))
