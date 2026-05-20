@@ -198,11 +198,7 @@ def _register_app_groups(ext_name: str) -> None:
         if type(cog).__module__ != ext_name:
             continue
         
-        logger.info(f"   [DEBUG] Scanning cog: {cog_name}")
-        
         for name, attr in vars(type(cog)).items():
-            logger.info(f"   [DEBUG]  - {name}: {type(attr).__name__}")
-            
             if isinstance(attr, app_commands.Group):
                 logger.info(f"   ↳ REGISTER GROUP: /{attr.name}")
                 bot.tree.add_command(attr, override=True)
