@@ -10,7 +10,10 @@ Cú pháp:
 """
 
 import asyncio
+import logging
 import random
+
+logger = logging.getLogger(__name__)
 from datetime import datetime, timezone
 
 import discord
@@ -540,8 +543,14 @@ async def cmd_reroll(ctx, args: list[str]):
         data=data,
     )
 
-    forge_file = discord.File(FORGE_IMG, filename=FORGE_IMG)
-    msg = await ctx.send(file=forge_file, embed=embed, view=view)
+    # Gửi embed — fallback không thumbnail nếu file ảnh lỗi
+    try:
+        forge_file = discord.File(FORGE_IMG, filename=FORGE_IMG)
+        msg = await ctx.send(file=forge_file, embed=embed, view=view)
+    except Exception:
+        logger.warning("rpg_forge: không load được %s, gửi embed không thumbnail", FORGE_IMG)
+        embed.set_thumbnail(url=discord.embeds.EmptyEmbed)
+        msg = await ctx.send(embed=embed, view=view)
     view.message = msg   # lưu ref để on_timeout có thể edit
 
 
