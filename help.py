@@ -163,7 +163,7 @@ class Help(commands.Cog):
         return embed
 
     # ──────────────────────────────────────────
-    @commands.command(name="help", aliases=["h"])
+    @commands.command(name="help")
     async def help_cmd(self, ctx: commands.Context, *, query: str = None):
         """Hiển thị trợ giúp. Dùng `help <cog>` hoặc `help <lệnh>`."""
 
