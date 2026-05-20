@@ -43,8 +43,9 @@ from rpg_instance import (
     migrate_weapon_instance_fields,
     decrease_durability,
     fmt_instance_info,
-    QUALITY_TIERS,
+    quality_label,
     DURABILITY_BY_RARITY,
+    quality_color,
 )
 
 from rpg_effect import (
