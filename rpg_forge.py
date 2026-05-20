@@ -445,7 +445,7 @@ class RerollView(discord.ui.View):
                     self.cost_used, shard_left,
                     self.mode,
                 )
-                embed.title = f"<:Clock:1506452991765647471> |  Hết giờ — {self.w_data.get('emoji', '')} {self.w_data['name']}"
+                embed.title = f"⏰ Hết giờ — {self.w_data.get('emoji', '')} {self.w_data['name']}"
                 await self.message.edit(embed=embed, view=self)
             except Exception:
                 pass   # message có thể đã bị xóa — không crash bot
@@ -543,3 +543,20 @@ async def cmd_reroll(ctx, args: list[str]):
     forge_file = discord.File(FORGE_IMG, filename=FORGE_IMG)
     msg = await ctx.send(file=forge_file, embed=embed, view=view)
     view.message = msg   # lưu ref để on_timeout có thể edit
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  COG
+# ══════════════════════════════════════════════════════════════════════════════
+
+class RPGForge(discord.ext.commands.Cog):
+    def __init__(self, bot: discord.ext.commands.Bot):
+        self.bot = bot
+
+    @discord.ext.commands.command(name="rr")
+    async def reroll(self, ctx, *args):
+        await cmd_reroll(ctx, list(args))
+
+
+async def setup(bot: discord.ext.commands.Bot):
+    await bot.add_cog(RPGForge(bot))
