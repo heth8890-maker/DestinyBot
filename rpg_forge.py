@@ -4,8 +4,6 @@ rpg_forge.py — Lệnh rr (reroll)
 Cú pháp:
     rr <uid | tên vũ khí> passive
     rr <uid | tên vũ khí> quality
-
-UI: 2 embed riêng (vũ khí cũ / vũ khí mới), chuyển qua lại bằng nút.
 """
 
 import asyncio
@@ -20,7 +18,6 @@ from rpg_passive  import roll_passive, resolve_passive, _is_valid_passive
 from rpg_instance import (
     roll_quality, quality_label, quality_color,
     build_weapon_effects,
-    QUALITY_MIN, QUALITY_MAX,
 )
 from rpg_weapon_data import get_weapon_by_id, RARITY_LABEL
 from rpg_core        import remove_item, load_data, save_data, get_user, get_user_lock
@@ -32,11 +29,12 @@ logger = logging.getLogger(__name__)
 #  CONSTANTS
 # ══════════════════════════════════════════════════════════════════════════════
 
-ERR       = "<:X_:1495466670616219819>"
-OK        = "<:Tick:1495466684520206528>"
-RR_ICON   = "<:Rerrol:1506332609452441670>"
-SHARD_ID  = "1999"
-FORGE_IMG = "IMG_forge.png"
+ERR           = "<:X_:1495466670616219819>"
+OK            = "<:Tick:1495466684520206528>"
+RR_ICON       = "<:Rerrol:1506332609452441670>"
+SHARD_ICON    = "<:Enchant_shard:1506136888988405782>"
+SHARD_ID      = "1999"
+FORGE_IMG     = "IMG_forge.png"
 
 RR_COST      = {"passive": (80, 120),  "quality": (130, 162)}
 RR_COST_HALF = {"passive": (40, 60),   "quality": (65,  81)}
@@ -46,7 +44,7 @@ _active_rr: dict[str, str] = {}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  INTERNAL HELPERS (logic — không thay đổi)
+#  INTERNAL HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _rr_parse_target(user: dict, weapon_arg: str):
@@ -103,8 +101,17 @@ def _rr_roll_quality(w_data: dict) -> float:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  EMBED BUILDERS — 2 embed riêng biệt
+#  EMBED BUILDERS
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _passive_field_icon(passive_stored) -> str:
+    """Lấy emoji của passive đã có, fallback về icon mặc định của hệ thống."""
+    if passive_stored and _is_valid_passive(passive_stored):
+        resolved = resolve_passive(passive_stored)
+        if resolved and resolved.get("emoji"):
+            return resolved["emoji"]
+    return SHARD_ICON
+
 
 def _fmt_passive_block(passive_stored) -> str:
     """Hiển thị passive đã resolve. Giữ nguyên giá trị âm."""
@@ -150,7 +157,7 @@ def _build_embed_old(wi: dict, w_data: dict, mode: str) -> discord.Embed:
     current_qual = wi.get("quality", 1.0)
 
     embed = discord.Embed(
-        title=f"🔨 Reroll {title_mode} — {w_data.get('emoji', '')} {w_data['name']}",
+        title=f"{RR_ICON} Reroll {title_mode} — {w_data.get('emoji', '')} {w_data['name']}",
         description=(
             f"UID: `{wi['uid']}`\n"
             f"Độ hiếm: {rarity_str}\n"
@@ -162,14 +169,15 @@ def _build_embed_old(wi: dict, w_data: dict, mode: str) -> discord.Embed:
     embed.set_thumbnail(url=f"attachment://{FORGE_IMG}")
 
     if mode == "passive":
+        field_icon = _passive_field_icon(wi.get("passive"))
         embed.add_field(
-            name="🔮 Nội tại hiện tại",
+            name=f"{field_icon} Nội tại hiện tại",
             value=_fmt_passive_block(wi.get("passive")),
             inline=False,
         )
     else:
         embed.add_field(
-            name="⚗️ Phẩm chất hiện tại",
+            name=f"{SHARD_ICON} Phẩm chất hiện tại",
             value=_fmt_quality_block(wi, w_data),
             inline=False,
         )
@@ -178,24 +186,13 @@ def _build_embed_old(wi: dict, w_data: dict, mode: str) -> discord.Embed:
     return embed
 
 
-def _build_embed_new(
-    wi: dict,
-    w_data: dict,
-    mode: str,
-    new,
-    cost_used: int,
-    shard_left: int,
-    next_cost: int,
-) -> discord.Embed:
+def _build_embed_new(wi: dict, w_data: dict, mode: str, new) -> discord.Embed:
     """Embed 2 — kết quả reroll (chưa xác nhận)."""
     rarity_str = RARITY_LABEL.get(w_data["rarity"], w_data["rarity"])
     title_mode = "Nội Tại" if mode == "passive" else "Phẩm Chất"
 
-    # Màu dựa theo quality mới nếu mode=quality, không thì dùng quality hiện tại
-    if mode == "quality" and isinstance(new, float):
-        color = quality_color(new)
-    else:
-        color = quality_color(wi.get("quality", 1.0))
+    color = quality_color(new if mode == "quality" and isinstance(new, float)
+                          else wi.get("quality", 1.0))
 
     embed = discord.Embed(
         title=f"{RR_ICON} Kết quả Reroll — {w_data.get('emoji', '')} {w_data['name']}",
@@ -210,28 +207,18 @@ def _build_embed_new(
     embed.set_thumbnail(url=f"attachment://{FORGE_IMG}")
 
     if mode == "passive":
+        field_icon = _passive_field_icon(new) if _is_valid_passive(new) else SHARD_ICON
         embed.add_field(
-            name="✨ Nội tại mới",
+            name=f"{field_icon} Nội tại mới",
             value=_fmt_passive_block(new),
             inline=False,
         )
     else:
-        wi_new = {**wi, "quality": new}
         embed.add_field(
-            name="✨ Phẩm chất mới",
-            value=_fmt_quality_block(wi_new, w_data),
+            name=f"{SHARD_ICON} Phẩm chất mới",
+            value=_fmt_quality_block({**wi, "quality": new}, w_data),
             inline=False,
         )
-
-    embed.add_field(
-        name="💎 Chi phí",
-        value=(
-            f"Lần này: **{cost_used}** 🔷\n"
-            f"Còn lại: **{shard_left}** 🔷\n"
-            f"Reroll tiếp: **~{next_cost}** 🔷"
-        ),
-        inline=False,
-    )
 
     embed.set_footer(text=f"{w_data['id']} | Trang 2/2 — Xem trước · Chưa xác nhận")
     return embed
@@ -245,7 +232,7 @@ class RerollView(discord.ui.View):
     """
     View với 2 trang embed:
         page=0 → embed_old  (nút: Hủy | Xem kết quả →)
-        page=1 → embed_new  (nút: ← Bản gốc | Reroll | Xác nhận | Hủy)
+        page=1 → embed_new  (nút: ← Bản gốc | Shard | Reroll | Xác nhận | Hủy)
     """
 
     def __init__(
@@ -263,19 +250,19 @@ class RerollView(discord.ui.View):
         img_attached: bool,
     ):
         super().__init__(timeout=60)
-        self.invoker_id  = invoker_id
-        self.uid         = uid
-        self.wi          = wi
-        self.w_data      = w_data
-        self.mode        = mode
-        self.old         = old
-        self.new         = new
-        self.cost_used   = cost_used
-        self.data        = data
-        self.img_attached = img_attached   # thumbnail chỉ attach được lần đầu
-        self.page        = 0               # 0=bản gốc, 1=kết quả
+        self.invoker_id   = invoker_id
+        self.uid          = uid
+        self.wi           = wi
+        self.w_data       = w_data
+        self.mode         = mode
+        self.old          = old
+        self.new          = new
+        self.cost_used    = cost_used
+        self.data         = data
+        self.img_attached = img_attached
+        self.page         = 0
         self.message: discord.Message | None = None
-        self._click_lock = asyncio.Lock()
+        self._click_lock  = asyncio.Lock()
 
         self._refresh_buttons()
 
@@ -292,39 +279,31 @@ class RerollView(discord.ui.View):
         return get_user(self.uid, self.data)["inv"].get(SHARD_ID, 0)
 
     def _next_cost_preview(self) -> int:
-        """Giá trị trung bình của lần reroll tiếp (hiển thị ước lượng)."""
         lo, hi = RR_COST_HALF[self.mode]
         return (lo + hi) // 2
 
     def _refresh_buttons(self):
-        """Xóa và tạo lại bộ nút tương ứng với page hiện tại."""
         self.clear_items()
         if self.page == 0:
             self.add_item(self._btn_cancel())
             self.add_item(self._btn_next())
         else:
             self.add_item(self._btn_prev())
+            self.add_item(self._btn_shard())
             self.add_item(self._btn_reroll())
             self.add_item(self._btn_confirm())
             self.add_item(self._btn_cancel())
 
     def _current_embed(self) -> discord.Embed:
-        shard_left = self._shard_left()
         if self.page == 0:
             return _build_embed_old(self.wi, self.w_data, self.mode)
-        else:
-            return _build_embed_new(
-                self.wi, self.w_data, self.mode,
-                self.new, self.cost_used, shard_left,
-                self._next_cost_preview(),
-            )
+        return _build_embed_new(self.wi, self.w_data, self.mode, self.new)
 
     async def _edit(self, interaction: discord.Interaction):
-        """Edit message sang embed tương ứng page hiện tại."""
         embed = self._current_embed()
         await interaction.response.edit_message(embed=embed, view=self)
 
-    # ── Button factories (trả về instance, không dùng decorator vì dynamic) ──
+    # ── Button factories ──────────────────────────────────────────────────────
 
     def _btn_next(self):
         btn = discord.ui.Button(
@@ -346,10 +325,20 @@ class RerollView(discord.ui.View):
         btn.callback = self._cb_prev
         return btn
 
+    def _btn_shard(self):
+        btn = discord.ui.Button(
+            label="Shard",
+            emoji=SHARD_ICON,
+            style=discord.ButtonStyle.secondary,
+            custom_id="rr_shard",
+        )
+        btn.callback = self._cb_shard
+        return btn
+
     def _btn_reroll(self):
         btn = discord.ui.Button(
             label="Reroll",
-            emoji="<:Rerrol:1506332609452441670>",
+            emoji=RR_ICON,
             style=discord.ButtonStyle.blurple,
             custom_id="rr_reroll",
         )
@@ -359,7 +348,7 @@ class RerollView(discord.ui.View):
     def _btn_confirm(self):
         btn = discord.ui.Button(
             label="Xác nhận",
-            emoji="<:Tick:1495466684520206528>",
+            emoji=OK,
             style=discord.ButtonStyle.green,
             custom_id="rr_confirm",
         )
@@ -369,7 +358,7 @@ class RerollView(discord.ui.View):
     def _btn_cancel(self):
         btn = discord.ui.Button(
             label="Hủy",
-            emoji="<:X_:1495466670616219819>",
+            emoji=ERR,
             style=discord.ButtonStyle.red,
             custom_id="rr_cancel",
         )
@@ -396,6 +385,18 @@ class RerollView(discord.ui.View):
         self._refresh_buttons()
         await self._edit(interaction)
 
+    async def _cb_shard(self, interaction: discord.Interaction):
+        if not self._check_invoker(interaction):
+            return await interaction.response.send_message(
+                f"{ERR} Chỉ người dùng lệnh mới có thể thao tác.", ephemeral=True
+            )
+        shard_left  = self._shard_left()
+        next_cost   = self._next_cost_preview()
+        await interaction.response.send_message(
+            f"{SHARD_ICON} **{shard_left}** | cần ~**{next_cost}**",
+            ephemeral=True,
+        )
+
     async def _cb_reroll(self, interaction: discord.Interaction):
         if not self._check_invoker(interaction):
             return await interaction.response.send_message(
@@ -412,7 +413,7 @@ class RerollView(discord.ui.View):
                 if not _rr_check_shard(user, cost50):
                     left = user["inv"].get(SHARD_ID, 0)
                     return await interaction.response.send_message(
-                        f"{ERR} Không đủ shard! Cần **{cost50}** 🔷, còn **{left}** 🔷.",
+                        f"{ERR} Không đủ shard! Cần **{cost50}** {SHARD_ICON}, còn **{left}** {SHARD_ICON}.",
                         ephemeral=True,
                     )
 
@@ -420,7 +421,6 @@ class RerollView(discord.ui.View):
                 await save_data(fresh_data, self.uid)
                 self.data = fresh_data
 
-            # Roll mới — KHÔNG ghi vào wi
             if self.mode == "passive":
                 self.new = _rr_roll_passive(self.wi, self.w_data)
             else:
@@ -464,7 +464,7 @@ class RerollView(discord.ui.View):
         _active_rr.pop(self.wi["uid"], None)
 
         embed = self._current_embed()
-        embed.title = f"✅ Đã xác nhận — {self.w_data.get('emoji', '')} {self.w_data['name']}"
+        embed.title = f"{OK} Đã xác nhận — {self.w_data.get('emoji', '')} {self.w_data['name']}"
         embed.color = discord.Color.green().value
         await interaction.response.edit_message(embed=embed, view=self)
 
@@ -479,7 +479,7 @@ class RerollView(discord.ui.View):
         _active_rr.pop(self.wi["uid"], None)
 
         embed = self._current_embed()
-        embed.title = f"🚫 Đã hủy — {self.w_data.get('emoji', '')} {self.w_data['name']}"
+        embed.title = f"{ERR} Đã hủy — {self.w_data.get('emoji', '')} {self.w_data['name']}"
         embed.color = discord.Color.red().value
         await interaction.response.edit_message(embed=embed, view=self)
 
@@ -491,7 +491,7 @@ class RerollView(discord.ui.View):
         if self.message:
             try:
                 embed = self._current_embed()
-                embed.title = f"⏰ Hết giờ — {self.w_data.get('emoji', '')} {self.w_data['name']}"
+                embed.title = f"{RR_ICON} Hết giờ — {self.w_data.get('emoji', '')} {self.w_data['name']}"
                 await self.message.edit(embed=embed, view=self)
             except Exception:
                 pass
@@ -539,7 +539,7 @@ async def cmd_reroll(ctx, args: list[str]):
         if not _rr_check_shard(user, cost):
             left = user["inv"].get(SHARD_ID, 0)
             return await ctx.send(
-                f"{ERR} Không đủ shard! Cần **{cost}** 🔷, bạn còn **{left}** 🔷."
+                f"{ERR} Không đủ shard! Cần **{cost}** {SHARD_ICON}, bạn còn **{left}** {SHARD_ICON}."
             )
 
         old = wi.get(mode)
@@ -553,7 +553,6 @@ async def cmd_reroll(ctx, args: list[str]):
 
         _active_rr[wi["uid"]] = uid
 
-    # Mặc định hiện embed trang 1 (bản gốc)
     embed_old = _build_embed_old(wi, w_data, mode)
 
     view = RerollView(
@@ -569,7 +568,6 @@ async def cmd_reroll(ctx, args: list[str]):
         img_attached=True,
     )
 
-    # Gửi — fallback không thumbnail nếu file ảnh lỗi
     try:
         forge_file = discord.File(FORGE_IMG, filename=FORGE_IMG)
         msg = await ctx.send(file=forge_file, embed=embed_old, view=view)
@@ -589,7 +587,7 @@ class RPGForge(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @commands.command(name="rr")
+    @commands.command(name="reroll", aliases=["rr"])
     async def reroll(self, ctx, *args):
         await cmd_reroll(ctx, list(args))
 
