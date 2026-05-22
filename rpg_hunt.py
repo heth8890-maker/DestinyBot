@@ -12,7 +12,7 @@ GUARANTEES:
     • 1%    → rơi ra crate (sub-roll xác định loại)
     • 1.75% → rơi ra coin (2 000 – 6 500)
 - Tối đa 10 lần bonus / 6 tiếng, tự reset sau mỗi chu kỳ
-- Thông báo bonus gửi là tin nhắn RIÊNG, không gắn vào embed
+- Thông báo bonus gửi là tin nhắn RIÊNG, không gắn vào container
 
 [SLASH COMMANDS]
 - /hunt → hunt bình thường  (plain command, không dùng Group)
@@ -82,6 +82,14 @@ COIN_DROP_CHANCE  = 1.75    # %
 BONUS_MAX         = 10      # tối đa lần bonus mỗi chu kỳ
 BONUS_RESET_SEC   = 6 * 3600  # 6 tiếng
 
+# ─── Treasure item 1099 drop config ─────────────────────────────────────────
+# Lần đầu tiên trong chu kỳ: 30%
+# Các lần sau: tỉ lệ crate_001 * 0.8  (= 69.999 * 0.8 ≈ 55.999%)
+ITEM_1099_DROP_CHANCE_FIRST = 30.0                               # % lần đầu
+ITEM_1099_DROP_CHANCE_BASE  = CRATE_DROP_CHANCE                  # placeholder, được tính sau khi CRATE_POOL defined
+ITEM_1099_AMOUNT_MIN        = 88
+ITEM_1099_AMOUNT_MAX        = 137
+
 # Bảng tỉ lệ crate — tổng = 100%
 # Others cố định: 003=5, 004=2, 006=1, 009=0.001 → tổng = 8.001
 # → 001 + 002 = 91.999
@@ -94,6 +102,10 @@ CRATE_POOL = [
     ("009",  0.001),   # (crate 009) —  ~0%
 ]
 # Tổng: 69.999 + 22 + 5 + 2 + 1 + 0.001 = 100.000 ✓
+
+# Tỉ lệ drop item 1099 từ lần thứ 2 trở đi = 45%
+_crate_001_weight          = next(w for cid, w in CRATE_POOL if cid == "001")
+ITEM_1099_DROP_CHANCE_BASE = 45.0   # % cố định từ lần thứ 2 trở đi
 
 # Tên fallback nếu CRATES chưa load được
 _CRATE_FALLBACK = {
@@ -158,11 +170,18 @@ def _get_bonus_data(user: dict, now: int) -> dict:
     """
     Trả về dict hunt_bonus của user, reset tự động nếu hết chu kỳ.
     Lưu trực tiếp vào user dict (mutate in place).
+    Fields:
+      count       – số lần bonus (crate/coin) đã dùng trong chu kỳ
+      reset_at    – timestamp kết thúc chu kỳ
+      item1099_dropped – True nếu item 1099 đã rơi ít nhất 1 lần trong chu kỳ
     """
-    bonus = user.setdefault("hunt_bonus", {"count": 0, "reset_at": 0})
+    bonus = user.setdefault("hunt_bonus", {"count": 0, "reset_at": 0, "item1099_dropped": False})
     if now >= bonus["reset_at"]:
-        bonus["count"]    = 0
-        bonus["reset_at"] = now + BONUS_RESET_SEC
+        bonus["count"]           = 0
+        bonus["reset_at"]        = now + BONUS_RESET_SEC
+        bonus["item1099_dropped"] = False   # reset flag đầu chu kỳ
+    # Backward-compat: thêm field nếu record cũ chưa có
+    bonus.setdefault("item1099_dropped", False)
     return bonus
 
 
@@ -172,6 +191,19 @@ def _crate_display(crate_id: str) -> tuple[str, str]:
     emoji = info.get("emoji", "📦")
     name  = info.get("name",  f"Crate {crate_id}")
     return emoji, name
+
+
+def _roll_item_1099(bonus: dict) -> int:
+    """
+    Roll xem item 1099 có rơi không trong lượt bonus này.
+    - Lần đầu tiên trong chu kỳ (item1099_dropped == False): tỉ lệ 30%
+    - Các lần sau                                           : tỉ lệ = crate_001 * 0.8 (~55.999%)
+    Trả về số lượng item (88-137) nếu rơi, hoặc 0 nếu không.
+    """
+    chance = ITEM_1099_DROP_CHANCE_FIRST if not bonus["item1099_dropped"] else ITEM_1099_DROP_CHANCE_BASE
+    if random.uniform(0, 100) < chance:
+        return random.randint(ITEM_1099_AMOUNT_MIN, ITEM_1099_AMOUNT_MAX)
+    return 0
 
 
 # ─────────────────────────────────────────────────────────
@@ -250,7 +282,7 @@ async def _run_hunt(
     author_id: int,
     author_mention: str,
     display_name: str,
-    send_fn,          # async (content=, embed=) → None
+    send_fn,          # async (content=, container=) → None
     send_bonus_fn,    # async (content=) → None  (tin nhắn riêng)
 ) -> None:
     uid = str(author_id)
@@ -311,15 +343,15 @@ async def _run_hunt(
                 just_broken = []
                 print(f"⚠️  Warning: durability decrease failed: {e}")
 
-            # ── Build embed ─────────────────────────────────────
+            # ── Build container ─────────────────────────────────────
             try:
-                embed = discord.Embed(
+                container = discord.Embed(
                     title=f"{SKULL_EMOJI}  {display_name} đi săn!",
-                    color=0x4CAF50 if found else 0x9E9E9E,
+
                 )
 
                 if not found:
-                    embed.description = "Bạn không tìm được gì lần này..."
+                    container.description = "Bạn không tìm được gì lần này..."
                 else:
                     lines = []
                     for item in found:
@@ -340,18 +372,18 @@ async def _run_hunt(
                                 lines.append(
                                     f"{item['emoji']}  **{item.get('name', 'Unknown')}** (add error)"
                                 )
-                    embed.description = "\n".join(lines) if lines else "_Lỗi hiển thị vật phẩm_"
+                    container.description = "\n".join(lines) if lines else "_Lỗi hiển thị vật phẩm_"
 
                 # ── Equipped field ──────────────────────────────
                 try:
-                    embed.add_field(
+                    container.add_field(
                         name=f"{SWORD_EMOJI} Vũ khí đang trang bị",
                         value=_equipped_display(equipped, user),
                         inline=False,
                     )
                 except Exception as e:
                     print(f"⚠️  Warning: equipped display failed: {e}")
-                    embed.add_field(
+                    container.add_field(
                         name=f"{SWORD_EMOJI} Vũ khí đang trang bị",
                         value="_Error displaying weapons_",
                         inline=False,
@@ -373,7 +405,7 @@ async def _run_hunt(
                             name    = w["name"]  if w else str(wid)
                             em      = w["emoji"] if w else "⚔️"
                             broken_lines.append(f"💔 {em} ~~**{name}**~~ vừa bị **Broken**!")
-                        embed.add_field(
+                        container.add_field(
                             name="⚠️ Vũ khí hỏng",
                             value="\n".join(broken_lines),
                             inline=False,
@@ -385,16 +417,16 @@ async def _run_hunt(
                 try:
                     active_fx = [k for k, v in effects_full.items() if v]
                     if active_fx:
-                        embed.set_footer(
+                        container.set_footer(
                             text="<:Effect:1495466103047061679> Hiệu ứng: " + ", ".join(active_fx[:5])
                         )
                     else:
-                        embed.set_footer(
+                        container.set_footer(
                             text=f"Cooldown: {HUNT_CD_SEC}s  |  Trang bị weapon để tăng hiệu quả!"
                         )
                 except Exception as e:
                     print(f"⚠️  Warning: footer failed: {e}")
-                    embed.set_footer(text=f"Cooldown: {HUNT_CD_SEC}s")
+                    container.set_footer(text=f"Cooldown: {HUNT_CD_SEC}s")
 
             except Exception as e:
                 return await send_fn(content=f"{ERR} | Failed to build response: `{e}`")
@@ -445,6 +477,30 @@ async def _run_hunt(
                             f"(reset sau {reset_in_min} phút)"
                         )
 
+                # ── Item 1099 drop (độc lập, không dùng BONUS_MAX) ──
+                item1099_qty = _roll_item_1099(bonus)
+                if item1099_qty > 0:
+                    try:
+                        item_info = get_item_by_id("1099")
+                        item_emoji = item_info.get("emoji", "🔮") if item_info else "🔮"
+                        item_name  = item_info.get("name",  "Item 1099") if item_info else "Item 1099"
+                        for _ in range(item1099_qty):
+                            add_item(user, "1099")
+                        bonus["item1099_dropped"] = True
+                        reset_in_min_1099 = max(0, (bonus["reset_at"] - now) // 60)
+                        item1099_msg = (
+                            f"<:2925:1495277191867400284> | {author_mention} Kho báu rơi ra "
+                            f"**{item1099_qty}x** {item_emoji} **{item_name}**!\n"
+                            f"-# (reset sau {reset_in_min_1099} phút)"
+                        )
+                        # Gộp vào bonus_msg hoặc gửi riêng
+                        if bonus_msg:
+                            bonus_msg = bonus_msg + "\n" + item1099_msg
+                        else:
+                            bonus_msg = item1099_msg
+                    except Exception as e:
+                        print(f"⚠️  Warning: item 1099 add failed: {e}")
+
             except Exception as e:
                 print(f"⚠️  Warning: bonus roll failed: {e}")
 
@@ -478,7 +534,7 @@ async def _run_hunt(
 
             # ── Send ────────────────────────────────────────────
             try:
-                await send_fn(embed=embed)
+                await send_fn(container=container)
             except Exception as e:
                 return await send_fn(content=f"{ERR} | Failed to send response: `{e}`")
 
@@ -552,7 +608,7 @@ class RPGHunt(commands.Cog):
             author_id      = ctx.author.id,
             author_mention = ctx.author.mention,
             display_name   = ctx.author.display_name,
-            send_fn        = lambda content=None, embed=None, **_: ctx.send(content=content, embed=embed),
+            send_fn        = lambda content=None, container=None, **_: ctx.send(content=content, container=container),
             send_bonus_fn  = lambda content=None, **_: ctx.send(content=content),
         )
 
@@ -578,8 +634,8 @@ class RPGHunt(commands.Cog):
         """/hunt"""
         await interaction.response.defer()
 
-        async def _send(content=None, embed=None, **_):
-            await interaction.followup.send(content=content, embed=embed)
+        async def _send(content=None, container=None, **_):
+            await interaction.followup.send(content=content, container=container)
 
         async def _send_bonus(content=None, **_):
             await interaction.followup.send(content=content)

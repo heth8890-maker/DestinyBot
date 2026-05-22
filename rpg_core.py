@@ -1238,6 +1238,8 @@ def add_weapon(user: dict, base_id: str, make_unique: bool = True) -> str:
 
     if not make_unique:
         user["weapons"].append(base_id)
+        if base_id not in user.setdefault("seen_weapons", []):
+            user["seen_weapons"].append(base_id)
         return base_id
 
     weapon_data = get_weapon_by_id(base_id)
@@ -1261,6 +1263,8 @@ def add_weapon(user: dict, base_id: str, make_unique: bool = True) -> str:
         new_uid = f"{base_id}-{suffix}"
 
     user["weapons"].append(new_uid)
+    if base_id not in user.setdefault("seen_weapons", []):
+        user["seen_weapons"].append(base_id)
 
     existing_wi_uids = {
         wi["uid"] for wi in user.get("weapon_instances", [])

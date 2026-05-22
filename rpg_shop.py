@@ -117,6 +117,46 @@ _CUSTOM_DROPS: dict[str, str] = {
 
 CRATE_PAGE_SIZE = 2   # số crate hiển thị mỗi trang (cho crate thường)
 
+# ★ Bảng map weapon_id → icon ẩn (chưa từng sở hữu)
+WEAPON_HIDE_ICONS: dict[str, str] = {
+    "463":  "<:463_hide:1507357616475607182>",
+    "465":  "<:465_hide:1507357618744594534>",
+    "467":  "<:467_hide:1507357623656382484>",
+    "464":  "<:464_hide:1507357626978275398>",
+    "3708": "<:3708_hide:1507357638776586530>",
+    "3695": "<:3695_hide:1507357643168284714>",
+    "4510": "<:4510_hide:1507357647333101568>",
+    "5594": "<:5594_hide:1507357650604789811>",
+    "5591": "<:5591_hide:1507357664571822100>",
+    "5593": "<:5593_hide:1507357666756788364>",
+    "4511": "<:4511_hide:1507357676517064774>",
+    "466":  "<:466_hide:1507357680233353298>",
+    "5001": "<:5001_hide:1507357683106451596>",
+    "5003": "<:5003_hide:1507357685748596786>",
+    "4541": "<:4541_hide:1507357689213096138>",
+    "3696": "<:3696_hide:1507357691469889587>",
+    "3706": "<:3706_hide:1507358640430907422>",
+    "3697": "<:3697_hide:1507358642981179493>",
+    "5610": "<:5610_hide:1507358649830473799>",
+    "5612": "<:5612_hide:1507358652812754985>",
+    "4509": "<:4509_hide:1507358656340033756>",
+    "5611": "<:5611_hide:1507358661549232198>",
+    "5595": "<:5595_hide:1507358665428963408>",
+    "5002": "<:5002_hide:1507385317278355476>",
+    "4518": "<:4518_hide:1507385320084344973>",
+    "4529": "<:4529_hide:1507385328229416980>",
+}
+
+
+def _masked_name(w: dict) -> str:
+    """Trả về tên weapon hoặc ẩn nếu là legendary/mythical."""
+    rarity = w.get("rarity", "")
+    if rarity == "mythical":
+        return "?????"
+    if rarity == "legendary":
+        return "???"
+    return _SHORT.get(w["name"], w["name"])
+
 # ★ Nhóm crate hiển thị INLINE trên cùng 1 trang (hàng ngang)
 # Thêm/bớt ID tại đây nếu muốn gộp thêm crate vào trang đặc biệt
 _INLINE_GROUP: list[str] = ["006", "007", "008"]
@@ -170,82 +210,141 @@ def _total_crate_pages() -> int:
     return len(_build_crate_pages())
 
 
-def _build_crate_page_embed(page: int) -> discord.Embed:
-    """Tạo embed cho trang <page> của shop crate (0-indexed)."""
+def _build_crate_page_container(
+    page: int,
+    user_weapons: set[str] | None = None,
+) -> discord.ui.Container:
+    """
+    Tạo Container (Components v2) cho trang <page> của shop crate (0-indexed).
+    - user_weapons: set các base_id đã từng sở hữu. None = ẩn tất cả hide icon.
+    - Tên weapon legendary/mythical luôn bị ẩn thành ???/?????.
+    """
     pages       = _build_crate_pages()
     total_pages = len(pages)
     page        = max(0, min(page, total_pages - 1))
     page_items  = pages[page]
 
-    # Trang này có phải trang inline không?
-    is_inline_page = all(crate_id in _INLINE_GROUP for crate_id, _ in page_items)
+    children: list = []
 
-    embed = discord.Embed(
-        title="<:Shop:1495464183037165763> Shop Crate",
-        description=(
+    # ── Header ──────────────────────────────────────────────
+    children.append(discord.ui.TextDisplay(
+        content=(
+            "# <:Shop:1495464183037165763> Shop Crate\n"
             "Mua crate để nhận weapon ngẫu nhiên!\n"
             "Trang bị weapon giúp: tăng ô hunt, giảm cooldown, "
             "tăng % giá bán, tăng tỉ lệ rare.\n\n"
-            f" PAGE **{page + 1}** / **{total_pages}**"
-        ),
-        color=0xFF5722,
-    )
+            f"PAGE **{page + 1}** / **{total_pages}**"
+        )
+    ))
+    children.append(discord.ui.Separator(divider=True))
 
-    for crate_id, crate in page_items:
+    # ── Từng crate trên trang ────────────────────────────────
+    for idx, (crate_id, crate) in enumerate(page_items):
+        # Tên crate + giá
+        price_text = (
+            "**Không bán** _(drop từ Crate of Paradise 006)_"
+            if crate_id == "009"
+            else f"**{crate['price']:,}** {COIN_EMOJI}"
+        )
+        children.append(discord.ui.TextDisplay(
+            content=(
+                f"### {crate['emoji']} {crate['name']}  |  ID: `{crate_id}`\n"
+                f"<:2245:1493575277605949480> Giá: {price_text}\n\n"
+                f"**Drop rate:**"
+            )
+        ))
+        children.append(discord.ui.Separator(
+            divider=False,
+            spacing=discord.SeparatorSpacing.small,
+        ))
+
         if crate_id in _CUSTOM_DROPS:
-            drop_text = _CUSTOM_DROPS[crate_id]
+            # Custom drop: 1 TextDisplay toàn bộ
+            children.append(discord.ui.TextDisplay(content=_CUSTOM_DROPS[crate_id]))
         else:
             pool = _CRATE_POOL.get(crate_id, WEAPONS)
-            # Crate 100% (pool chỉ 1 weapon): hiển thị gọn trên 1 dòng
             if len(pool) == 1:
-                w = pool[0]
-                drop_text = (
-                    f"{w['emoji']} **{_SHORT.get(w['name'], w['name'])}**"
-                    f" — {w['chance']}%  _{_rarity_tier(w['rarity'])}_"
-                )
+                w         = pool[0]
+                weapon_id = w["id"]
+                if user_weapons is not None and weapon_id in user_weapons:
+                    emoji = w["emoji"]
+                else:
+                    emoji = WEAPON_HIDE_ICONS.get(weapon_id, w["emoji"])
+                name = _masked_name(w)
+                children.append(discord.ui.TextDisplay(
+                    content=f"{emoji} **{name}** — {w['chance']}%  _{_rarity_tier(w['rarity'])}_"
+                ))
             else:
-                drop_text = "\n".join(
-                    f"  {w['emoji']} **{_SHORT.get(w['name'], w['name'])}** "
-                    f"— {w['chance']}%  _{_rarity_tier(w['rarity'])}_"
-                    for w in pool
-                )
+                for w_idx, w in enumerate(pool):
+                    weapon_id = w["id"]
+                    if user_weapons is not None and weapon_id in user_weapons:
+                        emoji = w["emoji"]
+                    else:
+                        emoji = WEAPON_HIDE_ICONS.get(weapon_id, w["emoji"])
+                    name = _masked_name(w)
+                    children.append(discord.ui.TextDisplay(
+                        content=(
+                            f"  {emoji} **{name}** "
+                            f"— {w['chance']}%  _{_rarity_tier(w['rarity'])}_"
+                        )
+                    ))
+                    # Separator nhỏ giữa các weapon (trừ weapon cuối)
+                    if w_idx < len(pool) - 1:
+                        children.append(discord.ui.Separator(
+                            divider=False,
+                            spacing=discord.SeparatorSpacing.small,
+                        ))
 
-        embed.add_field(
-            name=f"{crate['emoji']} {crate['name']}  |  ID: `{crate_id}`",
-            value=(
-                f"<:2245:1493575277605949480> Giá: "
-                + (
-                    "**Không bán** _(drop từ Crate of Paradise 006)_"
-                    if crate_id == "009"
-                    else f"**{crate['price']:,}** {COIN_EMOJI}"
-                )
-                + "\n\n**Drop rate:**\n" + drop_text
-            ),
-            inline=is_inline_page,  # inline=True → hàng ngang; False → hàng dọc
-        )
+        # Separator ngang giữa các crate (trừ crate cuối trên trang)
+        if idx < len(page_items) - 1:
+            children.append(discord.ui.Separator(divider=True))
 
-    embed.set_footer(text="dtn crate buy <id> [amount]  |  dtn crate open <id>")
-    return embed
+    # ── Footer ──────────────────────────────────────────────
+    children.append(discord.ui.Separator(divider=True))
+    children.append(discord.ui.TextDisplay(
+        content="-# dtn crate buy <id> [amount]  |  dtn crate open <id>"
+    ))
+
+    return discord.ui.Container(children=children)
 
 
 class CrateShopView(discord.ui.View):
     """
-    View phân trang cho shop crate.
-    Tự động disable nút khi ở trang đầu/cuối.
-    Timeout 60s — sau đó các nút bị khoá tự động.
-    Chỉ author gốc mới được bấm nút.
+    View phân trang cho shop crate (Components v2).
+    Layout nút: [◀ Trước]  [page/total (disabled)]  [Tiếp ▶]
+    Timeout 60s. Chỉ author gốc mới được bấm nút.
     """
 
-    def __init__(self, page: int = 0, author_id: int | None = None):
+    def __init__(
+        self,
+        page: int = 0,
+        author_id: int | None = None,
+        user_weapons: set[str] | None = None,
+    ):
         super().__init__(timeout=60)
-        self.page      = max(0, min(page, _total_crate_pages() - 1))
-        self.author_id = author_id
+        self.page         = max(0, min(page, _total_crate_pages() - 1))
+        self.author_id    = author_id
+        self.user_weapons = user_weapons
+
+        # Nút trang (disabled, chỉ hiển thị)
+        self.page_btn = discord.ui.Button(
+            label=self._page_label(),
+            style=discord.ButtonStyle.secondary,
+            disabled=True,
+        )
+        self.add_item(self.prev_btn)
+        self.add_item(self.page_btn)
+        self.add_item(self.next_btn)
         self._sync_buttons()
+
+    def _page_label(self) -> str:
+        return f"{self.page + 1} / {_total_crate_pages()}"
 
     def _sync_buttons(self) -> None:
         total = _total_crate_pages()
         self.prev_btn.disabled = (self.page == 0)
         self.next_btn.disabled = (self.page >= total - 1)
+        self.page_btn.label    = self._page_label()
 
     async def _check_author(self, interaction: discord.Interaction) -> bool:
         if self.author_id and interaction.user.id != self.author_id:
@@ -261,9 +360,8 @@ class CrateShopView(discord.ui.View):
             return
         self.page -= 1
         self._sync_buttons()
-        await interaction.response.edit_message(
-            embed=_build_crate_page_embed(self.page), view=self
-        )
+        container = _build_crate_page_container(self.page, user_weapons=self.user_weapons)
+        await interaction.response.edit_message(view=self)
 
     @discord.ui.button(label="Tiếp ▶", style=discord.ButtonStyle.primary)
     async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -271,9 +369,8 @@ class CrateShopView(discord.ui.View):
             return
         self.page += 1
         self._sync_buttons()
-        await interaction.response.edit_message(
-            embed=_build_crate_page_embed(self.page), view=self
-        )
+        container = _build_crate_page_container(self.page, user_weapons=self.user_weapons)
+        await interaction.response.edit_message(view=self)
 
     async def on_timeout(self) -> None:
         for item in self.children:
@@ -294,11 +391,23 @@ def _build_shop_help_text() -> str:
     )
 
 
-async def _do_shop_crate(send_fn, author_id: int | None = None):
-    """Gửi embed shop crate. send_fn nhận (embed=, view=)."""
-    view  = CrateShopView(page=0, author_id=author_id)
-    embed = _build_crate_page_embed(0)
-    await send_fn(embed=embed, view=view)
+async def _do_shop_crate(
+    send_fn,
+    author_id: int | None = None,
+    interaction: discord.Interaction | None = None,
+):
+    """Gửi shop crate dùng Components v2. send_fn nhận (view=, flags=)."""
+    user_weapons: set[str] | None = None
+    if interaction is not None:
+        user_data, _ = get_user(str(interaction.user.id))
+        user_weapons = set(user_data.get("seen_weapons", []))
+
+    view      = CrateShopView(page=0, author_id=author_id, user_weapons=user_weapons)
+    container = _build_crate_page_container(0, user_weapons=user_weapons)
+    await send_fn(
+        view=view,
+        flags=discord.MessageFlags(is_components_v2=True),
+    )
 
 
 def _build_shop_item_embeds() -> list[discord.Embed]:
@@ -426,7 +535,7 @@ class RPGShop(commands.Cog):
     # ─── CRATE ───
     @shop.command(name="crate")
     async def shop_crate(self, ctx):
-        await _do_shop_crate(ctx.send, author_id=ctx.author.id)
+        await _do_shop_crate(ctx.send, author_id=ctx.author.id, interaction=None)
 
     # ─── ITEM ───
     @shop.command(name="item")
@@ -463,9 +572,14 @@ class RPGShop(commands.Cog):
 
     @shop_slash.command(name="crate", description="Xem shop crate và bảng drop rate")
     async def slash_shop_crate(self, interaction: discord.Interaction):
-        view  = CrateShopView(page=0, author_id=interaction.user.id)
-        embed = _build_crate_page_embed(0)
-        await interaction.response.send_message(embed=embed, view=view)
+        user_data, _ = get_user(str(interaction.user.id))
+        user_weapons = set(user_data.get("seen_weapons", []))
+        view      = CrateShopView(page=0, author_id=interaction.user.id, user_weapons=user_weapons)
+        container = _build_crate_page_container(0, user_weapons=user_weapons)
+        await interaction.response.send_message(
+            view=view,
+            flags=discord.MessageFlags(is_components_v2=True),
+        )
 
     @shop_slash.command(name="item", description="Xem danh sách vật phẩm và giá bán")
     async def slash_shop_item(self, interaction: discord.Interaction):
