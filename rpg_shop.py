@@ -60,6 +60,10 @@ from rpg_game import (
 from cash import update_balance_safe, get_balance
 
 
+# Components v2 flag (bit 15 = 32768)
+_cv2_flags = discord.MessageFlags()
+_cv2_flags.value = 1 << 15
+
 # ═══════════════════════════════════════════════════════════
 # SHOP CRATE — CONFIG (scalable pagination)
 # ─────────────────────────────────────────────────────────
@@ -238,7 +242,7 @@ def _build_crate_page_container(
             f"PAGE **{page + 1}** / **{total_pages}**"
         )
     ))
-    children.append(discord.ui.Separator(divider=True))
+    children.append(discord.ui.Separator(visible=True))
 
     # ── Từng crate trên trang ────────────────────────────────
     for idx, (crate_id, crate) in enumerate(page_items):
@@ -256,7 +260,7 @@ def _build_crate_page_container(
             )
         ))
         children.append(discord.ui.Separator(
-            divider=False,
+            visible=False,
             spacing=discord.SeparatorSpacing.small,
         ))
 
@@ -293,16 +297,16 @@ def _build_crate_page_container(
                     # Separator nhỏ giữa các weapon (trừ weapon cuối)
                     if w_idx < len(pool) - 1:
                         children.append(discord.ui.Separator(
-                            divider=False,
+                            visible=False,
                             spacing=discord.SeparatorSpacing.small,
                         ))
 
         # Separator ngang giữa các crate (trừ crate cuối trên trang)
         if idx < len(page_items) - 1:
-            children.append(discord.ui.Separator(divider=True))
+            children.append(discord.ui.Separator(visible=True))
 
     # ── Footer ──────────────────────────────────────────────
-    children.append(discord.ui.Separator(divider=True))
+    children.append(discord.ui.Separator(visible=True))
     children.append(discord.ui.TextDisplay(
         content="-# dtn crate buy <id> [amount]  |  dtn crate open <id>"
     ))
@@ -311,7 +315,7 @@ def _build_crate_page_container(
     if view is not None:
         children.append(discord.ui.ActionRow(*view.children))
 
-    return discord.ui.Container(children=children)
+    return discord.ui.Container(*children)
 
 
 class CrateShopView(discord.ui.View):
@@ -369,7 +373,7 @@ class CrateShopView(discord.ui.View):
         container = _build_crate_page_container(self.page, user_weapons=self.user_weapons, view=self)
         await interaction.response.edit_message(
             components=[container],
-            flags=discord.MessageFlags(is_components_v2=True),
+            flags=_cv2_flags,
         )
 
     @discord.ui.button(label="Tiếp ▶", style=discord.ButtonStyle.primary)
@@ -381,7 +385,7 @@ class CrateShopView(discord.ui.View):
         container = _build_crate_page_container(self.page, user_weapons=self.user_weapons, view=self)
         await interaction.response.edit_message(
             components=[container],
-            flags=discord.MessageFlags(is_components_v2=True),
+            flags=_cv2_flags,
         )
 
     async def on_timeout(self) -> None:
@@ -418,7 +422,7 @@ async def _do_shop_crate(
     container = _build_crate_page_container(0, user_weapons=user_weapons, view=view)
     await send_fn(
         components=[container],
-        flags=discord.MessageFlags(is_components_v2=True),
+        flags=_cv2_flags,
     )
 
 
@@ -473,7 +477,7 @@ def _build_weapon_shop_container() -> discord.ui.Container:
             "Dùng `dtn shop buy <slot>` hoặc `/shop buy` để mua."
         )
     ))
-    children.append(discord.ui.Separator(divider=True))
+    children.append(discord.ui.Separator(visible=True))
 
     # ── Danh sách slot ────────────────────────────────────────
     slots = shop.get("slots", [])
@@ -492,17 +496,17 @@ def _build_weapon_shop_container() -> discord.ui.Container:
         ))
         if i < len(slots) - 1:
             children.append(discord.ui.Separator(
-                divider=False,
+                visible=False,
                 spacing=discord.SeparatorSpacing.small,
             ))
 
     # ── Footer ────────────────────────────────────────────────
-    children.append(discord.ui.Separator(divider=True))
+    children.append(discord.ui.Separator(visible=True))
     children.append(discord.ui.TextDisplay(
         content="-# dtn shop buy <slot>  |  /shop buy slot:<số>"
     ))
 
-    return discord.ui.Container(children=children)
+    return discord.ui.Container(*children)
 
 
 def _build_event_embed() -> discord.Embed:
@@ -559,7 +563,7 @@ class RPGShop(commands.Cog):
         """Xem 10 weapon đang bán (reset mỗi 6 tiếng)."""
         await ctx.send(
             components=[_build_weapon_shop_container()],
-            flags=discord.MessageFlags(is_components_v2=True),
+            flags=_cv2_flags,
         )
 
     # ─── BUY (weapon shop) ───
@@ -607,7 +611,7 @@ class RPGShop(commands.Cog):
     async def slash_shop_weapon(self, interaction: discord.Interaction):
         await interaction.response.send_message(
             components=[_build_weapon_shop_container()],
-            flags=discord.MessageFlags(is_components_v2=True),
+            flags=_cv2_flags,
         )
 
     @shop_slash.command(name="buy", description="Mua weapon từ slot trong Weapon Shop")

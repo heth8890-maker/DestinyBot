@@ -386,7 +386,7 @@ class RPGWeapon(commands.Cog):
 
                 # [4] Separator
                 children.append(discord.ui.Separator(
-                    divider=True,
+                    visible=True,
                     spacing=discord.SeparatorSpacing.small,
                 ))
 
@@ -396,7 +396,7 @@ class RPGWeapon(commands.Cog):
                         "⚔️ **Đang trang bị**\n\n" + "\n\n".join(equipped_blocks)
                     ))
                     children.append(discord.ui.Separator(
-                        divider=True,
+                        visible=True,
                         spacing=discord.SeparatorSpacing.small,
                     ))
 
@@ -799,13 +799,13 @@ class RPGWeapon(commands.Cog):
                 if slot_data:
                     for _, _, block in slot_data:
                         children.append(discord.ui.Separator(
-                            divider=True,
+                            visible=True,
                             spacing=discord.SeparatorSpacing.small,
                         ))
                         children.append(discord.ui.TextDisplay(block))
                 else:
                     children.append(discord.ui.Separator(
-                        divider=True,
+                        visible=True,
                         spacing=discord.SeparatorSpacing.small,
                     ))
                     children.append(discord.ui.TextDisplay("-# Chưa trang bị vũ khí nào."))
