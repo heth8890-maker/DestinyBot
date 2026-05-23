@@ -213,11 +213,13 @@ def _total_crate_pages() -> int:
 def _build_crate_page_container(
     page: int,
     user_weapons: set[str] | None = None,
+    view: "CrateShopView | None" = None,
 ) -> discord.ui.Container:
     """
     Tạo Container (Components v2) cho trang <page> của shop crate (0-indexed).
     - user_weapons: set các base_id đã từng sở hữu. None = ẩn tất cả hide icon.
     - Tên weapon legendary/mythical luôn bị ẩn thành ???/?????.
+    - view: nếu truyền vào, buttons sẽ được nhúng vào ActionRow cuối container.
     """
     pages       = _build_crate_pages()
     total_pages = len(pages)
@@ -305,6 +307,10 @@ def _build_crate_page_container(
         content="-# dtn crate buy <id> [amount]  |  dtn crate open <id>"
     ))
 
+    # Nhúng buttons của View vào ActionRow bên trong container (bắt buộc với Components v2)
+    if view is not None:
+        children.append(discord.ui.ActionRow(*view.children))
+
     return discord.ui.Container(children=children)
 
 
@@ -360,8 +366,11 @@ class CrateShopView(discord.ui.View):
             return
         self.page -= 1
         self._sync_buttons()
-        container = _build_crate_page_container(self.page, user_weapons=self.user_weapons)
-        await interaction.response.edit_message(view=self)
+        container = _build_crate_page_container(self.page, user_weapons=self.user_weapons, view=self)
+        await interaction.response.edit_message(
+            components=[container],
+            flags=discord.MessageFlags(is_components_v2=True),
+        )
 
     @discord.ui.button(label="Tiếp ▶", style=discord.ButtonStyle.primary)
     async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -369,8 +378,11 @@ class CrateShopView(discord.ui.View):
             return
         self.page += 1
         self._sync_buttons()
-        container = _build_crate_page_container(self.page, user_weapons=self.user_weapons)
-        await interaction.response.edit_message(view=self)
+        container = _build_crate_page_container(self.page, user_weapons=self.user_weapons, view=self)
+        await interaction.response.edit_message(
+            components=[container],
+            flags=discord.MessageFlags(is_components_v2=True),
+        )
 
     async def on_timeout(self) -> None:
         for item in self.children:
@@ -403,9 +415,9 @@ async def _do_shop_crate(
         user_weapons = set(user_data.get("seen_weapons", []))
 
     view      = CrateShopView(page=0, author_id=author_id, user_weapons=user_weapons)
-    container = _build_crate_page_container(0, user_weapons=user_weapons)
+    container = _build_crate_page_container(0, user_weapons=user_weapons, view=view)
     await send_fn(
-        view=view,
+        components=[container],
         flags=discord.MessageFlags(is_components_v2=True),
     )
 
@@ -442,56 +454,55 @@ def _build_shop_item_embeds() -> list[discord.Embed]:
     return _paginate_fields(fields, title=title, description=desc, color=0x5865F2, footer=footer)
 
 
-def _build_weapon_shop_embeds() -> list[discord.Embed]:
-    """Trả về danh sách embed weapon shop (dùng chung cho prefix & slash)."""
+def _build_weapon_shop_container() -> discord.ui.Container:
+    """
+    Tạo Container (Components v2) cho weapon shop — 1 trang duy nhất, không có effect.
+    Separator ngang chia đầu/cuối, Separator nhỏ giữa các slot.
+    """
     shop      = load_weapon_shop()
     remaining = seconds_to_shop_reset()
     h, m      = divmod(remaining // 60, 60)
 
-    desc = (
-        f"⏳️ |  Reset sau **{h}h {m}m**  •  Dùng `dtn shop buy <slot>` hoặc `/shop buy` để mua.\n"
-        f"<:Coin:1495831576397742241> |  Giá = base × (100% − drop rate) × 80%"
-    )
-    title = "<:Hamer:1495462570469888069> |  Weapon Shop"
+    children: list = []
 
-    slot_fields: list[tuple] = []
-    for s in shop["slots"]:
-        w             = get_weapon_by_id(s["weapon_id"])
-        effects       = w.get("effects", {}) if w else {}
-        current_emoji = w.get("emoji", s['emoji']) if w else s['emoji']
-        eff_str       = " | ".join(
-            fmt_effect_val(k, v) for k, v in effects.items()
-        ) or "—"
-        rarity_e = _rarity_tier(s["rarity"])
-        slot_fields.append((
-            f"`[{s['slot']:02d}]` {current_emoji} {s['name']}  {rarity_e}",
-            (
-                f"<:2245:1493575277605949480> | **{s['price']:,}** {COIN_EMOJI}  "
-                f"_(drop rate: {s['drop_rate']}%)_\n"
-                f"ID: `{s['weapon_id']}`\n"
-                f"<:Effect:1495466103047061679> {eff_str}"
-            ),
-            True,
-        ))
-
-    _SLOTS_PER_PAGE = 6
-    chunks = [
-        slot_fields[i : i + _SLOTS_PER_PAGE]
-        for i in range(0, len(slot_fields), _SLOTS_PER_PAGE)
-    ]
-    total  = len(chunks)
-    embeds = []
-    for i, chunk in enumerate(chunks):
-        page_tag = f" • Trang {i + 1}/{total}" if total > 1 else ""
-        embed = discord.Embed(
-            title=title + page_tag,
-            description=desc,
-            color=0xE74C3C,
+    # ── Header ────────────────────────────────────────────────
+    children.append(discord.ui.TextDisplay(
+        content=(
+            "# <:Hamer:1495462570469888069> Weapon Shop\n"
+            f"⏳ Reset sau **{h}h {m}m**  •  "
+            "Dùng `dtn shop buy <slot>` hoặc `/shop buy` để mua."
         )
-        for fname, fvalue, finline in chunk:
-            embed.add_field(name=fname, value=fvalue, inline=finline)
-        embeds.append(embed)
-    return embeds
+    ))
+    children.append(discord.ui.Separator(divider=True))
+
+    # ── Danh sách slot ────────────────────────────────────────
+    slots = shop.get("slots", [])
+    for i, s in enumerate(slots):
+        w             = get_weapon_by_id(s["weapon_id"])
+        current_emoji = w.get("emoji", s["emoji"]) if w else s["emoji"]
+        rarity_e      = _rarity_tier(s["rarity"])
+
+        children.append(discord.ui.TextDisplay(
+            content=(
+                f"`[{s['slot']:02d}]` {current_emoji} **{s['name']}** — {rarity_e}\n"
+                f"<:2245:1493575277605949480> **{s['price']:,}** {COIN_EMOJI}"
+                f"  |  📉 Drop rate: **{s['drop_rate']}%**"
+                f"  |  ID: `{s['weapon_id']}`"
+            )
+        ))
+        if i < len(slots) - 1:
+            children.append(discord.ui.Separator(
+                divider=False,
+                spacing=discord.SeparatorSpacing.small,
+            ))
+
+    # ── Footer ────────────────────────────────────────────────
+    children.append(discord.ui.Separator(divider=True))
+    children.append(discord.ui.TextDisplay(
+        content="-# dtn shop buy <slot>  |  /shop buy slot:<số>"
+    ))
+
+    return discord.ui.Container(children=children)
 
 
 def _build_event_embed() -> discord.Embed:
@@ -546,7 +557,10 @@ class RPGShop(commands.Cog):
     @shop.command(name="weapon")
     async def shop_weapon(self, ctx):
         """Xem 10 weapon đang bán (reset mỗi 6 tiếng)."""
-        await _send_paged(ctx, _build_weapon_shop_embeds())
+        await ctx.send(
+            components=[_build_weapon_shop_container()],
+            flags=discord.MessageFlags(is_components_v2=True),
+        )
 
     # ─── BUY (weapon shop) ───
     @shop.command(name="buy")
@@ -572,13 +586,10 @@ class RPGShop(commands.Cog):
 
     @shop_slash.command(name="crate", description="Xem shop crate và bảng drop rate")
     async def slash_shop_crate(self, interaction: discord.Interaction):
-        user_data, _ = get_user(str(interaction.user.id))
-        user_weapons = set(user_data.get("seen_weapons", []))
-        view      = CrateShopView(page=0, author_id=interaction.user.id, user_weapons=user_weapons)
-        container = _build_crate_page_container(0, user_weapons=user_weapons)
-        await interaction.response.send_message(
-            view=view,
-            flags=discord.MessageFlags(is_components_v2=True),
+        await _do_shop_crate(
+            interaction.response.send_message,
+            author_id=interaction.user.id,
+            interaction=interaction,
         )
 
     @shop_slash.command(name="item", description="Xem danh sách vật phẩm và giá bán")
@@ -594,14 +605,10 @@ class RPGShop(commands.Cog):
 
     @shop_slash.command(name="weapon", description="Xem 10 weapon đang bán (reset mỗi 6 tiếng)")
     async def slash_shop_weapon(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        embeds = _build_weapon_shop_embeds()
-        if not embeds:
-            await interaction.followup.send("Weapon shop hiện trống.", ephemeral=True)
-            return
-        await interaction.followup.send(embed=embeds[0])
-        for e in embeds[1:]:
-            await interaction.followup.send(embed=e)
+        await interaction.response.send_message(
+            components=[_build_weapon_shop_container()],
+            flags=discord.MessageFlags(is_components_v2=True),
+        )
 
     @shop_slash.command(name="buy", description="Mua weapon từ slot trong Weapon Shop")
     @app_commands.describe(slot="Số thứ tự slot (xem /shop weapon)")

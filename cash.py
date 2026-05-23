@@ -22,6 +22,11 @@ from rpg_core import add_item, CRATES
 MAX_ALL_BET   = 250_000
 ICON_COIN     = "<:Coin:1495831576397742241>"
 
+# ── COINFLIP ICONS ──
+ICON_CF_FLIP = "<a:Coin_flip:1507419985742659745>"
+ICON_CF_NGUA = "<:Coin_ngua:1507419990280900798>"
+ICON_CF_UP   = "<:Coin_up:1507419987978223797>"
+
 
 # ───────────────────────────────────────────
 # HẰNG SỐ — BLACKJACK
@@ -64,6 +69,9 @@ COLOR_PUSH   = 0xFEE75C
 
 # Global active-session store  { user_id: BlackjackGame }
 active_games: dict = {}
+
+# Per-user coinflip lock — tránh spam lệnh cf
+_cf_active: set[int] = set()
 
 # Slot icons
 SLOT_NORMAL = [
@@ -782,6 +790,91 @@ class Cash(commands.Cog):
             final_color = discord.Color.red()
 
         await msg.edit(embed=build_slot_embed(final[0], final[1], final[2], result_line, final_color))
+
+    # ── LỆNH COINFLIP ─────────────────────
+    @commands.command(name="cf", aliases=["coinflip"])
+    @commands.cooldown(1, 10, commands.BucketType.user)
+    async def coinflip(self, ctx, amount: str):
+        user_id = ctx.author.id
+
+        # Lock theo từng người chơi — chặn spam / double click
+        if user_id in _cf_active:
+            return await ctx.send(
+                "⏳ Đồng xu của bạn vẫn đang quay! Chờ kết quả trước nhé.",
+                delete_after=6,
+            )
+
+        bal = get_balance(user_id)
+
+        # ── Parse bet ──────────────────────────────────────────────────────────
+        if amount.lower() == "all":
+            amount = min(bal, MAX_ALL_BET)
+        else:
+            try:
+                amount = int(amount.replace(",", "").replace(".", ""))
+            except ValueError:
+                return await ctx.send("❌ Số tiền không hợp lệ...")
+
+        if amount <= 0:
+            return await ctx.send("❌ Số tiền cược phải lớn hơn 0.")
+        if amount > MAX_ALL_BET:
+            return await ctx.send(f"❌ Cược tối đa **{MAX_ALL_BET:,}** {ICON_COIN} mỗi lần.")
+        if bal < amount:
+            return await ctx.send(
+                f"❌ Bạn không đủ tiền (Số dư: **{bal:,}** {ICON_COIN})."
+            )
+
+        # Trừ tiền trước — guard bên trong lock chống race condition
+        deducted = await update_balance_safe(user_id, -amount, require=amount)
+        if deducted is None:
+            return await ctx.send("❌ Bạn không đủ tiền để cược...")
+
+        # Đánh dấu đang chơi
+        _cf_active.add(user_id)
+        try:
+            # ── Thông báo đặt cược ────────────────────────────────────────────
+            await ctx.send(
+                f"**{ctx.author.display_name}** đã gửi **{amount:,}** {ICON_COIN} "
+                f"để chọn mặt ngửa."
+            )
+
+            # ── Animation đồng xu quay ────────────────────────────────────────
+            msg = await ctx.send(f"The coins spins... {ICON_CF_FLIP}")
+            await asyncio.sleep(2)
+
+            # ── Tung đồng xu ──────────────────────────────────────────────────
+            won = random.random() < 0.5
+
+            if won:
+                win_amt = amount * 2
+                await update_balance_safe(user_id, win_amt)
+                await msg.edit(
+                    content=(
+                        f"The coins spin... {ICON_CF_NGUA} "
+                        f"and you won **{win_amt:,}** {ICON_COIN}"
+                    )
+                )
+            else:
+                await msg.edit(
+                    content=f"The coins spin... {ICON_CF_UP} and you lost it :c"
+                )
+
+        finally:
+            # Luôn xóa lock dù có lỗi
+            _cf_active.discard(user_id)
+
+    @coinflip.error
+    async def coinflip_error(self, ctx, error):
+        if isinstance(error, commands.CommandOnCooldown):
+            await ctx.send(
+                f"⏳ {ctx.author.mention}, chờ **{error.retry_after:.1f}s** trước khi tung lại!",
+                delete_after=5,
+            )
+        elif isinstance(error, commands.MissingRequiredArgument):
+            await ctx.send(
+                "❌ Thiếu số cược! Dùng: `cf <số tiền>` hoặc `cf all`",
+                delete_after=6,
+            )
 
 
 # ───────────────────────────────────────────
