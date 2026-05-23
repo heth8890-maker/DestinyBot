@@ -32,6 +32,60 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ─── Discord.py Version & Components v2 Compatibility Check ──────────────────
+def _check_discord_version() -> None:
+    """
+    Log discord.py version và kiểm tra Components v2 support.
+    Chạy 1 lần khi bot khởi động — xem log để debug runtime issues.
+    """
+    ver = discord.__version__
+    logger.info(f"[VersionCheck] discord.py version: {ver}")
+
+    # Parse version để cảnh báo nếu quá cũ
+    try:
+        major, minor, *_ = (int(x) for x in ver.split("."))
+        if (major, minor) < (2, 4):
+            logger.warning(
+                f"[VersionCheck] ⚠️  discord.py {ver} khá cũ — "
+                "một số tính năng mới có thể không hoạt động."
+            )
+    except ValueError:
+        logger.warning(f"[VersionCheck] Không parse được version string: {ver!r}")
+
+    # Components v2 feature flags
+    COMPONENTS_V2_ATTRS = [
+        ("discord.ui", "LayoutView"),
+        ("discord.ui", "Container"),
+        ("discord.ui", "TextDisplay"),
+        ("discord.ui", "Section"),
+        ("discord.ui", "MediaGallery"),
+        ("discord.ui", "Separator"),
+    ]
+
+    results = {attr: hasattr(discord.ui, attr) for _, attr in COMPONENTS_V2_ATTRS}
+    supported    = [k for k, v in results.items() if v]
+    unsupported  = [k for k, v in results.items() if not v]
+
+    if unsupported:
+        logger.warning(
+            f"[VersionCheck] ❌ Components v2 CHƯA hỗ trợ trên runtime này "
+            f"(discord.py {ver}). Thiếu: {', '.join(unsupported)}"
+        )
+    else:
+        logger.info(
+            f"[VersionCheck] ✅ Components v2 đầy đủ — "
+            f"tất cả {len(supported)} attrs có mặt: {', '.join(supported)}"
+        )
+
+    # StringSelect vẫn thuộc v1 nhưng hay bị nhầm — kiểm tra riêng
+    has_string_select = hasattr(discord.ui, "StringSelect")
+    logger.info(
+        f"[VersionCheck] discord.ui.StringSelect: "
+        f"{'✅ có' if has_string_select else '❌ thiếu'}"
+    )
+
+_check_discord_version()
+
 # ─── Config ──────────────────────────────────────────────────────────────────
 SERVER_ID = int(os.environ.get("SERVER_ID", 0))
 
