@@ -14,6 +14,27 @@ FIXES APPLIED:
 """
 
 import discord
+
+# ─── Compatibility Patch (phải chạy TRƯỚC mọi import cog/extension) ──────────
+# Alias các discord.ui attribute bị đổi tên giữa các version.
+# Đặt ở đây để đảm bảo patch có hiệu lực trước khi bất kỳ annotation,
+# decorator hay class body nào trong cog được evaluate.
+_COMPAT_ALIASES: dict[str, str] = {
+    "StringSelect": "Select",      # renamed in some builds
+    # Thêm alias mới vào đây nếu cần, format: "TênMới": "TênCũ"
+}
+
+for _missing, _fallback in _COMPAT_ALIASES.items():
+    if not hasattr(discord.ui, _missing):
+        _src = getattr(discord.ui, _fallback, None)
+        if _src is not None:
+            setattr(discord.ui, _missing, _src)
+            print(f"[Compat] discord.ui.{_missing} → {_fallback} (patched)")
+        else:
+            print(f"[Compat] ⚠️  discord.ui.{_fallback} cũng không tồn tại — bỏ qua patch {_missing}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 from discord import app_commands
 from discord.ext import commands
 import asyncio
