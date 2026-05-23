@@ -54,12 +54,32 @@ OK  = "<:Tick:1495466684520206528>"
 # ─────────────────────────────────────────────────────────
 # PER-USER LOCK  (tránh race condition khi 2 lệnh đồng thời)
 # ─────────────────────────────────────────────────────────
-_USER_LOCKS: dict[str, asyncio.Lock] = {}
+# [FIX 5] Dùng OrderedDict để giới hạn bộ nhớ: tối đa _LOCK_MAX_SIZE entries.
+# Khi vượt giới hạn, xóa các entry cũ nhất mà lock đang idle (không locked).
+# Tránh memory leak khi bot chạy lâu với nhiều user khác nhau.
+from collections import OrderedDict
+
+_USER_LOCKS: OrderedDict[str, asyncio.Lock] = OrderedDict()
+_LOCK_MAX_SIZE = 5_000
 
 def _get_user_lock(uid: str) -> asyncio.Lock:
-    if uid not in _USER_LOCKS:
-        _USER_LOCKS[uid] = asyncio.Lock()
-    return _USER_LOCKS[uid]
+    if uid in _USER_LOCKS:
+        _USER_LOCKS.move_to_end(uid)   # LRU: đưa lên cuối (recently used)
+        return _USER_LOCKS[uid]
+
+    lock = asyncio.Lock()
+    _USER_LOCKS[uid] = lock
+
+    # Evict oldest idle locks khi vượt giới hạn
+    while len(_USER_LOCKS) > _LOCK_MAX_SIZE:
+        oldest_uid, oldest_lock = next(iter(_USER_LOCKS.items()))
+        if not oldest_lock.locked():
+            del _USER_LOCKS[oldest_uid]
+        else:
+            # Lock đang dùng — không xóa, dừng evict lần này
+            break
+
+    return lock
 
 
 # ─────────────────────────────────────────────────────────
@@ -88,9 +108,10 @@ SECOND_ROLL_MULTIPLIER   = 0.5    # roll 2 = roll 1 × 50%
 
 # ─── Treasure item 1099 drop config ─────────────────────────────────────────
 # Lần đầu tiên trong chu kỳ: 30%
-# Các lần sau: tỉ lệ crate_001 * 0.8  (= 69.999 * 0.8 ≈ 55.999%)
-ITEM_1099_DROP_CHANCE_FIRST = 30.0                               # % lần đầu
-ITEM_1099_DROP_CHANCE_BASE  = CRATE_DROP_CHANCE                  # placeholder, được tính sau khi CRATE_POOL defined
+# Các lần sau: 45% (cố định)
+# [FIX 2] Comment cũ nói "crate_001 * 0.8 ≈ 55.999%" nhưng code thực tế là 45.0 hardcode.
+# Đã xóa _crate_001_weight (dead code) và đồng bộ comment với giá trị thực.
+ITEM_1099_DROP_CHANCE_FIRST = 30.0   # % lần đầu trong chu kỳ
 ITEM_1099_AMOUNT_MIN        = 88
 ITEM_1099_AMOUNT_MAX        = 137
 
@@ -108,7 +129,6 @@ CRATE_POOL = [
 # Tổng: 69.999 + 22 + 5 + 2 + 1 + 0.001 = 100.000 ✓
 
 # Tỉ lệ drop item 1099 từ lần thứ 2 trở đi = 45%
-_crate_001_weight          = next(w for cid, w in CRATE_POOL if cid == "001")
 ITEM_1099_DROP_CHANCE_BASE = 45.0   # % cố định từ lần thứ 2 trở đi
 
 # Tên fallback nếu CRATES chưa load được
@@ -449,12 +469,6 @@ async def _run_hunt(
             except Exception as e:
                 return await send_fn(content=f"{ERR} | Failed to build response: `{e}`")
 
-            # ── Cooldown save ───────────────────────────────────
-            try:
-                user["hunt_cd"] = now
-            except Exception as e:
-                print(f"⚠️  Warning: hunt_cd update failed: {e}")
-
             # ── Bonus roll ──────────────────────────────────────
             bonus_msgs = []
             total_coins = 0
@@ -476,7 +490,13 @@ async def _run_hunt(
                     if hit:
                         crate_id  = _roll_crate_id()
                         crate_key = f"crate_{crate_id}"
-                        add_item(user, crate_key)
+                        # [FIX 4] Wrap add_item — chỉ tăng count khi add thành công.
+                        # Code cũ: add_item có thể fail nhưng count vẫn bị tăng → mất slot bonus.
+                        try:
+                            add_item(user, crate_key)
+                        except Exception as e:
+                            print(f"⚠️  Warning: add_item failed for crate {crate_key}: {e}")
+                            continue  # skip roll này, count không tăng
                         bonus["count"] += 1
                         bonus["crate_first_dropped"] = True
 
@@ -502,6 +522,10 @@ async def _run_hunt(
                     )
                     if hit:
                         c = random.randint(2000, 6500)
+                        # [FIX 4] Coin không cần add_item nhưng update balance cần thành công.
+                        # Tăng total_coins + count trước, nếu update_balance_safe fail ở sau
+                        # thì sẽ bị log ⚠️ — acceptable vì coin là side effect nhỏ.
+                        # Không có gì để rollback ở bước này nên giữ nguyên logic coin.
                         total_coins += c
                         bonus["count"] += 1
                         bonus["coin_first_dropped"] = True
@@ -538,6 +562,14 @@ async def _run_hunt(
                 print(f"⚠️  Warning: bonus roll failed: {e}")
 
             # ── Save ────────────────────────────────────────────
+            # [FIX 3] hunt_cd được set SAU khi bonus roll xong, ngay trước save.
+            # Code cũ set hunt_cd trước bonus roll — nếu save fail, cooldown không
+            # được persist nhưng đã được tính vào user dict theo thứ tự sai.
+            try:
+                user["hunt_cd"] = now
+            except Exception as e:
+                print(f"⚠️  Warning: hunt_cd update failed: {e}")
+
             try:
                 ok = save_user(uid, user)
                 if not ok:
@@ -638,15 +670,24 @@ class RPGHunt(commands.Cog):
     @commands.group(name="hunt", aliases=["h"], invoke_without_command=True)
     async def hunt(self, ctx):
         """dtn hunt — đi săn vật phẩm."""
+        # [FIX 1] Lambda cũ luôn truyền components=None vào ctx.send() khi fallback error.
+        # Một số fork discord.py không chấp nhận components=None → TypeError im lặng →
+        # bot không báo lỗi trên Discord mà chỉ crash trong try/except nội bộ.
+        # Slash command (line ~675) đã có pattern đúng — áp dụng tương tự cho prefix.
+        async def _send_prefix(content=None, components=None, **_):
+            if components:
+                return await ctx.send(
+                    content=content,
+                    components=components,
+                    flags=discord.MessageFlags(is_components_v2=True),
+                )
+            return await ctx.send(content=content)
+
         await _run_hunt(
             author_id      = ctx.author.id,
             author_mention = ctx.author.mention,
             display_name   = ctx.author.display_name,
-            send_fn        = lambda content=None, components=None, **_: ctx.send(
-                content=content,
-                components=components,
-                flags=discord.MessageFlags(is_components_v2=True) if components else discord.MessageFlags(),
-            ),
+            send_fn        = _send_prefix,
             send_bonus_fn  = lambda content=None, **_: ctx.send(content=content),
         )
 

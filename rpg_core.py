@@ -45,7 +45,7 @@ from rpg_instance import (
     fmt_instance_info,
     quality_label,
     DURABILITY_BY_RARITY,
-    quality_color,
+    quality_color, QUALITY_TIERS,
 )
 
 from rpg_effect import (
