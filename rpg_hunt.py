@@ -676,13 +676,12 @@ class RPGHunt(commands.Cog):
         # Slash command (line ~675) đã có pattern đúng — áp dụng tương tự cho prefix.
         async def _send_prefix(content=None, components=None, **_):
             if components:
-                _flags = discord.MessageFlags()
-                _flags.value = 1 << 15  # is_components_v2 = bit 15 (32768)
-                return await ctx.send(
-                    content=content,
-                    components=components,
-                    flags=_flags,
-                )
+                # ctx.send() không hỗ trợ components= trực tiếp.
+                # Wrap vào LayoutView rồi dùng view= — không cần flags=.
+                _lv = discord.ui.LayoutView()
+                for _comp in components:
+                    _lv.add_item(_comp)
+                return await ctx.send(content=content, view=_lv)
             return await ctx.send(content=content)
 
         await _run_hunt(

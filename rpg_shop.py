@@ -411,8 +411,12 @@ async def _do_shop_crate(
     send_fn,
     author_id: int | None = None,
     interaction: discord.Interaction | None = None,
+    is_prefix: bool = False,
 ):
-    """Gửi shop crate dùng Components v2. send_fn nhận (view=, flags=)."""
+    """Gửi shop crate dùng Components v2.
+    - is_prefix=True  -> ctx.send() không hỗ trợ components=, dùng LayoutView + view=
+    - is_prefix=False -> interaction.response/followup.send hỗ trợ components= + flags=
+    """
     user_weapons: set[str] | None = None
     if interaction is not None:
         user_data, _ = get_user(str(interaction.user.id))
@@ -420,10 +424,17 @@ async def _do_shop_crate(
 
     view      = CrateShopView(page=0, author_id=author_id, user_weapons=user_weapons)
     container = _build_crate_page_container(0, user_weapons=user_weapons, view=view)
-    await send_fn(
-        components=[container],
-        flags=_cv2_flags,
-    )
+
+    if is_prefix:
+        # ctx.send() không hỗ trợ components= — wrap vào LayoutView, không cần flags=
+        _lv = discord.ui.LayoutView()
+        _lv.add_item(container)
+        await send_fn(view=_lv)
+    else:
+        await send_fn(
+            components=[container],
+            flags=_cv2_flags,
+        )
 
 
 def _build_shop_item_embeds() -> list[discord.Embed]:
@@ -550,7 +561,7 @@ class RPGShop(commands.Cog):
     # ─── CRATE ───
     @shop.command(name="crate")
     async def shop_crate(self, ctx):
-        await _do_shop_crate(ctx.send, author_id=ctx.author.id, interaction=None)
+        await _do_shop_crate(ctx.send, author_id=ctx.author.id, interaction=None, is_prefix=True)
 
     # ─── ITEM ───
     @shop.command(name="item")
@@ -561,10 +572,9 @@ class RPGShop(commands.Cog):
     @shop.command(name="weapon")
     async def shop_weapon(self, ctx):
         """Xem 10 weapon đang bán (reset mỗi 6 tiếng)."""
-        await ctx.send(
-            components=[_build_weapon_shop_container()],
-            flags=_cv2_flags,
-        )
+        _lv = discord.ui.LayoutView()
+        _lv.add_item(_build_weapon_shop_container())
+        await ctx.send(view=_lv)  # ctx.send() không hỗ trợ components=
 
     # ─── BUY (weapon shop) ───
     @shop.command(name="buy")

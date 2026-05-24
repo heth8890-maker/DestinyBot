@@ -249,8 +249,9 @@ class RPGWeapon(commands.Cog):
                 f"chưa có vũ khí nào."
             )
 
-        # ── Helper: render 1 weapon thành block text dùng │ ────────────
-        def _render_weapon_block(wid: str, slot_prefix: str = "") -> str:
+        # ── Build lines — 2 nhóm riêng (VIP style) ─────────────────
+        equipped_lines = []
+        for slot_idx, wid in equipped_ordered:
             base_id = get_base_id(str(wid)) or str(wid)
             w       = get_weapon_by_id(base_id)
             nm      = w["name"]  if w else base_id
@@ -259,55 +260,49 @@ class RPGWeapon(commands.Cog):
             lv      = wi.get("level", 1) if wi else 1
             p       = resolve_passive(wi.get("passive", {})) if isinstance(wi, dict) else None
             p_icon  = p.get("emoji", "") if p and p.get("id") else ""
-            eq_tag  = " **[E]**" if wid in equipped_set else ""
+            equipped_lines.append(
+                f"**[Ô {slot_idx}]** {em}{p_icon} **{nm}** • Lv {lv}\n`{wid}`"
+            )
 
-            # Effects rút gọn (1 dòng)
-            effects_line = ""
-            if w and w.get("effects"):
-                from rpg_weapon_data import _fmt_effects_scaled
-                ef_lines = _fmt_effects_scaled(w["effects"], lv, show_passive=False)
-                if ef_lines:
-                    condensed = " • ".join(
-                        ln.strip().lstrip("- ").replace("\n", " ")
-                        for ln in ef_lines if ln.strip()
-                    )
-                    if condensed:
-                        effects_line = f"\n│ -# {condensed}"
+        storage_lines = []
+        for wid in storage_list:
+            base_id = get_base_id(str(wid)) or str(wid)
+            w       = get_weapon_by_id(base_id)
+            nm      = w["name"]  if w else base_id
+            em      = w["emoji"] if w else "⚔️"
+            wi      = wi_map.get(wid)
+            lv      = wi.get("level", 1) if wi else 1
+            p       = resolve_passive(wi.get("passive", {})) if isinstance(wi, dict) else None
+            p_icon  = p.get("emoji", "") if p and p.get("id") else ""
+            storage_lines.append(
+                f"{em}{p_icon} **{nm}** • Lv {lv}\n`{wid}`"
+            )
 
-            header = f"{slot_prefix}{em}{p_icon} **{nm}**{eq_tag} • Lv {lv}"
-            return f"│ {header}\n│ `{wid}`{effects_line}"
+        PAGE_SIZE   = 9
+        pages       = [storage_lines[i:i+PAGE_SIZE] for i in range(0, max(len(storage_lines), 1), PAGE_SIZE)]
+        total_pages = len(pages)
 
-        # Build equipped blocks — chỉ render slot có uid
-        equipped_blocks = []
-        for slot_idx, wid in equipped_ordered:
-            equipped_blocks.append(_render_weapon_block(wid, slot_prefix=f"**[Ô {slot_idx}]** "))
+        equipped_value = "\n\n".join(equipped_lines) if equipped_lines else "-# Chưa trang bị vũ khí nào."
 
-        # Hằng số dùng chung trong WeaponPages
-        PAGE_SIZE    = 9
-        RARITY_ORDER = {
-            "legendary": 0, "epic": 1, "rare": 2,
-            "uncommon": 3, "common": 4, "special": 5,
-        }
-        # [FIX-5] Bỏ local RARITY_LABEL — dùng trực tiếp từ import module-level
-        # để tránh desync khi rpg_weapon_data thêm rarity mới.
-        # (RARITY_LABEL đã được import ở đầu file từ rpg_weapon_data)
-        HELP_TEXT = (
-            "`dtn weapon <uid>` chi tiết  •  `dtn weapon <uid> <slot>` trang bị\n"
-            "`dtn unequip <slot>` tháo  •  `dtn wi` xem trang bị"
+        _HELP_MSG = (
+            "**Hướng dẫn lệnh vũ khí:**\n"
+            "`dtn weapon <uid>` — xem chi tiết vũ khí (level, durability, passive, effect)\n"
+            "`dtn weapon <uid> <slot>` — trang bị vũ khí vào ô slot (1/2/3)\n"
+            "`dtn unequip <slot>` — tháo vũ khí khỏi ô về kho\n"
+            "`dtn repair` — sửa độ bền vũ khí đang trang bị\n"
+            "`dtn wi` / `dtn myweapon` — xem 3 ô trang bị & tổng effect\n"
+            "`dtn weapon` — danh sách toàn bộ vũ khí trong kho"
         )
 
         # ── WeaponPages — Components v2 LayoutView ───────────────────
         class WeaponPages(discord.ui.LayoutView):
             def __init__(self):
                 super().__init__(timeout=60)
-                self.page          = 0
-                self.message       = None
-                self.show_help     = False
-                self.rarity_filter = None   # str | None
-                self.sort_mode     = "oldest"
+                self.page      = 0
+                self.show_help = False
+                self.message   = None
                 self._build_view(0)
 
-            # ── check author ─────────────────────────────────────────
             async def _check(self, interaction: discord.Interaction) -> bool:
                 if interaction.user.id != ctx.author.id:
                     await interaction.response.send_message(
@@ -316,58 +311,11 @@ class RPGWeapon(commands.Cog):
                     return False
                 return True
 
-            # ── build toàn bộ layout ─────────────────────────────────
             def _build_view(self, page_idx: int):
                 self.clear_items()
+                page_idx  = min(page_idx, total_pages - 1)
+                self.page = page_idx
 
-                # 1. Filter
-                filtered = list(storage_list)
-                if self.rarity_filter:
-                    filtered = [
-                        wid for wid in filtered
-                        if (get_weapon_by_id(get_base_id(wid) or wid) or {}).get("rarity") == self.rarity_filter
-                    ]
-
-                # 2. Sort
-                if self.sort_mode == "newest":
-                    filtered = list(reversed(filtered))
-                elif self.sort_mode == "rarity":
-                    filtered.sort(key=lambda wid: RARITY_ORDER.get(
-                        (get_weapon_by_id(get_base_id(wid) or wid) or {}).get("rarity", "common"), 99
-                    ))
-                elif self.sort_mode == "sell":
-                    def _sell_price(wid):
-                        w = get_weapon_by_id(get_base_id(wid) or wid) or {}
-                        return w.get("sell_price", w.get("price", 0))
-                    filtered.sort(key=_sell_price, reverse=True)
-                # "oldest" — giữ nguyên thứ tự gốc
-
-                # 3. Render + paginate
-                storage_blocks = [_render_weapon_block(wid) for wid in filtered]
-                pages = [
-                    storage_blocks[i:i + PAGE_SIZE]
-                    for i in range(0, max(len(storage_blocks), 1), PAGE_SIZE)
-                ]
-                total_pages = len(pages)
-                # Clamp page_idx nếu filter/sort làm giảm số trang,
-                # đồng thời sync lại self.page để lần rebuild sau không dùng index cũ
-                page_idx    = min(page_idx, total_pages - 1)
-                self.page   = page_idx
-
-                # 4. Filter summary cho TextDisplay
-                parts = []
-                if self.rarity_filter:
-                    parts.append(f"Rarity: {RARITY_LABEL.get(self.rarity_filter, self.rarity_filter)}")
-                if self.sort_mode != "oldest":
-                    sort_labels = {
-                        "newest": "Mới → Cũ",
-                        "rarity": "Rarity cao → thấp",
-                        "sell":   "Giá bán cao → thấp",
-                    }
-                    parts.append(f"Sort: {sort_labels.get(self.sort_mode, self.sort_mode)}")
-                filter_summary = "  •  ".join(parts) if parts else "None"
-
-                # ── Xây dựng children[] của Container ────────────────
                 children = []
 
                 # [1] Title
@@ -377,57 +325,45 @@ class RPGWeapon(commands.Cog):
 
                 # [2] Help text nếu show_help=True
                 if self.show_help:
-                    children.append(discord.ui.TextDisplay(HELP_TEXT))
+                    children.append(discord.ui.TextDisplay(_HELP_MSG))
 
-                # [3] Filter summary
-                children.append(discord.ui.TextDisplay(
-                    f"**Weapon Filters:** {filter_summary}"
-                ))
-
-                # [4] Separator
+                # [3] Separator
                 children.append(discord.ui.Separator(
                     visible=True,
                     spacing=discord.SeparatorSpacing.small,
                 ))
 
-                # [8][9] Equipped section — chỉ trang 0, chỉ khi có vũ khí
-                if page_idx == 0 and equipped_blocks:
+                # [4] Equipped section — chỉ trang đầu, chỉ khi có vũ khí
+                if page_idx == 0 and equipped_lines:
                     children.append(discord.ui.TextDisplay(
-                        "⚔️ **Đang trang bị**\n\n" + "\n\n".join(equipped_blocks)
+                        "⚔️ **Đang trang bị**\n\n" + equipped_value
                     ))
                     children.append(discord.ui.Separator(
                         visible=True,
                         spacing=discord.SeparatorSpacing.small,
                     ))
 
-                # [10] Storage section
-                filter_active = self.rarity_filter or self.sort_mode != "oldest"
-                filter_tag    = " _(đang lọc)_" if filter_active else ""
-                page_blocks   = pages[page_idx] if pages and pages[page_idx] else []
-                storage_text  = (
-                    f"🗃️ **Trong kho**{filter_tag} — trang {page_idx+1}/{total_pages}\n\n"
-                    + ("\n\n".join(page_blocks) if page_blocks else "-# Không có vũ khí nào.")
+                # [5] Storage section
+                page_blocks  = pages[page_idx] if pages and pages[page_idx] else []
+                storage_text = (
+                    f"🗃️ **Trong kho** — trang {page_idx+1}/{total_pages}\n\n"
+                    + ("\n\n".join(page_blocks) if page_blocks else "-# Kho trống.")
                 )
                 if len(storage_text) > 3900:
                     storage_text = storage_text[:3896] + "\n…"
                 children.append(discord.ui.TextDisplay(storage_text))
 
-                # ── Container bọc toàn bộ layout tĩnh ───────────────
-                # [FIX] ActionRow KHÔNG được nest trong Container.
-                # Components v2: Container chỉ nhận TextDisplay / Separator / Section v.v.
-                # ActionRow phải là top-level child của LayoutView.
+                # Container — chỉ chứa layout tĩnh (TextDisplay, Separator)
                 container = discord.ui.Container(
                     *children,
                     accent_color=discord.Color(0xE91E63),
                 )
                 self.add_item(container)
 
-                # ── [FIX] ActionRow tách riêng, add trực tiếp vào LayoutView ──
-
-                # Row [?] — toggle help
+                # ── ActionRow [?] — top-level (LayoutView spec) ──────
                 btn_help = discord.ui.Button(
                     label="?",
-                    style=discord.ButtonStyle.secondary,
+                    style=discord.ButtonStyle.primary,
                     custom_id=f"wpn_help_{ctx.author.id}",
                 )
 
@@ -443,71 +379,7 @@ class RPGWeapon(commands.Cog):
                 ar_help.add_item(btn_help)
                 self.add_item(ar_help)
 
-                # Row Rarity filter
-                rarity_label = (
-                    f"Rarity: {RARITY_LABEL.get(self.rarity_filter, self.rarity_filter)}"
-                    if self.rarity_filter else "Rarity: Tất cả"
-                )
-                btn_rarity = discord.ui.Button(
-                    label=rarity_label,
-                    style=discord.ButtonStyle.primary if self.rarity_filter else discord.ButtonStyle.secondary,
-                    custom_id=f"wpn_rarity_{ctx.author.id}",
-                )
-
-                async def _rarity_cb(interaction: discord.Interaction):
-                    if not await self._check(interaction):
-                        return
-                    seen_r: set = set()
-                    available_rarities = []
-                    for wid in storage_list:
-                        r = (get_weapon_by_id(get_base_id(wid) or wid) or {}).get("rarity")
-                        if r and r not in seen_r:
-                            seen_r.add(r)
-                            available_rarities.append(r)
-                    available_rarities.sort(key=lambda r: RARITY_ORDER.get(r, 99))
-                    cycle = [None] + available_rarities
-                    current_idx = cycle.index(self.rarity_filter) if self.rarity_filter in cycle else 0
-                    self.rarity_filter = cycle[(current_idx + 1) % len(cycle)]
-                    self.page = 0
-                    self._build_view(0)
-                    await interaction.response.edit_message(view=self)
-
-                btn_rarity.callback = _rarity_cb
-                ar_rarity = discord.ui.ActionRow()
-                ar_rarity.add_item(btn_rarity)
-                self.add_item(ar_rarity)
-
-                # Row Sort select
-                sort_options = [
-                    discord.SelectOption(label="Cũ → Mới",           value="oldest", default=(self.sort_mode == "oldest")),
-                    discord.SelectOption(label="Mới → Cũ",           value="newest", default=(self.sort_mode == "newest")),
-                    discord.SelectOption(label="Rarity cao → thấp",  value="rarity", default=(self.sort_mode == "rarity")),
-                    discord.SelectOption(label="Giá bán cao → thấp", value="sell",   default=(self.sort_mode == "sell")),
-                ]
-                sel_sort = discord.ui.StringSelect(
-                    placeholder="Sắp xếp...",
-                    options=sort_options,
-                    custom_id=f"wpn_sort_{ctx.author.id}",
-                )
-
-                async def _sort_cb(interaction: discord.Interaction):
-                    if not await self._check(interaction):
-                        return
-                    # [FIX] Guard KeyError: interaction.data có thể thiếu "values" khi timeout race
-                    values = interaction.data.get("values", [])
-                    if not values:
-                        return await interaction.response.defer()
-                    self.sort_mode = values[0]
-                    self.page = 0
-                    self._build_view(0)
-                    await interaction.response.edit_message(view=self)
-
-                sel_sort.callback = _sort_cb
-                ar_sort = discord.ui.ActionRow()
-                ar_sort.add_item(sel_sort)
-                self.add_item(ar_sort)
-
-                # ── ActionRow nav — prev/page/next ──────────────────
+                # ── ActionRow nav ◀ page ▶ — top-level ──────────────
                 only_one = total_pages == 1
                 btn_prev = discord.ui.Button(
                     label="◀",
@@ -552,12 +424,6 @@ class RPGWeapon(commands.Cog):
                 self.add_item(ar_nav)
 
             async def on_timeout(self):
-                # [FIX] Dùng walk_children() thay vì iterate self.children phẳng.
-                # Components v2 có hierarchy nested — self.children chỉ thấy top-level items.
-                # walk_children() đệ quy vào Container và ActionRow bên trong.
-                # Bỏ break cũ → disable TẤT CẢ ActionRow, không chỉ row đầu tiên.
-                # [FIX-2] Bọc _build_view trong try/except — nếu rebuild thất bại
-                # (ví dụ lỗi data) thì vẫn cố edit message thay vì crash silently.
                 try:
                     self._build_view(self.page)
                 except Exception:
@@ -571,8 +437,6 @@ class RPGWeapon(commands.Cog):
                 except Exception:
                     pass
 
-        # [FIX] Bọc try/except — bất kỳ exception nào trong WeaponPages() hoặc ctx.send()
-        # trước đây gây silence hoàn toàn vì không có error handler.
         try:
             view = WeaponPages()
             view.message = await ctx.send(view=view)
@@ -810,14 +674,26 @@ class RPGWeapon(commands.Cog):
                     ))
                     children.append(discord.ui.TextDisplay("-# Chưa trang bị vũ khí nào."))
 
-                # [FIX] Container chỉ chứa layout tĩnh — ActionRow tách ra top-level
+                # ── Combined Effects ───────────────────────────────
+                combined = calculate_combined_effects(equipped_raw, wi_map, get_base_id)
+                if combined:
+                    combined_lines = _fmt_combined_effects(combined)
+                    children.append(discord.ui.Separator(
+                        visible=True,
+                        spacing=discord.SeparatorSpacing.small,
+                    ))
+                    children.append(discord.ui.TextDisplay(
+                        "⚔️ **Total Effects**\n" + "\n".join(combined_lines)
+                    ))
+
+                # Container — chỉ chứa layout tĩnh (TextDisplay, Separator)
                 container = discord.ui.Container(
                     *children,
                     accent_color=discord.Color(0xE91E63),
                 )
                 self_v.add_item(container)
 
-                # ── [FIX] ar_help add trực tiếp vào LayoutView ───────
+                # ── ActionRow [?] — top-level (LayoutView spec) ──────
                 btn_help = discord.ui.Button(
                     label="?",
                     style=discord.ButtonStyle.secondary,
@@ -837,66 +713,6 @@ class RPGWeapon(commands.Cog):
                 ar_help = discord.ui.ActionRow()
                 ar_help.add_item(btn_help)
                 self_v.add_item(ar_help)
-
-                # ── StringSelect (ngoài Container) ────────────────────
-                if slot_data:
-                    select_options = []
-                    for s_idx, s_uid, _ in slot_data:
-                        s_bid    = get_base_id(str(s_uid)) or str(s_uid)
-                        w_def    = get_weapon_by_id(s_bid)
-                        s_nm     = w_def["name"]  if w_def else s_bid
-                        s_em     = w_def["emoji"] if w_def else "⚔️"
-                        s_rarity = w_def.get("rarity", "common") if w_def else "common"
-                        s_rlabel = RARITY_LABEL.get(s_rarity, s_rarity)
-                        s_wi     = wi_map.get(s_uid)
-                        s_lv     = s_wi.get("level", 1) if s_wi else 1
-                        s_p      = resolve_passive(s_wi.get("passive", {})) if isinstance(s_wi, dict) else None
-                        s_picon  = s_p.get("emoji", "") if s_p and s_p.get("id") else ""
-                        select_options.append(discord.SelectOption(
-                            label=f"[Ô {s_idx}] {s_em}{s_picon} {s_nm}",
-                            value=s_uid,
-                            description=f"Lv {s_lv}  •  {s_rlabel}",
-                        ))
-                    sel = discord.ui.StringSelect(
-                        custom_id=f"wi_select_{ctx.author.id}",
-                        placeholder="Xem chi tiết vũ khí...",
-                        options=select_options,
-                    )
-                else:
-                    sel = discord.ui.StringSelect(
-                        custom_id=f"wi_select_{ctx.author.id}",
-                        placeholder="Xem chi tiết vũ khí...",
-                        options=[discord.SelectOption(label="—", value="none")],
-                        disabled=True,
-                    )
-
-                async def _select_cb(interaction: discord.Interaction):
-                    if interaction.user.id != ctx.author.id:
-                        return await interaction.response.send_message(
-                            "Đây không phải danh sách của bạn.", ephemeral=True
-                        )
-                    # [FIX] Guard KeyError: interaction.data có thể thiếu "values"
-                    values = interaction.data.get("values", [])
-                    if not values or values[0] == "none":
-                        return await interaction.response.defer()
-                    sel_uid = values[0]
-                    # [FIX-7] Dùng defer() + followup thay vì ctx.invoke — tránh
-                    # việc gửi một message hoàn toàn mới vào channel gây loạn UI.
-                    # Weapon detail embed sẽ gửi ephemeral qua followup.
-                    await interaction.response.defer(ephemeral=True)
-                    try:
-                        await ctx.invoke(self.weapon, weapon_id=sel_uid)
-                    except Exception as e:
-                        import traceback; traceback.print_exc()
-                        await interaction.followup.send(
-                            f"{ERR} | Không thể hiển thị chi tiết vũ khí: `{e}`",
-                            ephemeral=True,
-                        )
-
-                sel.callback = _select_cb
-                ar_sel = discord.ui.ActionRow()
-                ar_sel.add_item(sel)
-                self_v.add_item(ar_sel)
 
             async def on_timeout(self_v):
                 # [FIX] walk_children() + không break → disable TẤT CẢ interactive items
