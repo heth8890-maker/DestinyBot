@@ -217,13 +217,12 @@ def _total_crate_pages() -> int:
 def _build_crate_page_container(
     page: int,
     user_weapons: set[str] | None = None,
-    view: "CrateShopView | None" = None,
 ) -> discord.ui.Container:
     """
     Tạo Container (Components v2) cho trang <page> của shop crate (0-indexed).
     - user_weapons: set các base_id đã từng sở hữu. None = ẩn tất cả hide icon.
     - Tên weapon legendary/mythical luôn bị ẩn thành ???/?????.
-    - view: nếu truyền vào, buttons sẽ được nhúng vào ActionRow cuối container.
+    - Buttons được đặt ở ActionRow top-level trong LayoutView (không nhúng trong container).
     """
     pages       = _build_crate_pages()
     total_pages = len(pages)
@@ -311,18 +310,17 @@ def _build_crate_page_container(
         content="-# dtn crate buy <id> [amount]  |  dtn crate open <id>"
     ))
 
-    # Nhúng buttons của View vào ActionRow bên trong container (bắt buộc với Components v2)
-    if view is not None:
-        children.append(discord.ui.ActionRow(*view.children))
-
-    return discord.ui.Container(*children)
+    return discord.ui.Container(*children, accent_color=discord.Color(0x9B59B6))
 
 
-class CrateShopView(discord.ui.View):
+class CrateShopView(discord.ui.LayoutView):
     """
-    View phân trang cho shop crate (Components v2).
+    LayoutView phân trang cho shop crate (Components v2).
     Layout nút: [◀ Trước]  [page/total (disabled)]  [Tiếp ▶]
     Timeout 60s. Chỉ author gốc mới được bấm nút.
+
+    LayoutView: container + buttons là ActionRow top-level (không nhúng trong Container).
+    Gửi bằng send(view=self) — không cần flags=.
     """
 
     def __init__(
@@ -335,72 +333,71 @@ class CrateShopView(discord.ui.View):
         self.page         = max(0, min(page, _total_crate_pages() - 1))
         self.author_id    = author_id
         self.user_weapons = user_weapons
-        self.message: discord.Message | None = None  # lưu để edit lúc on_timeout
+        self._disabled    = False
+        self.message: discord.Message | None = None
+        self._build()
 
-        # Sau super().__init__(), decorator buttons đã được add tự động.
-        # self.children = [prev_btn, next_btn] — KHÔNG gọi add_item lại.
-        # page_btn là button tạo thủ công → cần insert giữa prev và next.
-        self.page_btn = discord.ui.Button(
-            label=self._page_label(),
+    def _build(self) -> None:
+        """Rebuild toàn bộ view: container + ActionRow buttons."""
+        self.clear_items()
+        total = _total_crate_pages()
+
+        # ── Container (không có button bên trong) ───────────
+        container = _build_crate_page_container(self.page, user_weapons=self.user_weapons)
+        self.add_item(container)
+
+        # ── ActionRow top-level ──────────────────────────────
+        btn_prev = discord.ui.Button(
+            label="◀ Trước",
+            style=discord.ButtonStyle.secondary,
+            disabled=self._disabled or (self.page == 0),
+        )
+        btn_page = discord.ui.Button(
+            label=f"{self.page + 1} / {total}",
             style=discord.ButtonStyle.secondary,
             disabled=True,
         )
-        # Tạm thời remove next_btn để giữ thứ tự: [◀] [1/N] [▶]
-        self.remove_item(self.next_btn)
-        self.add_item(self.page_btn)
-        self.add_item(self.next_btn)
-        self._sync_buttons()
-
-    def _page_label(self) -> str:
-        return f"{self.page + 1} / {_total_crate_pages()}"
-
-    def _sync_buttons(self) -> None:
-        total = _total_crate_pages()
-        self.prev_btn.disabled = (self.page == 0)
-        self.next_btn.disabled = (self.page >= total - 1)
-        self.page_btn.label    = self._page_label()
-
-    async def _check_author(self, interaction: discord.Interaction) -> bool:
-        if self.author_id and interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                "❌ Chỉ người dùng lệnh mới được bấm nút này.", ephemeral=True
-            )
-            return False
-        return True
-
-    @discord.ui.button(label="◀ Trước", style=discord.ButtonStyle.secondary)
-    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._check_author(interaction):
-            return
-        self.page -= 1
-        self._sync_buttons()
-        container = _build_crate_page_container(self.page, user_weapons=self.user_weapons, view=self)
-        await interaction.response.edit_message(
-            components=[container],
-            flags=_cv2_flags,
+        btn_next = discord.ui.Button(
+            label="Tiếp ▶",
+            style=discord.ButtonStyle.primary,
+            disabled=self._disabled or (self.page >= total - 1),
         )
 
-    @discord.ui.button(label="Tiếp ▶", style=discord.ButtonStyle.primary)
-    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._check_author(interaction):
-            return
-        self.page += 1
-        self._sync_buttons()
-        container = _build_crate_page_container(self.page, user_weapons=self.user_weapons, view=self)
-        await interaction.response.edit_message(
-            components=[container],
-            flags=_cv2_flags,
-        )
+        async def _prev(interaction: discord.Interaction) -> None:
+            if self.author_id and interaction.user.id != self.author_id:
+                await interaction.response.send_message(
+                    "❌ Chỉ người dùng lệnh mới được bấm nút này.", ephemeral=True
+                )
+                return
+            self.page -= 1
+            self._build()
+            await interaction.response.edit_message(view=self)
+
+        async def _next(interaction: discord.Interaction) -> None:
+            if self.author_id and interaction.user.id != self.author_id:
+                await interaction.response.send_message(
+                    "❌ Chỉ người dùng lệnh mới được bấm nút này.", ephemeral=True
+                )
+                return
+            self.page += 1
+            self._build()
+            await interaction.response.edit_message(view=self)
+
+        btn_prev.callback = _prev
+        btn_next.callback = _next
+
+        ar = discord.ui.ActionRow()
+        ar.add_item(btn_prev)
+        ar.add_item(btn_page)
+        ar.add_item(btn_next)
+        self.add_item(ar)
 
     async def on_timeout(self) -> None:
-        for item in self.children:
-            item.disabled = True
+        self._disabled = True
+        self._build()
         if self.message is not None:
             try:
-                container = _build_crate_page_container(
-                    self.page, user_weapons=self.user_weapons, view=self
-                )
-                await self.message.edit(components=[container], flags=_cv2_flags)
+                await self.message.edit(view=self)
             except Exception:
                 pass
 
@@ -423,35 +420,32 @@ async def _do_shop_crate(
     send_fn,
     author_id: int | None = None,
     interaction: discord.Interaction | None = None,
-    is_prefix: bool = False,
 ):
-    """Gửi shop crate dùng Components v2.
-    - Slash: send_fn = interaction.response.send_message → dùng components= + flags=
-    - Prefix: send_fn = ctx.send → ctx.send không hỗ trợ components=, phải wrap LayoutView
+    """Gửi shop crate dùng Components v2 (LayoutView).
+    - Cả prefix lẫn slash đều dùng send(view=view) — không cần flags=.
+    - Prefix: send_fn = ctx.send         → trả về Message → lưu vào view.message
+    - Slash:  send_fn = interaction.response.send_message → lấy qua original_response()
     """
-    # Lấy user_weapons từ author_id (prefix) hoặc interaction.user.id (slash)
+    uid = (
+        str(interaction.user.id) if interaction is not None
+        else (str(author_id) if author_id else None)
+    )
     user_weapons: set[str] | None = None
-    uid = str(interaction.user.id) if interaction is not None else (str(author_id) if author_id else None)
     if uid:
         user_data, _ = get_user(uid)
         user_weapons = set(user_data.get("seen_weapons", []))
 
-    view      = CrateShopView(page=0, author_id=author_id, user_weapons=user_weapons)
-    container = _build_crate_page_container(0, user_weapons=user_weapons, view=view)
+    view = CrateShopView(page=0, author_id=author_id, user_weapons=user_weapons)
+    msg  = await send_fn(view=view)
 
-    if is_prefix:
-        # ctx.send không nhận components= → wrap vào LayoutView
-        lv = discord.ui.LayoutView()
-        lv.add_item(container)
-        await send_fn(view=lv)
-    else:
-        await send_fn(components=[container], flags=_cv2_flags)
-        # Lưu message để on_timeout có thể edit disable nút
-        if interaction is not None:
-            try:
-                view.message = await interaction.original_response()
-            except Exception:
-                pass
+    # Lưu message để on_timeout có thể edit disable nút
+    if isinstance(msg, discord.Message):
+        view.message = msg
+    elif interaction is not None:
+        try:
+            view.message = await interaction.original_response()
+        except Exception:
+            pass
 
 
 def _build_shop_item_embeds() -> list[discord.Embed]:
@@ -518,7 +512,7 @@ def _build_weapon_shop_container() -> discord.ui.Container:
             content=(
                 f"`[{s['slot']:02d}]` {current_emoji} **{s['name']}** — {rarity_e}\n"
                 f"<:2245:1493575277605949480> **{s['price']:,}** {COIN_EMOJI}"
-                f"  |  📉 Drop rate: **{s['drop_rate']}%**"
+                f"  | Drop rate: **{s['drop_rate']}%**"
                 f"  |  ID: `{s['weapon_id']}`"
             )
         ))
@@ -534,7 +528,7 @@ def _build_weapon_shop_container() -> discord.ui.Container:
         content="-# dtn shop buy <slot>  |  /shop buy slot:<số>"
     ))
 
-    return discord.ui.Container(*children)
+    return discord.ui.Container(*children, accent_color=discord.Color(0x3498DB))
 
 
 def _build_event_embed() -> discord.Embed:
@@ -578,7 +572,7 @@ class RPGShop(commands.Cog):
     # ─── CRATE ───
     @shop.command(name="crate")
     async def shop_crate(self, ctx):
-        await _do_shop_crate(ctx.send, author_id=ctx.author.id, interaction=None, is_prefix=True)
+        await _do_shop_crate(ctx.send, author_id=ctx.author.id)
 
     # ─── ITEM ───
     @shop.command(name="item")

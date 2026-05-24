@@ -51,6 +51,12 @@ ERR = "<:X_:1495466670616219819>"
 OK  = "<:Tick:1495466684520206528>"
 
 # ─────────────────────────────────────────────────────────
+# COMPONENTS v2 FLAG  (bit 15 = 32768)
+# ─────────────────────────────────────────────────────────
+_cv2_flags       = discord.MessageFlags()
+_cv2_flags.value = 1 << 15
+
+# ─────────────────────────────────────────────────────────
 # PER-USER LOCK  (tránh race condition khi 2 lệnh đồng thời)
 # ─────────────────────────────────────────────────────────
 _USER_LOCKS: dict[str, asyncio.Lock] = {}
@@ -419,7 +425,7 @@ async def _run_hunt(
                 cv2_children.append(discord.ui.TextDisplay(footer_text))
 
                 # ── Assemble container ───────────────────────────
-                container = discord.ui.Container(*cv2_children, accent_color=0x4CAF50)
+                container = discord.ui.Container(*cv2_children, accent_color=discord.Color(0x4CAF50))
 
             except Exception as e:
                 return await send_fn(content=f"{ERR} | Failed to build response: `{e}`")
@@ -610,6 +616,21 @@ async def _run_hunt_bonus(author_id: int, display_name: str, send_fn) -> None:
 
 
 # ─────────────────────────────────────────────────────────
+# PREFIX SEND HELPER  (ctx.send không hỗ trợ components=)
+# ─────────────────────────────────────────────────────────
+def _make_prefix_send(ctx):
+    """Trả về send_fn dùng LayoutView cho prefix command."""
+    async def _send(content=None, components=None, **_):
+        if components:
+            _lv = discord.ui.LayoutView()
+            for _comp in components:
+                _lv.add_item(_comp)
+            return await ctx.send(content=content, view=_lv)
+        return await ctx.send(content=content)
+    return _send
+
+
+# ─────────────────────────────────────────────────────────
 # COG
 # ─────────────────────────────────────────────────────────
 class RPGHunt(commands.Cog):
@@ -629,11 +650,7 @@ class RPGHunt(commands.Cog):
             author_id      = ctx.author.id,
             author_mention = ctx.author.mention,
             display_name   = ctx.author.display_name,
-            send_fn        = lambda content=None, components=None, **_: ctx.send(
-                content=content,
-                components=components,
-                flags=discord.MessageFlags(is_components_v2=True) if components else discord.MessageFlags(),
-            ),
+            send_fn        = _make_prefix_send(ctx),
             send_bonus_fn  = lambda content=None, **_: ctx.send(content=content),
         )
 
@@ -663,7 +680,7 @@ class RPGHunt(commands.Cog):
             if components:
                 await interaction.followup.send(
                     components=components,
-                    flags=discord.MessageFlags(is_components_v2=True),
+                    flags=_cv2_flags,
                 )
             else:
                 await interaction.followup.send(content=content)
