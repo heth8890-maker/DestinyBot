@@ -227,13 +227,10 @@ class RPGWeapon(commands.Cog):
 
         # ── dtn weapon (no args) — danh sách tất cả ─────────────────
         equipped     = user.get("equipped", [None, None, None])
-        equipped_set = {w for w in equipped if w}   # dùng để lọc storage
-        # equipped_ordered: list (slot_idx 1-based, wid) — giữ nguyên thứ tự slot
-        equipped_ordered = [
-            (i + 1, wid)
-            for i, wid in enumerate(equipped)
-            if wid
-        ]
+        equipped_set = {w for w in equipped if w}
+        # equipped_all: tất cả 3 slot (có hoặc trống)
+        equipped_all     = [(i + 1, equipped[i] if i < len(equipped) else None) for i in range(3)]
+        equipped_ordered = [(idx, wid) for idx, wid in equipped_all if wid]
         storage_list = [
             w for w in user.get("weapons", [])
             if w not in equipped_set
@@ -261,10 +258,13 @@ class RPGWeapon(commands.Cog):
             header = f"{slot_prefix}{em}{p_icon} **{nm}**{eq_tag} • Lv {lv}"
             return f"{header}\n`{wid}`"
 
-        # Build equipped blocks — chỉ render slot có uid
+        # Build equipped blocks — tất cả 3 slot, trống hiện _Trống_
         equipped_blocks = []
-        for slot_idx, wid in equipped_ordered:
-            equipped_blocks.append(_render_weapon_block(wid, slot_prefix=f"**[Ô {slot_idx}]** "))
+        for slot_idx, wid in equipped_all:
+            if wid:
+                equipped_blocks.append(_render_weapon_block(wid, slot_prefix=f"**[Ô {slot_idx}]** "))
+            else:
+                equipped_blocks.append(f"**[Ô {slot_idx}]** _Trống_")
 
         # Hằng số dùng chung trong WeaponPages
         PAGE_SIZE    = 9
@@ -469,8 +469,8 @@ class RPGWeapon(commands.Cog):
                     spacing=discord.SeparatorSpacing.small,
                 ))
 
-                # [8][9] Equipped section — chỉ trang 0, chỉ khi có vũ khí
-                if page_idx == 0 and equipped_blocks:
+                # [8][9] Equipped section — trang 0, luôn hiện đủ 3 slot
+                if page_idx == 0:
                     children.append(discord.ui.TextDisplay(
                         "<:2913:1495252023912956025> **Đang trang bị**\n\n" + "\n\n".join(equipped_blocks)
                     ))
@@ -632,7 +632,6 @@ class RPGWeapon(commands.Cog):
             rlabel  = RARITY_LABEL.get(rarity, rarity)
             em      = w.get("emoji", "⚔️")
             nm      = w.get("name", b_id)
-            effects = w.get("effects", {})
 
             wi_inst          = wi_map.get(uid)
             instance_missing = wi_inst is None
@@ -641,11 +640,6 @@ class RPGWeapon(commands.Cog):
 
             _p      = resolve_passive(wi_safe.get("passive", {})) if isinstance(wi_safe, dict) else {}
             _p_icon = _p.get("emoji", "") if _p and _p.get("id") else ""
-
-            effect_lines = _fmt_effects_scaled(
-                effects, level, instance_missing=instance_missing,
-                show_passive=False,
-            )
 
             # Scale %
             if not instance_missing:
@@ -693,15 +687,6 @@ class RPGWeapon(commands.Cog):
                 p_desc  = _p.get("description") or _p.get("effect") or "—"
                 passive_line = f"{p_emoji} **{p_name}**: {p_desc}"
 
-            # Effects condensed
-            effects_condensed = None
-            if effect_lines:
-                effects_condensed = " • ".join(
-                    ln.strip().lstrip("- ").replace("\n", " ")
-                    for ln in effect_lines
-                    if ln.strip()
-                )
-
             # Assemble dòng hiển thị
             raw_lines = [
                 f"{em}{_p_icon} **{nm}** — {rlabel}   **[Ô {slot_idx}]**",
@@ -717,19 +702,21 @@ class RPGWeapon(commands.Cog):
 
             if passive_line:
                 raw_lines.append(passive_line)
-            if effects_condensed:
-                raw_lines.append(f"-# {effects_condensed}")
             raw_lines.append(f"-# `{uid}`")
 
             return "\n".join(raw_lines)
 
-        # ── Dữ liệu slots (chỉ những slot có uid) ────────────────────
-        slot_data = []   # list of (slot_idx, uid, block_text)
-        for slot_idx, uid in enumerate(equipped_raw[:3], 1):
-            if not uid:
-                continue
-            block = _build_slot_block(slot_idx, uid)
-            slot_data.append((slot_idx, uid, block))
+        # ── Dữ liệu slots — tất cả 3, trống thì ghi _Trống_ ─────────
+        slot_data       = []   # list of (slot_idx, uid, block_text) — chỉ slot có vũ khí
+        all_slot_blocks = []   # list of str — đủ 3 slot, bao gồm trống
+        for slot_idx in range(1, 4):
+            uid = equipped_raw[slot_idx - 1] if slot_idx - 1 < len(equipped_raw) else None
+            if uid:
+                block = _build_slot_block(slot_idx, uid)
+                slot_data.append((slot_idx, uid, block))
+                all_slot_blocks.append(block)
+            else:
+                all_slot_blocks.append(f"**[Ô {slot_idx}]** _Trống_")
 
         HELP_TEXT = (
             "`dtn weapon <uid>` chi tiết  •  `dtn weapon <uid> <slot>` trang bị\n"
@@ -825,20 +812,13 @@ class RPGWeapon(commands.Cog):
                 if self_v.show_help:
                     children.append(discord.ui.TextDisplay(HELP_TEXT))
 
-                # [4]+[5] Weapon blocks (Separator + TextDisplay mỗi slot)
-                if slot_data:
-                    for _, _, block in slot_data:
-                        children.append(discord.ui.Separator(
-                            visible=True,
-                            spacing=discord.SeparatorSpacing.small,
-                        ))
-                        children.append(discord.ui.TextDisplay(block))
-                else:
+                # [4]+[5] Weapon blocks — đủ 3 slot, trống hiện _Trống_
+                for block in all_slot_blocks:
                     children.append(discord.ui.Separator(
                         visible=True,
                         spacing=discord.SeparatorSpacing.small,
                     ))
-                    children.append(discord.ui.TextDisplay("-# Chưa trang bị vũ khí nào."))
+                    children.append(discord.ui.TextDisplay(block))
 
                 container = discord.ui.Container(
                     *children,

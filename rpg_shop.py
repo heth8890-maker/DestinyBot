@@ -501,7 +501,7 @@ def _build_weapon_shop_container() -> discord.ui.Container:
             content=(
                 f"`[{s['slot']:02d}]` {current_emoji} **{s['name']}** — {rarity_e}\n"
                 f"<:2245:1493575277605949480> **{s['price']:,}** {COIN_EMOJI}"
-                f"  |  📉 Drop rate: **{s['drop_rate']}%**"
+                f"  |  Drop rate: **{s['drop_rate']}%**"
                 f"  |  ID: `{s['weapon_id']}`"
             )
         ))
