@@ -8,12 +8,11 @@ GUARANTEES:
 - Never breaks the bot
 
 [BONUS SYSTEM]
-- Mỗi lần hunt có 2 roll bonus độc lập (ưu tiên crate trước):
-    • Roll 1: tỉ lệ gốc  — 1% crate | 1.75% coin
-    • Roll 2: tỉ lệ × 50% — 0.5% crate | 0.875% coin
-- Lần đầu tiên hunt trong chu kỳ 6h: cả 2 roll dùng tỉ lệ 60%/30%
-  (roll 1 = 60%, roll 2 = 30%), sau khi nhận treasure → về tỉ lệ bình thường
-- Tối đa 10 lần bonus / 6 tiếng, tự reset sau mỗi chu kỳ
+- Mỗi lần hunt có 2 roll bonus:
+    • Roll 1: random 1 trong 3 loại (crate 1% | coin 1.75% | item1099 0.75%)
+    • Roll 2: random 1 trong 3 loại, tỉ lệ × 50%
+- Mỗi loại: lần đầu trong chu kỳ dùng 60%, sau khi nhận → về tỉ lệ gốc
+- Tổng tối đa 10 lần bonus / 6 tiếng (chung cả 3 loại), tự reset sau mỗi chu kỳ
 - Thông báo bonus gửi là tin nhắn RIÊNG, không gắn vào container
 
 [SLASH COMMANDS]
@@ -54,32 +53,12 @@ OK  = "<:Tick:1495466684520206528>"
 # ─────────────────────────────────────────────────────────
 # PER-USER LOCK  (tránh race condition khi 2 lệnh đồng thời)
 # ─────────────────────────────────────────────────────────
-# [FIX 5] Dùng OrderedDict để giới hạn bộ nhớ: tối đa _LOCK_MAX_SIZE entries.
-# Khi vượt giới hạn, xóa các entry cũ nhất mà lock đang idle (không locked).
-# Tránh memory leak khi bot chạy lâu với nhiều user khác nhau.
-from collections import OrderedDict
-
-_USER_LOCKS: OrderedDict[str, asyncio.Lock] = OrderedDict()
-_LOCK_MAX_SIZE = 5_000
+_USER_LOCKS: dict[str, asyncio.Lock] = {}
 
 def _get_user_lock(uid: str) -> asyncio.Lock:
-    if uid in _USER_LOCKS:
-        _USER_LOCKS.move_to_end(uid)   # LRU: đưa lên cuối (recently used)
-        return _USER_LOCKS[uid]
-
-    lock = asyncio.Lock()
-    _USER_LOCKS[uid] = lock
-
-    # Evict oldest idle locks khi vượt giới hạn
-    while len(_USER_LOCKS) > _LOCK_MAX_SIZE:
-        oldest_uid, oldest_lock = next(iter(_USER_LOCKS.items()))
-        if not oldest_lock.locked():
-            del _USER_LOCKS[oldest_uid]
-        else:
-            # Lock đang dùng — không xóa, dừng evict lần này
-            break
-
-    return lock
+    if uid not in _USER_LOCKS:
+        _USER_LOCKS[uid] = asyncio.Lock()
+    return _USER_LOCKS[uid]
 
 
 # ─────────────────────────────────────────────────────────
@@ -99,21 +78,20 @@ def _slash_guild_only():
 # ─────────────────────────────────────────────────────────
 # BONUS SYSTEM — CONSTANTS
 # ─────────────────────────────────────────────────────────
-CRATE_DROP_CHANCE        = 1       # % tỉ lệ gốc
+CRATE_DROP_CHANCE        = 1.0    # % tỉ lệ gốc
 COIN_DROP_CHANCE         = 1.75   # % tỉ lệ gốc
-BONUS_MAX                = 10     # tối đa lần bonus mỗi chu kỳ
+ITEM_1099_DROP_CHANCE    = 0.75   # % tỉ lệ gốc
+BONUS_MAX                = 10     # tối đa lần bonus mỗi chu kỳ (chung cả 3 loại)
 BONUS_RESET_SEC          = 6 * 3600  # 6 tiếng
 FIRST_DROP_CHANCE        = 60.0   # % lần đầu chưa ra treasure loại đó trong chu kỳ
 SECOND_ROLL_MULTIPLIER   = 0.5    # roll 2 = roll 1 × 50%
 
 # ─── Treasure item 1099 drop config ─────────────────────────────────────────
-# Lần đầu tiên trong chu kỳ: 30%
-# Các lần sau: 45% (cố định)
-# [FIX 2] Comment cũ nói "crate_001 * 0.8 ≈ 55.999%" nhưng code thực tế là 45.0 hardcode.
-# Đã xóa _crate_001_weight (dead code) và đồng bộ comment với giá trị thực.
-ITEM_1099_DROP_CHANCE_FIRST = 30.0   # % lần đầu trong chu kỳ
 ITEM_1099_AMOUNT_MIN        = 88
 ITEM_1099_AMOUNT_MAX        = 137
+
+# Danh sách loại treasure để random chọn mỗi roll
+_TREASURE_TYPES = ["crate", "coin", "item1099"]
 
 # Bảng tỉ lệ crate — tổng = 100%
 # Others cố định: 003=5, 004=2, 006=1, 009=0.001 → tổng = 8.001
@@ -127,9 +105,6 @@ CRATE_POOL = [
     ("009",  0.001),   # (crate 009) —  ~0%
 ]
 # Tổng: 69.999 + 22 + 5 + 2 + 1 + 0.001 = 100.000 ✓
-
-# Tỉ lệ drop item 1099 từ lần thứ 2 trở đi = 45%
-ITEM_1099_DROP_CHANCE_BASE = 45.0   # % cố định từ lần thứ 2 trở đi
 
 # Tên fallback nếu CRATES chưa load được
 _CRATE_FALLBACK = {
@@ -145,28 +120,20 @@ _CRATE_FALLBACK = {
 # ─────────────────────────────────────────────────────────
 # BONUS HELPERS
 # ─────────────────────────────────────────────────────────
-def _roll_crate(is_first: bool, second_roll: bool, extra_chance: float = 0.0) -> bool:
+def _roll_treasure(roll_type: str, is_first: bool, second_roll: bool, extra_chance: float = 0.0) -> bool:
     """
-    Roll xem có ra crate không.
-    - is_first=True   : tỉ lệ base = FIRST_DROP_CHANCE (60%)
-    - second_roll=True: nhân × SECOND_ROLL_MULTIPLIER (0.5)
-    - extra_chance    : bonus từ treasure_hunt effect (raw, × 100 để ra %)
+    Roll xem treasure loại roll_type có rơi không.
+    - roll_type   : "crate" | "coin" | "item1099"
+    - is_first    : True → dùng FIRST_DROP_CHANCE (60%)
+    - second_roll : True → nhân × SECOND_ROLL_MULTIPLIER (0.5)
+    - extra_chance: bonus từ treasure_hunt effect (raw, × 100 để ra %)
     """
-    base  = FIRST_DROP_CHANCE if is_first else CRATE_DROP_CHANCE
-    base += extra_chance * 100
-    if second_roll:
-        base *= SECOND_ROLL_MULTIPLIER
-    return random.uniform(0, 100) < base
-
-
-def _roll_coin(is_first: bool, second_roll: bool, extra_chance: float = 0.0) -> bool:
-    """
-    Roll xem có ra coin không.
-    - is_first=True   : tỉ lệ base = FIRST_DROP_CHANCE (60%)
-    - second_roll=True: nhân × SECOND_ROLL_MULTIPLIER (0.5)
-    - extra_chance    : bonus từ treasure_hunt effect (raw, × 100 để ra %)
-    """
-    base  = FIRST_DROP_CHANCE if is_first else COIN_DROP_CHANCE
+    if roll_type == "crate":
+        base = FIRST_DROP_CHANCE if is_first else CRATE_DROP_CHANCE
+    elif roll_type == "coin":
+        base = FIRST_DROP_CHANCE if is_first else COIN_DROP_CHANCE
+    else:  # item1099
+        base = FIRST_DROP_CHANCE if is_first else ITEM_1099_DROP_CHANCE
     base += extra_chance * 100
     if second_roll:
         base *= SECOND_ROLL_MULTIPLIER
@@ -188,9 +155,9 @@ def _get_bonus_data(user: dict, now: int) -> dict:
     """
     Trả về dict hunt_bonus của user, reset tự động nếu hết chu kỳ.
     Fields:
-      count               – số lần bonus (crate/coin) đã dùng trong chu kỳ
+      count               – số lần bonus đã dùng trong chu kỳ (chung cả 3 loại, max 10)
       reset_at            – timestamp kết thúc chu kỳ
-      item1099_dropped    – True nếu item 1099 đã rơi trong chu kỳ
+      item1099_dropped    – True nếu item 1099 đã rơi trong chu kỳ (hết 60%)
       crate_first_dropped – True nếu đã từng ra crate trong chu kỳ (hết 60%)
       coin_first_dropped  – True nếu đã từng ra coin trong chu kỳ (hết 60%)
     """
@@ -220,18 +187,6 @@ def _crate_display(crate_id: str) -> tuple[str, str]:
     name  = info.get("name",  f"Crate {crate_id}")
     return emoji, name
 
-
-def _roll_item_1099(bonus: dict) -> int:
-    """
-    Roll xem item 1099 có rơi không trong lượt bonus này.
-    - Lần đầu tiên trong chu kỳ (item1099_dropped == False): tỉ lệ 30%
-    - Các lần sau                                           : tỉ lệ = crate_001 * 0.8 (~55.999%)
-    Trả về số lượng item (88-137) nếu rơi, hoặc 0 nếu không.
-    """
-    chance = ITEM_1099_DROP_CHANCE_FIRST if not bonus["item1099_dropped"] else ITEM_1099_DROP_CHANCE_BASE
-    if random.uniform(0, 100) < chance:
-        return random.randint(ITEM_1099_AMOUNT_MIN, ITEM_1099_AMOUNT_MAX)
-    return 0
 
 
 # ─────────────────────────────────────────────────────────
@@ -464,10 +419,16 @@ async def _run_hunt(
                 cv2_children.append(discord.ui.TextDisplay(footer_text))
 
                 # ── Assemble container ───────────────────────────
-                container = discord.ui.Container(*cv2_children)
+                container = discord.ui.Container(*cv2_children, accent_color=0x4CAF50)
 
             except Exception as e:
                 return await send_fn(content=f"{ERR} | Failed to build response: `{e}`")
+
+            # ── Cooldown save ───────────────────────────────────
+            try:
+                user["hunt_cd"] = now
+            except Exception as e:
+                print(f"⚠️  Warning: hunt_cd update failed: {e}")
 
             # ── Bonus roll ──────────────────────────────────────
             bonus_msgs = []
@@ -477,99 +438,93 @@ async def _run_hunt(
                 bonus             = _get_bonus_data(user, now)
                 treasure_hunt_val = effects_full.get("treasure_hunt", 0.0)
 
-                # ── CRATE: 2 roll độc lập ───────────────────────
+                # ── 2 roll: mỗi roll random 1 loại treasure ────────
                 for roll_idx in range(2):
                     if bonus["count"] >= BONUS_MAX:
                         break
-                    is_first_crate = not bonus["crate_first_dropped"]
-                    hit = _roll_crate(
-                        is_first    = is_first_crate,
-                        second_roll = (roll_idx == 1),
-                        extra_chance= treasure_hunt_val,
-                    )
-                    if hit:
-                        crate_id  = _roll_crate_id()
-                        crate_key = f"crate_{crate_id}"
-                        # [FIX 4] Wrap add_item — chỉ tăng count khi add thành công.
-                        # Code cũ: add_item có thể fail nhưng count vẫn bị tăng → mất slot bonus.
-                        try:
+                    roll_type   = random.choice(_TREASURE_TYPES)
+                    second_roll = (roll_idx == 1)
+
+                    if roll_type == "crate":
+                        is_first = not bonus["crate_first_dropped"]
+                        hit = _roll_treasure(
+                            roll_type    = "crate",
+                            is_first     = is_first,
+                            second_roll  = second_roll,
+                            extra_chance = treasure_hunt_val,
+                        )
+                        if hit:
+                            crate_id  = _roll_crate_id()
+                            crate_key = f"crate_{crate_id}"
                             add_item(user, crate_key)
-                        except Exception as e:
-                            print(f"⚠️  Warning: add_item failed for crate {crate_key}: {e}")
-                            continue  # skip roll này, count không tăng
-                        bonus["count"] += 1
-                        bonus["crate_first_dropped"] = True
+                            bonus["count"] += 1
+                            bonus["crate_first_dropped"] = True
 
-                        emoji, name  = _crate_display(crate_id)
-                        remaining    = BONUS_MAX - bonus["count"]
-                        reset_in_min = max(0, (bonus["reset_at"] - now) // 60)
-                        bonus_msgs.append(
-                            f"<:2925:1495277191867400284> | {author_mention} Kho báu rơi ra "
-                            f"{emoji} **{name}**!\n"
-                            f"-# Bonus còn lại: **{remaining}/{BONUS_MAX}** "
-                            f"(reset sau {reset_in_min} phút)"
+                            emoji, name  = _crate_display(crate_id)
+                            remaining    = BONUS_MAX - bonus["count"]
+                            reset_in_min = max(0, (bonus["reset_at"] - now) // 60)
+                            bonus_msgs.append(
+                                f"<:2925:1495277191867400284> | {author_mention} Kho báu rơi ra "
+                                f"{emoji} **{name}**!\n"
+                                f"-# Bonus còn lại: **{remaining}/{BONUS_MAX}** "
+                                f"(reset sau {reset_in_min} phút)"
+                            )
+
+                    elif roll_type == "coin":
+                        is_first = not bonus["coin_first_dropped"]
+                        hit = _roll_treasure(
+                            roll_type    = "coin",
+                            is_first     = is_first,
+                            second_roll  = second_roll,
+                            extra_chance = treasure_hunt_val,
                         )
+                        if hit:
+                            c = random.randint(2000, 6500)
+                            total_coins += c
+                            bonus["count"] += 1
+                            bonus["coin_first_dropped"] = True
 
-                # ── COIN: 2 roll độc lập ────────────────────────
-                for roll_idx in range(2):
-                    if bonus["count"] >= BONUS_MAX:
-                        break
-                    is_first_coin = not bonus["coin_first_dropped"]
-                    hit = _roll_coin(
-                        is_first    = is_first_coin,
-                        second_roll = (roll_idx == 1),
-                        extra_chance= treasure_hunt_val,
-                    )
-                    if hit:
-                        c = random.randint(2000, 6500)
-                        # [FIX 4] Coin không cần add_item nhưng update balance cần thành công.
-                        # Tăng total_coins + count trước, nếu update_balance_safe fail ở sau
-                        # thì sẽ bị log ⚠️ — acceptable vì coin là side effect nhỏ.
-                        # Không có gì để rollback ở bước này nên giữ nguyên logic coin.
-                        total_coins += c
-                        bonus["count"] += 1
-                        bonus["coin_first_dropped"] = True
+                            remaining    = BONUS_MAX - bonus["count"]
+                            reset_in_min = max(0, (bonus["reset_at"] - now) // 60)
+                            bonus_msgs.append(
+                                f"<:2925:1495277191867400284> | {author_mention} Kho báu rơi ra "
+                                f"**{c:,}** {COIN_EMOJI} **Coin**!\n"
+                                f"-# Bonus còn lại: **{remaining}/{BONUS_MAX}** "
+                                f"(reset sau {reset_in_min} phút)"
+                            )
 
-                        remaining    = BONUS_MAX - bonus["count"]
-                        reset_in_min = max(0, (bonus["reset_at"] - now) // 60)
-                        bonus_msgs.append(
-                            f"<:2925:1495277191867400284> | {author_mention} Kho báu rơi ra "
-                            f"**{c:,}** {COIN_EMOJI} **Coin**!\n"
-                            f"-# Bonus còn lại: **{remaining}/{BONUS_MAX}** "
-                            f"(reset sau {reset_in_min} phút)"
+                    else:  # item1099
+                        is_first = not bonus["item1099_dropped"]
+                        hit = _roll_treasure(
+                            roll_type    = "item1099",
+                            is_first     = is_first,
+                            second_roll  = second_roll,
+                            extra_chance = treasure_hunt_val,
                         )
-
-                # ── Item 1099 drop (độc lập, không dùng BONUS_MAX) ──
-                item1099_qty = _roll_item_1099(bonus)
-                if item1099_qty > 0:
-                    try:
-                        item_info  = get_item_by_id("1099")
-                        item_emoji = item_info.get("emoji", "🔮") if item_info else "🔮"
-                        item_name  = item_info.get("name",  "Item 1099") if item_info else "Item 1099"
-                        for _ in range(item1099_qty):
-                            add_item(user, "1099")
-                        bonus["item1099_dropped"] = True
-                        reset_in_min_1099 = max(0, (bonus["reset_at"] - now) // 60)
-                        bonus_msgs.append(
-                            f"<:2925:1495277191867400284> | {author_mention} Kho báu rơi ra "
-                            f"**{item1099_qty}x** {item_emoji} **{item_name}**!\n"
-                            f"-# (reset sau {reset_in_min_1099} phút)"
-                        )
-                    except Exception as e:
-                        print(f"⚠️  Warning: item 1099 add failed: {e}")
+                        if hit:
+                            try:
+                                item_info  = get_item_by_id("1099")
+                                item_emoji = item_info.get("emoji", "🔮") if item_info else "🔮"
+                                item_name  = item_info.get("name",  "Item 1099") if item_info else "Item 1099"
+                                qty = random.randint(ITEM_1099_AMOUNT_MIN, ITEM_1099_AMOUNT_MAX)
+                                for _ in range(qty):
+                                    add_item(user, "1099")
+                                bonus["count"] += 1
+                                bonus["item1099_dropped"] = True
+                                reset_in_min = max(0, (bonus["reset_at"] - now) // 60)
+                                bonus_msgs.append(
+                                    f"<:2925:1495277191867400284> | {author_mention} Kho báu rơi ra "
+                                    f"**{qty}x** {item_emoji} **{item_name}**!\n"
+                                    f"-# Bonus còn lại: **{BONUS_MAX - bonus['count']}/{BONUS_MAX}** "
+                                    f"(reset sau {reset_in_min} phút)"
+                                )
+                            except Exception as e:
+                                print(f"⚠️  Warning: item 1099 add failed: {e}")
 
             except Exception as e:
                 print(f"⚠️  Warning: bonus roll failed: {e}")
 
             # ── Save ────────────────────────────────────────────
-            # [FIX 3] hunt_cd được set SAU khi bonus roll xong, ngay trước save.
-            # Code cũ set hunt_cd trước bonus roll — nếu save fail, cooldown không
-            # được persist nhưng đã được tính vào user dict theo thứ tự sai.
-            try:
-                user["hunt_cd"] = now
-            except Exception as e:
-                print(f"⚠️  Warning: hunt_cd update failed: {e}")
-
             try:
                 ok = save_user(uid, user)
                 if not ok:
@@ -670,25 +625,15 @@ class RPGHunt(commands.Cog):
     @commands.group(name="hunt", aliases=["h"], invoke_without_command=True)
     async def hunt(self, ctx):
         """dtn hunt — đi săn vật phẩm."""
-        # [FIX 1] Lambda cũ luôn truyền components=None vào ctx.send() khi fallback error.
-        # Một số fork discord.py không chấp nhận components=None → TypeError im lặng →
-        # bot không báo lỗi trên Discord mà chỉ crash trong try/except nội bộ.
-        # Slash command (line ~675) đã có pattern đúng — áp dụng tương tự cho prefix.
-        async def _send_prefix(content=None, components=None, **_):
-            if components:
-                # ctx.send() không hỗ trợ components= trực tiếp.
-                # Wrap vào LayoutView rồi dùng view= — không cần flags=.
-                _lv = discord.ui.LayoutView()
-                for _comp in components:
-                    _lv.add_item(_comp)
-                return await ctx.send(content=content, view=_lv)
-            return await ctx.send(content=content)
-
         await _run_hunt(
             author_id      = ctx.author.id,
             author_mention = ctx.author.mention,
             display_name   = ctx.author.display_name,
-            send_fn        = _send_prefix,
+            send_fn        = lambda content=None, components=None, **_: ctx.send(
+                content=content,
+                components=components,
+                flags=discord.MessageFlags(is_components_v2=True) if components else discord.MessageFlags(),
+            ),
             send_bonus_fn  = lambda content=None, **_: ctx.send(content=content),
         )
 
@@ -716,11 +661,9 @@ class RPGHunt(commands.Cog):
 
         async def _send(content=None, components=None, **_):
             if components:
-                _flags = discord.MessageFlags()
-                _flags.value = 1 << 15  # is_components_v2 = bit 15 (32768)
                 await interaction.followup.send(
                     components=components,
-                    flags=_flags,
+                    flags=discord.MessageFlags(is_components_v2=True),
                 )
             else:
                 await interaction.followup.send(content=content)

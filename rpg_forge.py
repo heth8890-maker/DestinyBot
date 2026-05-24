@@ -33,7 +33,7 @@ ERR           = "<:X_:1495466670616219819>"
 OK            = "<:Tick:1495466684520206528>"
 RR_ICON       = "<:Rerrol:1506332609452441670>"
 SHARD_ICON    = "<:Enchant_shard:1506136888988405782>"
-SHARD_ID      = "1999"
+SHARD_ID      = "1099"
 FORGE_IMG     = "IMG_forge.png"
 
 RR_COST      = {"passive": (80, 120),  "quality": (130, 162)}

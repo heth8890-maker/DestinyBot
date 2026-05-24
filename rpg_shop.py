@@ -335,14 +335,18 @@ class CrateShopView(discord.ui.View):
         self.page         = max(0, min(page, _total_crate_pages() - 1))
         self.author_id    = author_id
         self.user_weapons = user_weapons
+        self.message: discord.Message | None = None  # lưu để edit lúc on_timeout
 
-        # Nút trang (disabled, chỉ hiển thị)
+        # Sau super().__init__(), decorator buttons đã được add tự động.
+        # self.children = [prev_btn, next_btn] — KHÔNG gọi add_item lại.
+        # page_btn là button tạo thủ công → cần insert giữa prev và next.
         self.page_btn = discord.ui.Button(
             label=self._page_label(),
             style=discord.ButtonStyle.secondary,
             disabled=True,
         )
-        self.add_item(self.prev_btn)
+        # Tạm thời remove next_btn để giữ thứ tự: [◀] [1/N] [▶]
+        self.remove_item(self.next_btn)
         self.add_item(self.page_btn)
         self.add_item(self.next_btn)
         self._sync_buttons()
@@ -391,6 +395,14 @@ class CrateShopView(discord.ui.View):
     async def on_timeout(self) -> None:
         for item in self.children:
             item.disabled = True
+        if self.message is not None:
+            try:
+                container = _build_crate_page_container(
+                    self.page, user_weapons=self.user_weapons, view=self
+                )
+                await self.message.edit(components=[container], flags=_cv2_flags)
+            except Exception:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════
@@ -414,27 +426,32 @@ async def _do_shop_crate(
     is_prefix: bool = False,
 ):
     """Gửi shop crate dùng Components v2.
-    - is_prefix=True  -> ctx.send() không hỗ trợ components=, dùng LayoutView + view=
-    - is_prefix=False -> interaction.response/followup.send hỗ trợ components= + flags=
+    - Slash: send_fn = interaction.response.send_message → dùng components= + flags=
+    - Prefix: send_fn = ctx.send → ctx.send không hỗ trợ components=, phải wrap LayoutView
     """
+    # Lấy user_weapons từ author_id (prefix) hoặc interaction.user.id (slash)
     user_weapons: set[str] | None = None
-    if interaction is not None:
-        user_data, _ = get_user(str(interaction.user.id))
+    uid = str(interaction.user.id) if interaction is not None else (str(author_id) if author_id else None)
+    if uid:
+        user_data, _ = get_user(uid)
         user_weapons = set(user_data.get("seen_weapons", []))
 
     view      = CrateShopView(page=0, author_id=author_id, user_weapons=user_weapons)
     container = _build_crate_page_container(0, user_weapons=user_weapons, view=view)
 
     if is_prefix:
-        # ctx.send() không hỗ trợ components= — wrap vào LayoutView, không cần flags=
-        _lv = discord.ui.LayoutView()
-        _lv.add_item(container)
-        await send_fn(view=_lv)
+        # ctx.send không nhận components= → wrap vào LayoutView
+        lv = discord.ui.LayoutView()
+        lv.add_item(container)
+        await send_fn(view=lv)
     else:
-        await send_fn(
-            components=[container],
-            flags=_cv2_flags,
-        )
+        await send_fn(components=[container], flags=_cv2_flags)
+        # Lưu message để on_timeout có thể edit disable nút
+        if interaction is not None:
+            try:
+                view.message = await interaction.original_response()
+            except Exception:
+                pass
 
 
 def _build_shop_item_embeds() -> list[discord.Embed]:
@@ -501,7 +518,7 @@ def _build_weapon_shop_container() -> discord.ui.Container:
             content=(
                 f"`[{s['slot']:02d}]` {current_emoji} **{s['name']}** — {rarity_e}\n"
                 f"<:2245:1493575277605949480> **{s['price']:,}** {COIN_EMOJI}"
-                f"  |  Drop rate: **{s['drop_rate']}%**"
+                f"  |  📉 Drop rate: **{s['drop_rate']}%**"
                 f"  |  ID: `{s['weapon_id']}`"
             )
         ))
@@ -572,9 +589,9 @@ class RPGShop(commands.Cog):
     @shop.command(name="weapon")
     async def shop_weapon(self, ctx):
         """Xem 10 weapon đang bán (reset mỗi 6 tiếng)."""
-        _lv = discord.ui.LayoutView()
-        _lv.add_item(_build_weapon_shop_container())
-        await ctx.send(view=_lv)  # ctx.send() không hỗ trợ components=
+        lv = discord.ui.LayoutView()
+        lv.add_item(_build_weapon_shop_container())
+        await ctx.send(view=lv)
 
     # ─── BUY (weapon shop) ───
     @shop.command(name="buy")
