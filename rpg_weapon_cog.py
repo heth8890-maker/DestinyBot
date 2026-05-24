@@ -246,7 +246,7 @@ class RPGWeapon(commands.Cog):
                 f"chưa có vũ khí nào."
             )
 
-        # ── Helper: render 1 weapon thành block text dùng │ ────────────
+        # ── Helper: render 1 weapon thành block text ────────────
         def _render_weapon_block(wid: str, slot_prefix: str = "") -> str:
             base_id = get_base_id(str(wid)) or str(wid)
             w       = get_weapon_by_id(base_id)
@@ -258,21 +258,8 @@ class RPGWeapon(commands.Cog):
             p_icon  = p.get("emoji", "") if p and p.get("id") else ""
             eq_tag  = " **[E]**" if wid in equipped_set else ""
 
-            # Effects rút gọn (1 dòng)
-            effects_line = ""
-            if w and w.get("effects"):
-                from rpg_weapon_data import _fmt_effects_scaled
-                ef_lines = _fmt_effects_scaled(w["effects"], lv, show_passive=False)
-                if ef_lines:
-                    condensed = " • ".join(
-                        ln.strip().lstrip("- ").replace("\n", " ")
-                        for ln in ef_lines if ln.strip()
-                    )
-                    if condensed:
-                        effects_line = f"\n│ -# {condensed}"
-
             header = f"{slot_prefix}{em}{p_icon} **{nm}**{eq_tag} • Lv {lv}"
-            return f"│ {header}\n│ `{wid}`{effects_line}"
+            return f"{header}\n`{wid}`"
 
         # Build equipped blocks — chỉ render slot có uid
         equipped_blocks = []
@@ -301,8 +288,8 @@ class RPGWeapon(commands.Cog):
                 self.page          = 0
                 self.message       = None
                 self.show_help     = False
-                self.rarity_filter = None   # str | None
-                self.sort_mode     = "oldest"
+                self.rarity_filter = []     # list[str], empty = tất cả
+                self.sort_mode     = "rarity"
                 self._build_view(0)
 
             # ── check author ─────────────────────────────────────────
@@ -323,7 +310,7 @@ class RPGWeapon(commands.Cog):
                 if self.rarity_filter:
                     filtered = [
                         wid for wid in filtered
-                        if (get_weapon_by_id(get_base_id(wid) or wid) or {}).get("rarity") == self.rarity_filter
+                        if (get_weapon_by_id(get_base_id(wid) or wid) or {}).get("rarity") in self.rarity_filter
                     ]
 
                 # 2. Sort
@@ -333,6 +320,8 @@ class RPGWeapon(commands.Cog):
                     filtered.sort(key=lambda wid: RARITY_ORDER.get(
                         (get_weapon_by_id(get_base_id(wid) or wid) or {}).get("rarity", "common"), 99
                     ))
+                elif self.sort_mode == "type":
+                    filtered.sort(key=lambda wid: (get_weapon_by_id(get_base_id(wid) or wid) or {}).get("type", ""))
                 elif self.sort_mode == "sell":
                     def _sell_price(wid):
                         w = get_weapon_by_id(get_base_id(wid) or wid) or {}
@@ -355,12 +344,13 @@ class RPGWeapon(commands.Cog):
                 # 4. Filter summary cho TextDisplay
                 parts = []
                 if self.rarity_filter:
-                    parts.append(f"Rarity: {RARITY_LABEL.get(self.rarity_filter, self.rarity_filter)}")
-                if self.sort_mode != "oldest":
+                    labels = [RARITY_LABEL.get(r, r) for r in self.rarity_filter]
+                    parts.append(f"Rarity: {', '.join(labels)}")
+                if self.sort_mode != "rarity":
                     sort_labels = {
-                        "newest": "Mới → Cũ",
-                        "rarity": "Rarity cao → thấp",
-                        "sell":   "Giá bán cao → thấp",
+                        "newest": "Sort latest",
+                        "oldest": "Sort oldest",
+                        "type":   "Sort type",
                     }
                     parts.append(f"Sort: {sort_labels.get(self.sort_mode, self.sort_mode)}")
                 filter_summary = "  •  ".join(parts) if parts else "None"
@@ -396,46 +386,58 @@ class RPGWeapon(commands.Cog):
                 if self.show_help:
                     children.append(discord.ui.TextDisplay(HELP_TEXT))
 
-                # [4] ActionRow nút Rarity — trong container
-                rarity_label = (
-                    f"Rarity: {RARITY_LABEL.get(self.rarity_filter, self.rarity_filter)}"
+                # [4] ActionRow StringSelect Rarity (multiselect) — trong container
+                seen_r_ms: set = set()
+                available_rarities_ms = []
+                for wid in storage_list:
+                    r = (get_weapon_by_id(get_base_id(wid) or wid) or {}).get("rarity")
+                    if r and r not in seen_r_ms:
+                        seen_r_ms.add(r)
+                        available_rarities_ms.append(r)
+                available_rarities_ms.sort(key=lambda r: RARITY_ORDER.get(r, 99))
+
+                rarity_options = [
+                    discord.SelectOption(
+                        label=RARITY_LABEL.get(r, r),
+                        value=r,
+                        default=(r in self.rarity_filter),
+                    )
+                    for r in available_rarities_ms
+                ] or [discord.SelectOption(label="—", value="none")]
+
+                rarity_placeholder = (
+                    f"Rarity: {', '.join(RARITY_LABEL.get(r, r) for r in self.rarity_filter)}"
                     if self.rarity_filter else "Rarity: Tất cả"
                 )
-                btn_rarity = discord.ui.Button(
-                    label=rarity_label,
-                    style=discord.ButtonStyle.primary if self.rarity_filter else discord.ButtonStyle.secondary,
+                sel_rarity = discord.ui.StringSelect(
+                    placeholder=rarity_placeholder,
+                    options=rarity_options,
                     custom_id=f"wpn_rarity_{ctx.author.id}",
+                    min_values=0,
+                    max_values=max(1, len(available_rarities_ms)),
+                    disabled=not available_rarities_ms,
                 )
 
-                async def _rarity_cb(interaction: discord.Interaction):
+                async def _rarity_ms_cb(interaction: discord.Interaction):
                     if not await self._check(interaction):
                         return
-                    seen_r: set = set()
-                    available_rarities = []
-                    for wid in storage_list:
-                        r = (get_weapon_by_id(get_base_id(wid) or wid) or {}).get("rarity")
-                        if r and r not in seen_r:
-                            seen_r.add(r)
-                            available_rarities.append(r)
-                    available_rarities.sort(key=lambda r: RARITY_ORDER.get(r, 99))
-                    cycle = [None] + available_rarities
-                    current_idx = cycle.index(self.rarity_filter) if self.rarity_filter in cycle else 0
-                    self.rarity_filter = cycle[(current_idx + 1) % len(cycle)]
+                    selected = interaction.data.get("values", [])
+                    self.rarity_filter = [v for v in selected if v != "none"]
                     self.page = 0
                     self._build_view(0)
                     await interaction.response.edit_message(view=self)
 
-                btn_rarity.callback = _rarity_cb
+                sel_rarity.callback = _rarity_ms_cb
                 ar_rarity = discord.ui.ActionRow()
-                ar_rarity.add_item(btn_rarity)
+                ar_rarity.add_item(sel_rarity)
                 children.append(ar_rarity)
 
                 # [5] ActionRow StringSelect sắp xếp — trong container
                 sort_options = [
-                    discord.SelectOption(label="Cũ → Mới",           value="oldest", default=(self.sort_mode == "oldest")),
-                    discord.SelectOption(label="Mới → Cũ",           value="newest", default=(self.sort_mode == "newest")),
-                    discord.SelectOption(label="Rarity cao → thấp",  value="rarity", default=(self.sort_mode == "rarity")),
-                    discord.SelectOption(label="Giá bán cao → thấp", value="sell",   default=(self.sort_mode == "sell")),
+                    discord.SelectOption(label="Sort rarity", value="rarity", default=(self.sort_mode == "rarity")),
+                    discord.SelectOption(label="Sort latest", value="newest", default=(self.sort_mode == "newest")),
+                    discord.SelectOption(label="Sort oldest", value="oldest", default=(self.sort_mode == "oldest")),
+                    discord.SelectOption(label="Sort type",   value="type",   default=(self.sort_mode == "type")),
                 ]
                 sel_sort = discord.ui.StringSelect(
                     placeholder="Sắp xếp...",
@@ -478,7 +480,7 @@ class RPGWeapon(commands.Cog):
                     ))
 
                 # [10] Storage section — không hiển thị "trang X/Y" (đã có ở nút giữa)
-                filter_active = self.rarity_filter or self.sort_mode != "oldest"
+                filter_active = self.rarity_filter or self.sort_mode != "rarity"
                 filter_tag    = " _(đang lọc)_" if filter_active else ""
                 page_blocks   = pages[page_idx] if pages and pages[page_idx] else []
                 storage_text  = (
@@ -620,9 +622,9 @@ class RPGWeapon(commands.Cog):
 
             if not w:
                 lines = [
-                    f"│ ⚠️ **[Ô {slot_idx}]** — Definition not found",
-                    f"│ -# base_id: `{b_id}`",
-                    f"│ -# `{uid}`",
+                    f"⚠️ **[Ô {slot_idx}]** — Definition not found",
+                    f"-# base_id: `{b_id}`",
+                    f"-# `{uid}`",
                 ]
                 return "\n".join(lines)
 
@@ -664,8 +666,8 @@ class RPGWeapon(commands.Cog):
                     filled       = int(exp / exp_next * 10)
                     bar          = "█" * filled + "░" * (10 - filled)
                     exp_bar_line = (
-                        f"Lv **{level}** / 50 │ `{bar}` {exp}/{exp_next} EXP"
-                        f" │ {scale_str}"
+                        f"Lv **{level}** / 50  `{bar}` {exp}/{exp_next} EXP"
+                        f"  {scale_str}"
                     )
 
             # Durability
@@ -700,7 +702,7 @@ class RPGWeapon(commands.Cog):
                     if ln.strip()
                 )
 
-            # Assemble dòng │
+            # Assemble dòng hiển thị
             raw_lines = [
                 f"{em}{_p_icon} **{nm}** — {rlabel}   **[Ô {slot_idx}]**",
                 exp_bar_line,
@@ -719,7 +721,7 @@ class RPGWeapon(commands.Cog):
                 raw_lines.append(f"-# {effects_condensed}")
             raw_lines.append(f"-# `{uid}`")
 
-            return "\n".join(f"│ {ln}" for ln in raw_lines)
+            return "\n".join(raw_lines)
 
         # ── Dữ liệu slots (chỉ những slot có uid) ────────────────────
         slot_data = []   # list of (slot_idx, uid, block_text)
