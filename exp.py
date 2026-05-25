@@ -286,7 +286,7 @@ def set_equipped_bg(user_id, bg_id: str) -> bool:
 # ═══════════════════════════════════════════════════════════
 
 def get_xp_needed(level):
-    return (100 + level * 50) * 240
+    return (100 + level * 50) * 160
 
 
 # ═══════════════════════════════════════════════════════════
@@ -302,6 +302,42 @@ def _load_font(size):
     except Exception as e:
         print(f"⚠️ Font error: {e}")
         return ImageFont.load_default()
+
+
+EMOJI_WALLET = "1493575277605949480"   # <:2245:1493575277605949480>
+EMOJI_COIN   = "1495831576397742241"   # <:Coin:1495831576397742241>
+
+_emoji_cache: dict[str, Image.Image] = {}   # in-process cache, tránh fetch lặp
+
+
+async def _fetch_discord_emoji(
+    session: aiohttp.ClientSession,
+    emoji_id: str,
+    size: int,
+) -> Image.Image | None:
+    """
+    Tải emoji từ Discord CDN và trả về PIL Image đã resize.
+    Cache in-memory theo (emoji_id, size) để tránh fetch lại trong cùng 1 run.
+    """
+    cache_key = f"{emoji_id}:{size}"
+    if cache_key in _emoji_cache:
+        return _emoji_cache[cache_key]
+
+    url = f"https://cdn.discordapp.com/emojis/{emoji_id}.png?size=64"
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+            if resp.status == 200:
+                data  = await resp.read()
+                emoji = (
+                    Image.open(io.BytesIO(data))
+                    .convert("RGBA")
+                    .resize((size, size), Image.LANCZOS)
+                )
+                _emoji_cache[cache_key] = emoji
+                return emoji
+    except Exception as e:
+        print(f"[EXP] Lỗi tải emoji {emoji_id}: {e}")
+    return None
 
 
 def draw_text_with_outline(draw, pos, text, font, fill_color, outline_color="#000000", thickness=3):
@@ -359,7 +395,7 @@ class Experience(commands.Cog):
 
         # Đọc exp/level hiện tại — chạy trong executor để không block event loop
         # (pymongo là sync I/O; nếu Mongo chậm sẽ block toàn bộ bot)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         xp, current_level = await loop.run_in_executor(None, _get_exp_data, uid)
 
         xp_to_add = 120 if message.content.lower().startswith("dtn ") else 50
@@ -390,11 +426,10 @@ class Experience(commands.Cog):
                     level=current_level,
                 ),
             )
-            reward_display = 24000 * (2 ** (current_level - 2))
             await message.channel.send(
                 f"🎉 | Chúc mừng **{message.author.name}** đã thăng cấp lên "
                 f"**Level {current_level}**! "
-                f"Bạn nhận được **{reward_display:,}** <:Coin:1495831576397742241>!"
+                f"Bạn nhận được **{reward_money:,}** <:Coin:1495831576397742241>!"
             )
         else:
             # Không level-up: chỉ cộng exp, không đụng cash
@@ -460,12 +495,21 @@ class Experience(commands.Cog):
         img     = Image.alpha_composite(img, overlay)
         draw    = ImageDraw.Draw(img)
 
-        # ── Avatar + viền vàng ──
+        # ── Avatar + emoji icons — 1 session, fetch song song ──
+        icon_size     = int(FS_MEDIUM * 1.1)
+        icon_offset_y = (FS_MEDIUM - icon_size) // 2
+        bal_str       = f"{bal:,}"
+        wallet_icon: Image.Image | None = None
+        coin_icon:   Image.Image | None = None
         try:
             avatar_url = user.display_avatar.with_format("png").with_size(512).url
             timeout    = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(avatar_url) as resp:
+                avatar_task = session.get(avatar_url)
+                wallet_task = _fetch_discord_emoji(session, EMOJI_WALLET, icon_size)
+                coin_task   = _fetch_discord_emoji(session, EMOJI_COIN,   icon_size)
+
+                async with avatar_task as resp:
                     if resp.status == 200:
                         avatar_bytes = await resp.read()
                         avatar = (
@@ -479,8 +523,10 @@ class Experience(commands.Cog):
                             [AV_X, AV_Y, AV_X + AV_SIZE, AV_Y + AV_SIZE],
                             fill="#333333",
                         )
+
+                wallet_icon, coin_icon = await asyncio.gather(wallet_task, coin_task)
         except Exception as e:
-            print(f"[EXP] Lỗi tải avatar: {e}")
+            print(f"[EXP] Lỗi tải avatar/emoji: {e}")
             draw.rectangle(
                 [AV_X, AV_Y, AV_X + AV_SIZE, AV_Y + AV_SIZE],
                 fill="#333333",
@@ -502,20 +548,15 @@ class Experience(commands.Cog):
                                font=font_small, fill_color="#CCCCCC", thickness=2)
 
         # Icon tiền
-        icon_size     = int(FS_MEDIUM * 1.1)
-        icon_offset_y = (FS_MEDIUM - icon_size) // 2
-        bal_str       = f"{bal:,}"
-        try:
-            wallet_icon = Image.open("2309.png").convert("RGBA").resize((icon_size, icon_size))
-            money_icon  = Image.open("2246.png").convert("RGBA").resize((icon_size, icon_size))
 
+        if wallet_icon and coin_icon:
             img.paste(wallet_icon, (TEXT_X, MONEY_Y + icon_offset_y), wallet_icon)
             bal_x = TEXT_X + icon_size + 12
             draw_text_with_outline(draw, (bal_x, MONEY_Y), bal_str,
                                    font=font_medium, fill_color="#A3E4D7", thickness=3)
             tw = int(draw.textlength(bal_str, font=font_medium))
-            img.paste(money_icon, (bal_x + tw + 12, MONEY_Y + icon_offset_y), money_icon)
-        except Exception:
+            img.paste(coin_icon, (bal_x + tw + 12, MONEY_Y + icon_offset_y), coin_icon)
+        else:
             draw_text_with_outline(draw, (TEXT_X, MONEY_Y), f"Balance: {bal_str}",
                                    font=font_medium, fill_color="#A3E4D7", thickness=3)
 
