@@ -66,7 +66,7 @@ class RPGQuestion(commands.Cog):
             if q["claimed"]:
                 status = "<:2245:1493575277605949480> | Đã nhận thưởng"
             elif q["completed"]:
-                status = f"<:Tick:1495466684520206528> Hoàn thành! Dùng `dtn quest reward`"
+                status = f"<:Tick:1495466684520206528> Hoàn thành!"
             else:
                 status = f"🔄 {q['progress']}/{q['target']} ({pct}%)"
 
@@ -85,7 +85,7 @@ class RPGQuestion(commands.Cog):
         pending_reward = sum(q["reward"] for q in quests if q["completed"] and not q["claimed"])
         if pending_reward > 0:
             embed.set_footer(
-                text=f"Phần thưởng chờ nhận: {pending_reward:,} {COIN_EMOJI}  │  dtn quest reward"
+                text=f"Phần thưởng chờ nhận: {pending_reward:,} {COIN_EMOJI}"
             )
         else:
             embed.set_footer(text="Số dư: {:,} {}".format(get_balance(uid), COIN_EMOJI))
