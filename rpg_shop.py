@@ -100,23 +100,38 @@ _CRATE_POOL: dict[str, list] = {
 }
 
 # Crate có bảng drop đặc biệt (không dùng weapon pool)
-_CUSTOM_DROPS: dict[str, str] = {
-    "004": (
-        "  <a:4574:1499013628672610334> **Tam Hoả Thống Soái** — 0.3%  _★ Special_\n"
-        "  <a:4572:1499013638319505530> **Hồn Giáp Bất Diệt** — 0.3%  _★ Special_\n"
-        "  <a:4573:1499013635555463198> **Linh Diệm Sát Thần** — 0.3%  _★ Special_\n"
-        "  <:Linh_hoa:1498614127386562601> **Linh Hoả** (x4–18) — 35%\n"
-        "  <:Coin:1495831576397742241> **Coin** (2,000–6,000) — 64.4%"
-    ),
-    "006": "  <a:4572:1499013638319505530> **Hồn Giáp Bất Diệt** — 100%  _★ Special_",
-    "007": "  <a:4573:1499013635555463198> **Linh Diệm Sát Thần** — 100%  _★ Special_",
-    "008": "  <a:4574:1499013628672610334> **Tam Hoả Thống Soái** — 100%  _★ Special_",
-    "009": (
-        "  <a:5610:1505051859537104906> **Lôi thần Indra** — 33.33%  _Mythical_\n"
-        "  <a:5611:1505052271182872576> **Thần thời gian Chronus** — 33.33%  _Mythical_\n"
-        "  <a:5612:1505052278753595402> **Surtr bản ngã hoàng kim** — 33.33%  _Mythical_\n"
-        "  ⚠ _Không thể mua trực tiếp — chỉ drop từ Crate of Paradise (006)_"
-    ),
+# Mỗi entry:
+#   weapon_id  — nếu có: áp dụng logic ẩn (emoji + tên theo rarity)
+#   hide_emoji — override WEAPON_HIDE_ICONS khi chưa sở hữu (bỏ trống = tự lookup)
+#   label      — tên hiển thị (mask tự động nếu mythical/legendary)
+#   emoji      — emoji thật khi đã sở hữu
+#   chance     — chuỗi tỉ lệ, None nếu là dòng ghi chú
+#   rarity     — None nếu không phải weapon
+_CUSTOM_DROPS: dict[str, list[dict]] = {
+    "004": [
+        {"weapon_id": "5001", "label": "Tam Hoả Thống Soái", "emoji": "<a:4574:1499013628672610334>", "chance": "0.3",  "rarity": "special"},
+        {"weapon_id": "5002", "label": "Hồn Giáp Bất Diệt",  "emoji": "<a:4572:1499013638319505530>", "chance": "0.3",  "rarity": "special"},
+        {"weapon_id": "5003", "label": "Linh Diệm Sát Thần", "emoji": "<a:4573:1499013635555463198>", "chance": "0.3",  "rarity": "special"},
+        {"label": "Linh Hoả (x4–18)",   "emoji": "<:Linh_hoa:1498614127386562601>", "chance": "35",   "rarity": None},
+        {"label": "Coin (2,000–6,000)", "emoji": "<:Coin:1495831576397742241>",     "chance": "64.4", "rarity": None},
+    ],
+    "006": [
+        {"weapon_id": "5002", "label": "Hồn Giáp Bất Diệt", "emoji": "<a:4572:1499013638319505530>", "chance": "100", "rarity": "special"},
+    ],
+    "007": [
+        {"weapon_id": "5003", "label": "Linh Diệm Sát Thần", "emoji": "<a:4573:1499013635555463198>", "chance": "100", "rarity": "special"},
+    ],
+    "008": [
+        {"weapon_id": "5001", "label": "Tam Hoả Thống Soái", "emoji": "<a:4574:1499013628672610334>", "chance": "100", "rarity": "special"},
+    ],
+    # Crate 009: 5610/5611/5612 có entry trong WEAPON_HIDE_ICONS nhưng icon đó thuộc code path
+    # crate 005 (PARADISE_CRATE_WEAPONS). Crate 009 dùng hide_emoji="❓" để không dùng nhầm.
+    "009": [
+        {"weapon_id": "5610", "label": "Lôi thần Indra",          "emoji": "<a:5610:1505051859537104906>", "chance": "33.33", "rarity": "mythical"},
+        {"weapon_id": "5611", "label": "Thần thời gian Chronus",  "emoji": "<a:5611:1505052271182872576>", "chance": "33.33", "rarity": "mythical"},
+        {"weapon_id": "5612", "label": "Surtr bản ngã hoàng kim", "emoji": "<a:5612:1505052278753595402>", "chance": "33.34", "rarity": "mythical"},
+        {"label": "_Không thể mua trực tiếp — chỉ drop từ Crate of Paradise (005)_", "emoji": "⚠️", "chance": None, "rarity": None},
+    ],
 }
 
 CRATE_PAGE_SIZE = 2   # số crate hiển thị mỗi trang (cho crate thường)
@@ -150,6 +165,46 @@ WEAPON_HIDE_ICONS: dict[str, str] = {
     "4518": "<:4518_hide:1507385320084344973>",
     "4529": "<:4529_hide:1507385328229416980>",
 }
+
+
+def _render_custom_entry(entry: dict, user_weapons: set[str] | None) -> str:
+    """
+    Render 1 dòng drop trong _CUSTOM_DROPS.
+    - Weapon entry (có weapon_id):
+        + Đã sở hữu → emoji thật + tên thật
+        + Chưa sở hữu → hide_emoji (nếu có trong entry) hoặc WEAPON_HIDE_ICONS lookup;
+          tên bị mask nếu mythical/legendary, giữ nguyên nếu special.
+    - Non-weapon entry (rarity=None) → render thẳng, không mask.
+    """
+    weapon_id = entry.get("weapon_id")
+    rarity    = entry.get("rarity")
+    chance    = entry.get("chance")
+
+    if weapon_id:
+        owned = user_weapons is not None and weapon_id in user_weapons
+        if owned:
+            emoji = entry["emoji"]
+            label = entry["label"]
+        else:
+            # hide_emoji trong entry override WEAPON_HIDE_ICONS (dùng cho crate 009)
+            # Không có hide_emoji → lookup WEAPON_HIDE_ICONS → fallback ❓
+            if "hide_emoji" in entry:
+                emoji = entry["hide_emoji"]
+            else:
+                emoji = WEAPON_HIDE_ICONS.get(weapon_id, "❓")
+            if rarity == "mythical":
+                label = "?????"
+            elif rarity == "legendary":
+                label = "???"
+            else:
+                label = entry["label"]   # special: giữ tên
+    else:
+        emoji = entry["emoji"]
+        label = entry["label"]
+
+    rarity_tag = f"  _{_rarity_tier(rarity)}_" if rarity else ""
+    chance_str = f" — {chance}%" if chance else ""
+    return f"  {emoji} **{label}**{chance_str}{rarity_tag}"
 
 
 def _masked_name(w: dict) -> str:
@@ -247,7 +302,7 @@ def _build_crate_page_container(
     for idx, (crate_id, crate) in enumerate(page_items):
         # Tên crate + giá
         price_text = (
-            "**Không bán** _(drop từ Crate of Paradise 006)_"
+            "**Không bán** _(drop từ Crate of Paradise 005)_"
             if crate_id == "009"
             else f"**{crate['price']:,}** {COIN_EMOJI}"
         )
@@ -264,8 +319,16 @@ def _build_crate_page_container(
         ))
 
         if crate_id in _CUSTOM_DROPS:
-            # Custom drop: 1 TextDisplay toàn bộ
-            children.append(discord.ui.TextDisplay(content=_CUSTOM_DROPS[crate_id]))
+            entries = _CUSTOM_DROPS[crate_id]
+            for e_idx, entry in enumerate(entries):
+                children.append(discord.ui.TextDisplay(
+                    content=_render_custom_entry(entry, user_weapons)
+                ))
+                if e_idx < len(entries) - 1:
+                    children.append(discord.ui.Separator(
+                        visible=False,
+                        spacing=discord.SeparatorSpacing.small,
+                    ))
         else:
             pool = _CRATE_POOL.get(crate_id, WEAPONS)
             if len(pool) == 1:

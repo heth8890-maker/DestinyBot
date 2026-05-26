@@ -382,31 +382,6 @@ async def _run_hunt(
 
                 cv2_children.append(discord.ui.TextDisplay(equipped_text))
 
-                # ── Broken weapon notification ────────────────────
-                try:
-                    if just_broken:
-                        wi_map = {
-                            wi["uid"]: wi
-                            for wi in user.get("weapon_instances", [])
-                            if isinstance(wi, dict) and "uid" in wi
-                        }
-                        broken_lines = []
-                        for wid in just_broken:
-                            wi      = wi_map.get(str(wid), {})
-                            base_id = wi.get("base_id", "")
-                            w       = get_weapon_by_id(base_id) if base_id else None
-                            name    = w["name"]  if w else str(wid)
-                            em      = w["emoji"] if w else "⚔️"
-                            broken_lines.append(f"💔 {em} ~~**{name}**~~ vừa bị **Broken**!")
-                        cv2_children.append(discord.ui.Separator())
-                        cv2_children.append(
-                            discord.ui.TextDisplay(
-                                "**⚠️ Vũ khí hỏng**\n" + "\n".join(broken_lines)
-                            )
-                        )
-                except Exception as e:
-                    print(f"⚠️  Warning: broken weapon display failed: {e}")
-
                 # ── Footer ───────────────────────────────────────
                 try:
                     active_fx = [k for k, v in effects_full.items() if v]
@@ -435,6 +410,28 @@ async def _run_hunt(
                 user["hunt_cd"] = now
             except Exception as e:
                 print(f"⚠️  Warning: hunt_cd update failed: {e}")
+
+            # ── Broken weapon messages ──────────────────────────
+            broken_msgs = []
+            try:
+                if just_broken:
+                    wi_map_b = {
+                        wi["uid"]: wi
+                        for wi in user.get("weapon_instances", [])
+                        if isinstance(wi, dict) and "uid" in wi
+                    }
+                    for wid in just_broken:
+                        wi_b    = wi_map_b.get(str(wid), {})
+                        base_id = wi_b.get("base_id", "")
+                        w_b     = get_weapon_by_id(base_id) if base_id else None
+                        name_b  = w_b["name"]  if w_b else str(wid)
+                        em_b    = w_b["emoji"] if w_b else "⚔️"
+                        broken_msgs.append(
+                            f"Weapon {em_b} **{name_b}** hiện đang bị hỏng, "
+                            f"dùng lệnh `dtn repair` để sửa ngay!"
+                        )
+            except Exception as e:
+                print(f"⚠️  Warning: broken weapon message build failed: {e}")
 
             # ── Bonus roll ──────────────────────────────────────
             bonus_msgs = []
@@ -563,6 +560,13 @@ async def _run_hunt(
                 await send_fn(components=[container])
             except Exception as e:
                 return await send_fn(content=f"{ERR} | Failed to send response: `{e}`")
+
+            if broken_msgs:
+                for msg in broken_msgs:
+                    try:
+                        await send_bonus_fn(content=msg)
+                    except Exception as e:
+                        print(f"⚠️  Warning: failed to send broken weapon message: {e}")
 
             if bonus_msgs:
                 for msg in bonus_msgs:

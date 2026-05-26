@@ -64,14 +64,14 @@ WEAPONS = [
 #  WEAPON LEVELING CONSTANTS & HELPERS
 # ─────────────────────────────────────────────
 
-WEAPON_LEVEL_CAP = 50
+WEAPON_LEVEL_CAP = 30
 
 RARITY_EXP_WEIGHT = {
-    "common":    1,
-    "uncommon":  3,
-    "rare":      6,
-    "epic":      15,
-    "legendary": 30,
+    "common":    3,
+    "uncommon":  6,
+    "rare":      8,
+    "epic":      18,
+    "legendary": 64,
 }
 
 

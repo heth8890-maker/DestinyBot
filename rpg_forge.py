@@ -365,12 +365,27 @@ class RerollView(discord.ui.View):
                         ephemeral=True,
                     )
 
-                # FIX BUG 1: Trừ shard trực tiếp vào dict thay vì qua remove_item
-                # remove_item dùng .get("inv", {}) có thể tạo dict mới không gắn vào user,
-                # khiến thay đổi bị mất khi save. Direct access đảm bảo đúng reference.
-                user["inv"][SHARD_ID] = user["inv"].get(SHARD_ID, 0) - cost50
-                if user["inv"].get(SHARD_ID, 1) <= 0:
-                    user["inv"].pop(SHARD_ID, None)
+                # FIX BUG 3: Reload self.wi từ fresh_data để tránh stale state.
+                # self.wi ban đầu là reference vào data cũ từ cmd_reroll. Nếu reroll
+                # nhiều lần, hoặc có thay đổi bên ngoài (vd: quality reroll ở session khác),
+                # _rr_roll_passive sẽ dùng wi.quality sai. Dùng snapshot (dict copy) để
+                # field "Hiện tại" không bị thay đổi ngầm bởi confirm/reroll sau.
+                fresh_wi = next(
+                    (w for w in user.get("weapon_instances", [])
+                     if isinstance(w, dict) and w.get("uid") == self.wi["uid"]),
+                    None,
+                )
+                if fresh_wi is None:
+                    self._disable_all()
+                    self.stop()
+                    _active_rr.pop(self.wi["uid"], None)
+                    return await interaction.response.edit_message(
+                        content=f"{ERR} Vũ khí không còn trong túi đồ.",
+                        embed=None, view=self,
+                    )
+                self.wi = dict(fresh_wi)
+
+                remove_item(user, SHARD_ID, cost50)
 
                 await save_data(fresh_data, self.uid)
                 self.data = fresh_data
@@ -412,9 +427,9 @@ class RerollView(discord.ui.View):
                 target_wi[self.mode] = self.new
                 await save_data(fresh_data, self.uid)
 
-        # FIX BUG 2: Cập nhật self.wi sau khi save để embed "Đã xác nhận"
-        # hiển thị giá trị mới. Nếu không update, _current_embed() đọc self.wi
-        # cũ → field "Hiện tại" vẫn hiện giá trị trước reroll → trông như "vẫn giữ nguyên".
+        # Sync self.wi sau khi save để embed "Đã xác nhận" hiển thị giá trị mới.
+        # Nếu không update, _current_embed() đọc self.wi cũ → field "Hiện tại"
+        # vẫn hiện giá trị trước reroll → trông như "vẫn giữ nguyên".
         self.wi = {**self.wi, self.mode: self.new}
 
         self._disable_all()
@@ -502,10 +517,7 @@ async def cmd_reroll(ctx, args: list[str]):
 
         old = wi.get(mode)
 
-        # FIX BUG 1 (nhất quán với _cb_reroll): trừ shard trực tiếp
-        user["inv"][SHARD_ID] = user["inv"].get(SHARD_ID, 0) - cost
-        if user["inv"].get(SHARD_ID, 1) <= 0:
-            user["inv"].pop(SHARD_ID, None)
+        remove_item(user, SHARD_ID, cost)
 
         await save_data(data, uid)
 

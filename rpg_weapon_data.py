@@ -141,7 +141,7 @@ WEAPON_EFFECTS = {
 
     # ── NEW: Áo choàng thương nhân ──
     "4518": {
-        "reduce_cooldown": 0.30,
+        "reduce_cooldown": 0.20,
     },
 
     # ── NEW: Demon eyes ──
@@ -633,14 +633,14 @@ CRATES = {
         "rarity": "legend",
         "description": (
             "Cánh cửa đến thiên đàng.\n"
-            "Book of Godly 0.6% | Đinh ba Poisedon 6.5% | Chiến giáp Valkyrie 10% | Arrow of God 27% | Dây chuyền Ruby 55.9%"
+            "Book of Godly 0.1% | Đinh ba Poisedon 6.5% | Chiến giáp Valkyrie 10% | Arrow of God 27% | Dây chuyền Ruby 55.9%"
         ),
     },
     "009": {
         "name": "Book of Godly",
         "emoji": "<:Book_of_godly:1505091902964371568>",
         "open_emoji": "<a:Book_open:1505164965932306512>",
-        "price": 12800000,       # chỉ mở được từ Crate of Paradise (006) — không bán riêng
+        "price": 12800000,       # chỉ mở được từ Crate of Paradise (005) — không bán riêng
         "rarity": "mythical",
         "description": (
             "Cuốn sách của các vị thần.\n"
@@ -783,7 +783,7 @@ def roll_dark_crate_weapon() -> dict:
 
 def roll_paradise_crate_weapon() -> dict:
     """
-    Roll ngẫu nhiên 1 weapon từ Crate of Paradise (006).
+    Roll ngẫu nhiên 1 weapon từ Crate of Paradise (005).
     Tổng chance = 100.
     Nếu kết quả là id "006_book" → caller phải xử lý mở Book of Godly (009).
     """

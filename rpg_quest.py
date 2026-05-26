@@ -1,22 +1,32 @@
 """
 ===== FILE: rpg_quest.py =====
 Hệ thống Daily Quest: mỗi người nhận 1–2 nhiệm vụ ngẫu nhiên,
-reset mỗi 24h. Backward-compat với format cũ (1 quest).
+reset mỗi 24h.
 
-Public API:
+Lưu trữ: MongoDB (collection "quest_data") qua database_helper.
+
+Public API (không đổi):
   should_reset_quest / reset_quest
-  add_quest_progress
+  add_quest_progress       ← trả list quest_type vừa hoàn thành
   get_current_quests / get_current_quest  (compat)
   claim_quest_reward
   QUEST_TYPES / QUEST_PROGRESS_KEYS
 """
 
-import json
-import os
 import random
 import time
+import logging
 
-QUEST_FILE = "rpg_quest.json"
+import pymongo
+
+from database_helper import _get_client, _with_retry, DB_NAME
+
+log = logging.getLogger("rpg_quest")
+
+# ── Collection helper ──
+def _col():
+    return _get_client()[DB_NAME]["quest_data"]
+
 
 # ── 8 loại quest ──
 QUEST_TYPES = {
@@ -78,81 +88,37 @@ QUEST_TYPES = {
     },
 }
 
-# Backward compat key
 QUEST_PROGRESS_KEYS = {k: v["progress_key"] for k, v in QUEST_TYPES.items()}
-
-ALL_PROGRESS_KEYS = list({v["progress_key"] for v in QUEST_TYPES.values()})
-
-
-# ═══════════════════════════════════════════════════════════
-# I/O
-# ═══════════════════════════════════════════════════════════
-
-def _load() -> dict:
-    if not os.path.exists(QUEST_FILE):
-        return {}
-    with open(QUEST_FILE, "r", encoding="utf-8") as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return {}
-
-
-def _save(data: dict) -> None:
-    with open(QUEST_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+ALL_PROGRESS_KEYS   = list({v["progress_key"] for v in QUEST_TYPES.values()})
 
 
 # ═══════════════════════════════════════════════════════════
-# USER PROFILE  (+ migration từ format cũ)
+# PROFILE HELPERS
 # ═══════════════════════════════════════════════════════════
 
 def _blank_progress() -> dict:
     return {k: 0 for k in ALL_PROGRESS_KEYS}
 
 
-def _new_user_profile() -> dict:
-    profile = {
-        "last_reset": 0,
-        "quests":     [],   # list[{type, completed, claimed}]
-    }
-    profile.update(_blank_progress())
-    return profile
+def _ensure_profile(uid_str: str) -> dict:
+    """Lấy profile từ MongoDB, tạo mới nếu chưa có."""
+    col     = _col()
+    profile = _with_retry(col.find_one, {"_id": uid_str})
 
-
-def _migrate_old_format(profile: dict) -> dict:
-    """Chuyển format cũ (current_quest_type / completed) sang format mới (quests list)."""
-    old_type = profile.get("current_quest_type")
-    if old_type and old_type in QUEST_TYPES:
-        completed = profile.get("completed", False)
-        profile["quests"] = [{"type": old_type, "completed": completed, "claimed": False}]
+    if not profile:
+        profile = {"_id": uid_str, "last_reset": 0, "quests": [], **_blank_progress()}
+        try:
+            _with_retry(col.insert_one, profile.copy())
+        except pymongo.errors.DuplicateKeyError:
+            profile = _with_retry(col.find_one, {"_id": uid_str})
     else:
-        profile["quests"] = []
-
-    for k in ["current_quest_type", "completed"]:
-        profile.pop(k, None)
-
-    # Đảm bảo tất cả progress keys tồn tại
-    for k in ALL_PROGRESS_KEYS:
-        profile.setdefault(k, 0)
+        # Đảm bảo các progress key tồn tại (khi thêm quest type mới)
+        missing = {k: 0 for k in ALL_PROGRESS_KEYS if k not in profile}
+        if missing:
+            _with_retry(col.update_one, {"_id": uid_str}, {"$set": missing})
+            profile.update(missing)
 
     return profile
-
-
-def _ensure_profile(uid: str, data: dict) -> dict:
-    if uid not in data:
-        data[uid] = _new_user_profile()
-        _save(data)
-    else:
-        p = data[uid]
-        # Migrate old single-quest format
-        if "current_quest_type" in p or "quests" not in p:
-            data[uid] = _migrate_old_format(p)
-            _save(data)
-        # Ensure progress counters exist
-        for k in ALL_PROGRESS_KEYS:
-            data[uid].setdefault(k, 0)
-    return data[uid]
 
 
 # ═══════════════════════════════════════════════════════════
@@ -160,31 +126,27 @@ def _ensure_profile(uid: str, data: dict) -> dict:
 # ═══════════════════════════════════════════════════════════
 
 def should_reset_quest(uid: int | str) -> bool:
-    data = _load()
-    uid  = str(uid)
-    if uid not in data:
+    uid_str = str(uid)
+    col     = _col()
+    doc     = _with_retry(col.find_one, {"_id": uid_str}, {"last_reset": 1})
+    if not doc:
         return True
-    profile = _ensure_profile(uid, data)
-    return (time.time() - profile.get("last_reset", 0)) >= 86400
+    return (time.time() - doc.get("last_reset", 0)) >= 86400
 
 
 def reset_quest(uid: int | str) -> list[str]:
-    """Reset quest, gán 1–2 nhiệm vụ ngẫu nhiên (không trùng type). Trả list types."""
-    uid  = str(uid)
-    data = _load()
-    _ensure_profile(uid, data)
+    """Reset quest, gán 1–2 nhiệm vụ ngẫu nhiên. Trả list types."""
+    uid_str      = str(uid)
+    count        = random.randint(1, 2)
+    chosen_types = random.sample(list(QUEST_TYPES.keys()), k=count)
+    new_quests   = [{"type": t, "completed": False, "claimed": False} for t in chosen_types]
 
-    count         = random.randint(1, 2)
-    chosen_types  = random.sample(list(QUEST_TYPES.keys()), k=count)
-    new_quests    = [{"type": t, "completed": False, "claimed": False} for t in chosen_types]
-
-    data[uid]["last_reset"] = time.time()
-    data[uid]["quests"]     = new_quests
-    # Reset tất cả progress counters
-    for k in ALL_PROGRESS_KEYS:
-        data[uid][k] = 0
-
-    _save(data)
+    _with_retry(
+        _col().update_one,
+        {"_id": uid_str},
+        {"$set": {"last_reset": time.time(), "quests": new_quests, **_blank_progress()}},
+        upsert=True,
+    )
     return chosen_types
 
 
@@ -195,34 +157,38 @@ def reset_quest(uid: int | str) -> list[str]:
 def add_quest_progress(uid: int | str, progress_key: str, amount: int = 1) -> list[str]:
     """
     Cộng progress. Tự đánh dấu completed nếu đạt target.
-    Trả về list quest_type vừa hoàn thành.
+    Trả về list quest_type vừa hoàn thành (dùng để gửi thông báo).
     """
-    uid  = str(uid)
-    data = _load()
-    if uid not in data:
+    uid_str = str(uid)
+    col     = _col()
+
+    profile = _with_retry(col.find_one, {"_id": uid_str})
+    if not profile:
         return []
 
-    _ensure_profile(uid, data)
-    profile = data[uid]
+    new_val        = profile.get(progress_key, 0) + amount
+    quests         = profile.get("quests", [])
+    completed_now  = []
 
-    # Cộng counter
-    profile[progress_key] = profile.get(progress_key, 0) + amount
-
-    completed_now = []
-    for q in profile.get("quests", []):
+    for q in quests:
         if q.get("claimed") or q.get("completed"):
             continue
-        qt   = q.get("type")
+        qt = q.get("type")
         if qt not in QUEST_TYPES:
             continue
         qdata = QUEST_TYPES[qt]
         if qdata["progress_key"] != progress_key:
             continue
-        if profile[progress_key] >= qdata["target"]:
-            q["completed"] = True
+        if new_val >= qdata["target"]:
+            q["completed"]  = True
             completed_now.append(qt)
 
-    _save(data)
+    _with_retry(
+        col.update_one,
+        {"_id": uid_str},
+        {"$set": {progress_key: new_val, "quests": quests}},
+        upsert=True,
+    )
     return completed_now
 
 
@@ -232,18 +198,16 @@ def add_quest_progress(uid: int | str, progress_key: str, amount: int = 1) -> li
 
 def get_current_quests(uid: int | str) -> list[dict]:
     """Trả về list thông tin quest hiện tại (đầy đủ)."""
-    uid  = str(uid)
-    data = _load()
-    _ensure_profile(uid, data)
-    profile = data[uid]
+    uid_str = str(uid)
+    profile = _ensure_profile(uid_str)
 
     result = []
     for q in profile.get("quests", []):
         qt = q.get("type")
         if qt not in QUEST_TYPES:
             continue
-        qdata   = QUEST_TYPES[qt]
-        pkey    = qdata["progress_key"]
+        qdata    = QUEST_TYPES[qt]
+        pkey     = qdata["progress_key"]
         progress = profile.get(pkey, 0)
         result.append({
             "type":        qt,
@@ -252,7 +216,7 @@ def get_current_quests(uid: int | str) -> list[dict]:
             "target":      qdata["target"],
             "progress":    min(progress, qdata["target"]),
             "completed":   q.get("completed", False),
-            "claimed":     q.get("claimed", False),
+            "claimed":     q.get("claimed",   False),
             "reward":      qdata["reward"],
         })
     return result
@@ -273,28 +237,30 @@ def claim_quest_reward(uid: int | str) -> tuple[bool, str, int]:
     Claim TẤT CẢ quest completed & chưa claimed.
     Trả về (success, message, total_reward).
     """
-    uid  = str(uid)
-    data = _load()
-    _ensure_profile(uid, data)
-    profile = data[uid]
+    uid_str = str(uid)
+    col     = _col()
+
+    profile = _with_retry(col.find_one, {"_id": uid_str})
+    if not profile:
+        return False, "Không tìm thấy dữ liệu quest.", 0
 
     total     = 0
     names     = []
     any_found = False
+    quests    = profile.get("quests", [])
 
-    for q in profile.get("quests", []):
+    for q in quests:
         if q.get("completed") and not q.get("claimed"):
             qt = q.get("type")
             if qt in QUEST_TYPES:
-                reward = QUEST_TYPES[qt]["reward"]
-                total += reward
+                total      += QUEST_TYPES[qt]["reward"]
                 names.append(QUEST_TYPES[qt]["name"])
                 q["claimed"] = True
-                any_found   = True
+                any_found    = True
 
     if not any_found:
         return False, "Không có quest hoàn thành nào để nhận.", 0
 
-    _save(data)
+    _with_retry(col.update_one, {"_id": uid_str}, {"$set": {"quests": quests}})
     joined = "**, **".join(names)
     return True, f"Nhận reward từ **{joined}**!", total
