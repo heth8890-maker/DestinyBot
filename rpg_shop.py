@@ -32,8 +32,7 @@ from rpg_core import (
     add_weapon,
     add_item,
 )
-from database_helper import load_core_data, save_core_data
-from rpg_database import get_user, save_user
+from rpg_core import get_user, load_data, save_data
 from rpg_weapon_data import (
     RARE_CRATE_WEAPONS,
     DARK_CRATE_WEAPON,
@@ -336,9 +335,10 @@ def _build_crate_page_container(
                 weapon_id = w["id"]
                 if user_weapons is not None and weapon_id in user_weapons:
                     emoji = w["emoji"]
+                    name  = _SHORT.get(w["name"], w["name"])
                 else:
                     emoji = WEAPON_HIDE_ICONS.get(weapon_id, w["emoji"])
-                name = _masked_name(w)
+                    name  = _masked_name(w)
                 children.append(discord.ui.TextDisplay(
                     content=f"{emoji} **{name}** — {w['chance']}%  _{_rarity_tier(w['rarity'])}_"
                 ))
@@ -347,9 +347,10 @@ def _build_crate_page_container(
                     weapon_id = w["id"]
                     if user_weapons is not None and weapon_id in user_weapons:
                         emoji = w["emoji"]
+                        name  = _SHORT.get(w["name"], w["name"])
                     else:
                         emoji = WEAPON_HIDE_ICONS.get(weapon_id, w["emoji"])
-                    name = _masked_name(w)
+                        name  = _masked_name(w)
                     children.append(discord.ui.TextDisplay(
                         content=(
                             f"  {emoji} **{name}** "
@@ -495,8 +496,16 @@ async def _do_shop_crate(
     )
     user_weapons: set[str] | None = None
     if uid:
-        user_data, _ = get_user(uid)
-        user_weapons = set(user_data.get("seen_weapons", []))
+        data = load_data(uid)
+        user_data = get_user(uid, data)
+        # seen_weapons: base_ids user đã từng nhận (populate bởi add_weapon)
+        # Fallback: derive từ weapons list cho user cũ chưa có seen_weapons
+        # weapons có thể chứa base_id thuần ("5610") hoặc UID ("5610-ABC12")
+        seen = set(user_data.get("seen_weapons", []))
+        for w in user_data.get("weapons", []):
+            if isinstance(w, str):
+                seen.add(w.split("-")[0])
+        user_weapons = seen
 
     view = CrateShopView(page=0, author_id=author_id, user_weapons=user_weapons)
     msg  = await send_fn(view=view)
@@ -731,14 +740,16 @@ async def _handle_shop_buy(member: discord.Member | discord.User, slot: int, sen
         )
 
     uid  = str(member.id)
-    user, _ = get_user(uid)
+    data = load_data(uid)
+    user = get_user(uid, data)
 
-    await update_balance_safe(member.id, -price)
     # ── ALWAYS stackable: shop must never produce a UID ──────────────────
     add_weapon(user, slot_data["weapon_id"], make_unique=False)
-    mark_shop_slot_sold(slot)
-    if not save_user(uid, user):
+    data[uid] = user
+    if not await save_data(data, uid):
         return await send_fn(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
+    await update_balance_safe(member.id, -price)
+    mark_shop_slot_sold(slot)
 
     w     = get_weapon_by_id(slot_data["weapon_id"])
     color = RARITY_COLOR.get(slot_data["rarity"], 0x5865F2)
@@ -827,9 +838,9 @@ async def _handle_event_buy(
     cost_per_unit = 25
     total_cost    = cost_per_unit * amount
 
-    # ── Tải user từ MongoDB ──
-    data = load_core_data(uid)
-    user = data["user"]
+    # ── Tải user từ rpg_core (unified data layer) ──
+    data = load_data(uid)
+    user = get_user(uid, data)
 
     user_inv = user.get("inv", {})
     if user_inv.get(currency_id, 0) < total_cost:
@@ -844,8 +855,9 @@ async def _handle_event_buy(
     user["inv"][currency_id] -= total_cost
     add_item(user, f"crate_{crate_id}", amount)
 
-    # ── Lưu lên MongoDB ──
-    if not save_core_data(uid, user):
+    # ── Lưu lên MongoDB qua rpg_core ──
+    data[uid] = user
+    if not await save_data(data, uid):
         return await send_fn(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
 
     await send_fn(

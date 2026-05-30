@@ -10,9 +10,8 @@ from datetime import datetime, timezone, timedelta
 
 from database_helper import load_core_data, save_core_data
 
-# ✅ FIX Lỗi 2: import đúng từ rpg_database + rpg_core thay vì rpg_crate (JSON cũ)
-from rpg_database import get_user, save_user
-from rpg_core import add_item, CRATES
+# ✅ rpg_core đã gộp rpg_database — dùng trực tiếp từ rpg_core
+from rpg_core import get_user, load_data, save_data, add_item, CRATES
 
 
 # ───────────────────────────────────────────
@@ -608,16 +607,14 @@ class Cash(commands.Cog):
             save_core_data(uid, user)   # ✅ FIX: truyền user doc, không phải wrapper data
 
         # ── Tặng rương (RPG data — MongoDB) ──
-        # get_user / save_user là sync — không dùng await
-        rpg_user, _ = get_user(uid)
-        crate_item_id = "001"
-        crate_key     = f"crate_{crate_item_id}"
-        add_item(rpg_user, crate_key, 1)
-        save_user(uid, rpg_user)
-
-        crate_info = CRATES.get(crate_item_id)
+        crate_info = CRATES.get("001")
         if crate_info is None:
             return await ctx.send("❌ Lỗi nội bộ: không tìm thấy thông tin crate.")
+
+        data     = load_data(uid)
+        rpg_user = get_user(uid, data)
+        add_item(rpg_user, "crate_001", 1)
+        await save_data(data, uid)
 
         await ctx.send(
             f"📅 | {ctx.author.name} nhận **{total:,}** {ICON_COIN} daily!\n"

@@ -39,15 +39,15 @@ from discord.ext import commands
 
 from rpg_core import (
     get_item_by_id,
-    add_item, remove_item,
+    remove_item,
     parse_effects,
     calc_sell_value,
-    RARITY_COLOR, RARITY_LABEL,
     WeaponID, get_weapon_entity,
     get_user_lock,
     get_base_id,
+    get_user, load_data, save_data,
+    remove_weapon_from_bag,
 )
-from rpg_database import get_user, save_user
 from rpg_weapon_data import (
     COIN_EMOJI,
     ERR,
@@ -265,7 +265,8 @@ async def _do_sell_item(
     send_fn,
 ):
     """Sell item logic. send_fn(content=, embed=) → gửi phản hồi."""
-    user, upgraded_weapons = get_user(uid)
+    data = load_data(uid)
+    user = get_user(uid, data)
 
     if item_id not in user["inv"]:
         return await send_fn(content=f"{ERR} | Bạn không có vật phẩm này.")
@@ -292,7 +293,7 @@ async def _do_sell_item(
     if not remove_item(user, item_id, qty):
         return await send_fn(content=f"{ERR} | Không thể bán.")
 
-    if not save_user(uid, user, upgraded_weapons):
+    if not await save_data(data, uid):
         return await send_fn(content=f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
 
     await update_balance_safe(author_id, total)
@@ -312,7 +313,8 @@ async def _do_sell_all(
     send_fn,
 ):
     """Bán tất cả item (không tính crate)."""
-    user, upgraded_weapons = get_user(uid)
+    data = load_data(uid)
+    user = get_user(uid, data)
 
     # Loại bỏ crate và item rarity special/ancient — chỉ bán được bằng ID trực tiếp
     _NON_SELL_ALL_RARITIES = {"special", "ancient"}
@@ -342,7 +344,7 @@ async def _do_sell_all(
         lines.append(f"{item['emoji']} {item['name']} x{qty} → **{total:,}** {_COIN}")
         remove_item(user, item_id, qty)
 
-    if not save_user(uid, user, upgraded_weapons):
+    if not await save_data(data, uid):
         return await send_fn(content=f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
 
     await update_balance_safe(author_id, grand_total)
@@ -366,7 +368,8 @@ async def _do_sell_weapon(
 ):
     """Bán weapon theo UID / base_id."""
     async with get_user_lock(uid):
-        user, upgraded_weapons = get_user(uid)
+        data = load_data(uid)
+        user = get_user(uid, data)
 
         targets, err = _resolve_sell_weapon_targets(user, weapon_arg, amount)
         if err:
@@ -386,20 +389,14 @@ async def _do_sell_weapon(
             t_entity = get_weapon_entity(user, t)
             total_value += t_entity.get_price() if t_entity else entity.get_price()
 
-        from rpg_core import remove_weapon_from_bag
         for t in targets:
             removed = remove_weapon_from_bag(user, t)
             if not removed:
                 return await send_fn(
                     content=f"{ERR} | Lỗi nội bộ khi xoá vũ khí `{t}`. Thử lại."
                 )
-            if WeaponID.is_unique(t):
-                user["upgraded_weapons"] = [
-                    uw for uw in user.get("upgraded_weapons", [])
-                    if uw.get("uid") != t
-                ]
 
-        if not save_user(uid, user, upgraded_weapons):
+        if not await save_data(data, uid):
             return await send_fn(content=f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
 
         await update_balance_safe(author_id, total_value)
@@ -429,7 +426,9 @@ async def _do_sell_rarity(
     send_fn(content=, embed=, view=) → gửi tin nhắn mới → trả về Message
     edit_fn(msg, content=, embed=, view=) → edit tin nhắn đó
     """
-    user, _ = get_user(uid)
+    # Preview phase — chỉ đọc để build embed (chưa modify)
+    _preview_data = load_data(uid)
+    user = get_user(uid, _preview_data)
 
     # FIX: dùng get_sell_candidates (rpg_weapon_data) thay _resolve_rarity_candidates.
     # get_sell_candidates tra weapon definition trực tiếp từ WEAPONS lists,
@@ -471,40 +470,35 @@ async def _do_sell_rarity(
         return
 
     # Re-fetch tránh race condition
-    user, upgraded_weapons = get_user(uid)
+    async with get_user_lock(uid):
+        data = load_data(uid)
+        user = get_user(uid, data)
 
-    weapons_set = set(user.get("weapons", []))
-    sold_uids   = [c["uid"] for c in candidates if c["uid"] in weapons_set]
+        weapons_set = set(user.get("weapons", []))
+        sold_uids   = [c["uid"] for c in candidates if c["uid"] in weapons_set]
 
-    if not sold_uids:
-        await edit_fn(
-            view.message,
-            content=f"{ERR} | Weapon đã không còn trong kho.",
-            embed=None, view=None,
-        )
-        return
+        if not sold_uids:
+            await edit_fn(
+                view.message,
+                content=f"{ERR} | Weapon đã không còn trong kho.",
+                embed=None, view=None,
+            )
+            return
 
-    actual_total = 0
+        actual_total = 0
 
-    from rpg_core import remove_weapon_from_bag
-    for uid_w in sold_uids:
-        entity = get_weapon_entity(user, uid_w)
-        actual_total += entity.get_price() if entity else 0
+        for uid_w in sold_uids:
+            entity = get_weapon_entity(user, uid_w)
+            actual_total += entity.get_price() if entity else 0
+            remove_weapon_from_bag(user, uid_w)
 
-        remove_weapon_from_bag(user, uid_w)
-        if WeaponID.is_unique(uid_w):
-            user["upgraded_weapons"] = [
-                uw for uw in user.get("upgraded_weapons", [])
-                if uw.get("uid") != uid_w
-            ]
-
-    if not save_user(uid, user, upgraded_weapons):
-        await edit_fn(
-            view.message,
-            content=f"{ERR} | Lỗi lưu dữ liệu — không có gì bị bán.",
-            embed=None, view=None,
-        )
-        return
+        if not await save_data(data, uid):
+            await edit_fn(
+                view.message,
+                content=f"{ERR} | Lỗi lưu dữ liệu — không có gì bị bán.",
+                embed=None, view=None,
+            )
+            return
 
     await update_balance_safe(author_id, actual_total)
     add_quest_progress(author_id, "weapons_sold", len(sold_uids))
@@ -532,7 +526,7 @@ def _help_embed() -> discord.Embed:
         color=0xFFD700,
     )
     embed.add_field(
-        name="🗂️ Item",
+        name="️ Item",
         value=(
             "`dtn sell item <id> <số lượng>` — bán item theo số lượng\n"
             "`dtn sell item <id> all` — bán toàn bộ item đó\n"
@@ -541,7 +535,7 @@ def _help_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="🗂️ Bán tất cả item",
+        name="️ Bán tất cả item",
         value=(
             "`dtn sell all` — bán tất cả vật phẩm trong kho\n"
             "-# _(Không bán crate)_"
@@ -549,7 +543,7 @@ def _help_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="⚔️ Weapon — theo ID / UID",
+        name=" Weapon — theo ID / UID",
         value=(
             "`dtn sell weapon <base_id>` — bán 1 bản sao\n"
             "`dtn sell weapon <base_id> <số lượng>` — bán nhiều bản sao\n"
@@ -559,7 +553,7 @@ def _help_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="⚔️ Weapon — theo Rarity",
+        name=" Weapon — theo Rarity",
         value=(
             "`dtn sell rw` — bán tất cả **rare** weapon\n"
             "`dtn sell cw` — common  │  `dtn sell uw` — uncommon\n"
@@ -572,7 +566,7 @@ def _help_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="✨ Slash Commands",
+        name="Slash Commands",
         value=(
             "`/sell item` — bán item\n"
             "`/sell weapon` — bán weapon\n"

@@ -309,7 +309,7 @@ class RPGCrate(commands.Cog):
                     result_lines.append(
                         f"<:Opensoulcrate:1498617029077499935> | "
                         f"Chúc mừng đã triệu hồi thành công {rarity_label} "
-                        f"{new_uid} {w_data.get('emoji','')} {passive_emoji} vũ khí từ **Soul Crate**!"
+                        f"`{new_uid}` {w_data.get('emoji','')} {passive_emoji} vũ khí từ **Soul Crate**!"
                     )
                     congrat_lines.append(
                         f"{LIGHT_ICON} **Congratulation!** {LIGHT_ICON}\n{ctx.author.mention}"
@@ -361,7 +361,7 @@ class RPGCrate(commands.Cog):
                 result_lines.append(
                     f"<:Opensoulcrate:1498617029077499935> | "
                     f"Chúc mừng {ctx.author.mention} đã triệu hồi thành công "
-                    f"**Tam hoả thống soái** {new_uid} {passive_emoji} từ crate!"
+                    f"**Tam hoả thống soái** `{new_uid}` {passive_emoji} từ crate!"
                 )
 
             if result_lines:
@@ -388,7 +388,7 @@ class RPGCrate(commands.Cog):
                 result_lines.append(
                     f"<:Opensoulcrate:1498617029077499935> | "
                     f"Chúc mừng {ctx.author.mention} đã triệu hồi thành công "
-                    f"**Linh diệm sát thần** {new_uid} {passive_emoji} từ crate!"
+                    f"**Linh diệm sát thần** `{new_uid}` {passive_emoji} từ crate!"
                 )
 
             if result_lines:
@@ -415,7 +415,7 @@ class RPGCrate(commands.Cog):
                 result_lines.append(
                     f"<:Opensoulcrate:1498617029077499935> | "
                     f"Chúc mừng {ctx.author.mention} đã triệu hồi thành công "
-                    f"**Hồn giáp bất diệt** {new_uid} {passive_emoji} từ crate!"
+                    f"**Hồn giáp bất diệt** `{new_uid}` {passive_emoji} từ crate!"
                 )
 
             if result_lines:
@@ -449,7 +449,7 @@ class RPGCrate(commands.Cog):
                     rarity_label = RARITY_LABEL.get(godly_weapon["rarity"], godly_weapon["rarity"])
                     result_lines.append(
                         f"<a:Book_open:1505164965932306512> | **BOOK OF GODLY**  → {rarity_label} "
-                        f"{new_uid} {godly_weapon['emoji']} {passive_emoji} "
+                        f"`{new_uid}` {godly_weapon['emoji']} {passive_emoji} "
                         f"{godly_weapon['chance']:.2f}%"
                     )
                     congrat = _congrat_line(godly_weapon.get("rarity", ""))
@@ -463,7 +463,7 @@ class RPGCrate(commands.Cog):
                     rarity_label = RARITY_LABEL.get(weapon["rarity"], weapon["rarity"])
                     result_lines.append(
                         f"<:Paradise_crate_open:1505052527157051454> | and finds a "
-                        f"{rarity_label} {new_uid} {weapon['emoji']} {passive_emoji} "
+                        f"{rarity_label} `{new_uid}` {weapon['emoji']} {passive_emoji} "
                         f"{weapon['chance']}%"
                     )
                     congrat = _congrat_line(weapon.get("rarity", ""))
@@ -495,7 +495,7 @@ class RPGCrate(commands.Cog):
                 result_lines.append(
                     f"<:Paradise_crate_open:1505052527157051454> | "
                     f"<a:Book_open:1505164965932306512> | **MYTHICAL** {rarity_label} "
-                    f"{new_uid} {weapon['emoji']} {passive_emoji} "
+                    f"`{new_uid}` {weapon['emoji']} {passive_emoji} "
                     f"{weapon['chance']:.2f}%"
                 )
 
@@ -540,7 +540,7 @@ class RPGCrate(commands.Cog):
 
             result_lines.append(
                 f"{open_icon} | and finds a "
-                f"{rarity_label} {new_uid} {weapon_emoji} {passive_emoji} {drop_rate}%"
+                f"{rarity_label} `{new_uid}` {weapon_emoji} {passive_emoji} {drop_rate}%"
             )
             congrat = _congrat_line(weapon.get("rarity", ""))
             if congrat:

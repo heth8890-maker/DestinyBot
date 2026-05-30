@@ -132,7 +132,7 @@ def _build_repair_embed(
             "cost": int,
             "broken": bool,
             "needs_repair": bool,
-            "corrupt": bool,   # NEW — True if instance failed integrity check
+            "corrupt": bool,   # True if instance failed integrity check
         }
     total_cost: tổng giá repair tất cả (only from valid instances)
     author_name: display name của user
@@ -208,12 +208,14 @@ class RPGRepair(commands.Cog):
 
     @commands.command(name="repair", aliases=["re"])
     async def repair(self, ctx, target_uid: str = None):
-        from rpg_core     import get_base_id
-        from rpg_weapon_data   import get_weapon_by_id
-        from rpg_database import get_user, save_user
+        from rpg_core      import get_base_id, get_user, load_data, save_data, get_user_lock
+        from rpg_weapon_data import get_weapon_by_id
 
         author_uid = str(ctx.author.id)
-        user, _    = get_user(author_uid)
+
+        # ── Load user ─────────────────────────────────────────────────
+        data = load_data(author_uid)
+        user = get_user(author_uid, data)
 
         equipped = user.get("equipped", [None, None, None])
         if not isinstance(equipped, list) or len(equipped) != 3:
@@ -361,7 +363,7 @@ class RPGRepair(commands.Cog):
 
         # INTEGRITY: Read from "cash" only — canonical currency field.
         # Do not alias "gold", "coins", or any other key.
-        balance = user.get("cash", 0)
+        balance    = user.get("cash", 0)
         can_afford = balance >= total_cost
 
         # ── Embed xác nhận ────────────────────────────────────────────
@@ -413,9 +415,10 @@ class RPGRepair(commands.Cog):
                         "Đây không phải lệnh của bạn.", ephemeral=True
                     )
                 # Re-check balance tại thời điểm bấm nút
-                from rpg_database import get_user as _get_user
-                _u, _ = _get_user(str(ctx.author.id))
-                _bal  = _u.get("cash", 0)
+                from rpg_core import load_data as _load_data, get_user as _get_user
+                _d   = _load_data(str(ctx.author.id))
+                _u   = _get_user(str(ctx.author.id), _d)
+                _bal = _u.get("cash", 0)
                 if _bal < total_cost:
                     return await interaction.response.send_message(
                         f"{ERR} Không đủ tiền!\n"
@@ -463,107 +466,112 @@ class RPGRepair(commands.Cog):
             )
 
         # ── Re-fetch tránh race condition ─────────────────────────────
-        user, _ = get_user(author_uid)
+        # Dùng lock để đảm bảo không có thao tác nào khác chen vào giữa
+        # load và save.
+        async with get_user_lock(author_uid):
+            data = load_data(author_uid)
+            user = get_user(author_uid, data)
 
-        # INTEGRITY: Re-build wi_map from the freshly fetched user document.
-        # The pre-confirm wi_map is stale — do not reuse it here.
-        wi_map_fresh = {
-            wi["uid"]: wi
-            for wi in user.get("weapon_instances", [])
-            if isinstance(wi, dict) and "uid" in wi
-        }
+            # INTEGRITY: Re-build wi_map from the freshly fetched user document.
+            # The pre-confirm wi_map is stale — do not reuse it here.
+            wi_map_fresh = {
+                wi["uid"]: wi
+                for wi in user.get("weapon_instances", [])
+                if isinstance(wi, dict) and "uid" in wi
+            }
 
-        # INTEGRITY: Re-validate balance against canonical "cash" field only.
-        if user.get("cash", 0) < total_cost:
-            for child in view.children:
-                child.disabled = True
-            return await view.message.edit(
-                content=f"{ERR} | Không đủ tiền! Cần **{total_cost:,}** {COIN_EMOJI}.",
-                embed=None,
-                attachments=[],
-                view=view,
-            )
-
-        # ── Restore durability ────────────────────────────────────────
-        # INTEGRITY: Only charge if repair actually occurs.
-        # Count expected repairs from slots_info (built from validated data),
-        # then confirm each one lands in the fresh instance list before deducting.
-        expected_repairs = [s for s in slots_info if s["needs_repair"] and s["uid"]]
-        repaired_count   = 0
-
-        for s in expected_repairs:
-            uid = s["uid"]
-            wi_live = wi_map_fresh.get(uid)
-
-            if wi_live is None:
-                # Instance vanished between confirm and now — do not repair or charge.
-                print(
-                    f"[REPAIR INTEGRITY] uid={uid!r} present in pre-confirm snapshot "
-                    f"but missing after re-fetch. Skipping repair for this slot."
+            # INTEGRITY: Re-validate balance against canonical "cash" field only.
+            if user.get("cash", 0) < total_cost:
+                for child in view.children:
+                    child.disabled = True
+                return await view.message.edit(
+                    content=f"{ERR} | Không đủ tiền! Cần **{total_cost:,}** {COIN_EMOJI}.",
+                    embed=None,
+                    attachments=[],
+                    view=view,
                 )
-                continue
 
-            # Re-validate the live instance before writing to it.
-            err = _validate_instance(wi_live)
-            if err:
+            # ── Restore durability ────────────────────────────────────────
+            # INTEGRITY: Only charge if repair actually occurs.
+            # Count expected repairs from slots_info (built from validated data),
+            # then confirm each one lands in the fresh instance list before deducting.
+            expected_repairs = [s for s in slots_info if s["needs_repair"] and s["uid"]]
+            repaired_count   = 0
+
+            for s in expected_repairs:
+                uid = s["uid"]
+                wi_live = wi_map_fresh.get(uid)
+
+                if wi_live is None:
+                    # Instance vanished between confirm and now — do not repair or charge.
+                    print(
+                        f"[REPAIR INTEGRITY] uid={uid!r} present in pre-confirm snapshot "
+                        f"but missing after re-fetch. Skipping repair for this slot."
+                    )
+                    continue
+
+                # Re-validate the live instance before writing to it.
+                err = _validate_instance(wi_live)
+                if err:
+                    print(
+                        f"[REPAIR INTEGRITY] uid={uid!r} failed post-confirm validation: "
+                        f"{err}. Skipping repair for this slot."
+                    )
+                    continue
+
+                # Safe to repair — durability_max is confirmed present and valid.
+                wi_live["durability"] = wi_live["durability_max"]
+                wi_live["broken"]     = False
+                repaired_count       += 1
+
+            # INTEGRITY: Do not charge if no repair actually occurred.
+            if repaired_count == 0:
+                for child in view.children:
+                    child.disabled = True
                 print(
-                    f"[REPAIR INTEGRITY] uid={uid!r} failed post-confirm validation: "
-                    f"{err}. Skipping repair for this slot."
+                    f"[REPAIR INTEGRITY] user={author_uid} confirmed repair but "
+                    f"repaired_count=0. Aborting charge."
                 )
-                continue
+                return await view.message.edit(
+                    content=(
+                        f"{ERR} | Không thể repair — dữ liệu vũ khí không hợp lệ. "
+                        f"Không trừ tiền."
+                    ),
+                    embed=None,
+                    attachments=[],
+                    view=view,
+                )
 
-            # Safe to repair — durability_max is confirmed present and valid.
-            wi_live["durability"] = wi_live["durability_max"]
-            wi_live["broken"]     = False
-            repaired_count       += 1
+            # INTEGRITY: Charge proportionally if only some slots were repairable.
+            # Re-compute cost from the slots that were actually repaired.
+            if repaired_count < len(expected_repairs):
+                repaired_uids = {s["uid"] for s in expected_repairs[:repaired_count]}
+                actual_cost   = sum(
+                    s["cost"] for s in expected_repairs
+                    if s["uid"] in repaired_uids
+                )
+                print(
+                    f"[REPAIR INTEGRITY] user={author_uid} partial repair: "
+                    f"expected={len(expected_repairs)} actual={repaired_count}. "
+                    f"Charging {actual_cost} instead of {total_cost}."
+                )
+            else:
+                actual_cost = total_cost
 
-        # INTEGRITY: Do not charge if no repair actually occurred.
-        if repaired_count == 0:
-            for child in view.children:
-                child.disabled = True
-            print(
-                f"[REPAIR INTEGRITY] user={author_uid} confirmed repair but "
-                f"repaired_count=0. Aborting charge."
-            )
-            return await view.message.edit(
-                content=(
-                    f"{ERR} | Không thể repair — dữ liệu vũ khí không hợp lệ. "
-                    f"Không trừ tiền."
-                ),
-                embed=None,
-                attachments=[],
-                view=view,
-            )
+            # Deduct canonical currency field only.
+            user["cash"] = user.get("cash", 0) - actual_cost
 
-        # INTEGRITY: Charge proportionally if only some slots were repairable.
-        # Re-compute cost from the slots that were actually repaired.
-        if repaired_count < len(expected_repairs):
-            repaired_uids    = {s["uid"] for s in expected_repairs[:repaired_count]}
-            actual_cost      = sum(
-                s["cost"] for s in expected_repairs
-                if s["uid"] in repaired_uids
-            )
-            print(
-                f"[REPAIR INTEGRITY] user={author_uid} partial repair: "
-                f"expected={len(expected_repairs)} actual={repaired_count}. "
-                f"Charging {actual_cost} instead of {total_cost}."
-            )
-        else:
-            actual_cost = total_cost
+            if not await save_data(data, author_uid):
+                for child in view.children:
+                    child.disabled = True
+                return await view.message.edit(
+                    content=f"{ERR} | Lỗi lưu dữ liệu — không có gì thay đổi.",
+                    embed=None,
+                    attachments=[],
+                    view=view,
+                )
 
-        # Deduct canonical currency field only.
-        user["cash"] = user.get("cash", 0) - actual_cost
-
-        if not save_user(author_uid, user):
-            for child in view.children:
-                child.disabled = True
-            return await view.message.edit(
-                content=f"{ERR} | Lỗi lưu dữ liệu — không có gì thay đổi.",
-                embed=None,
-                attachments=[],
-                view=view,
-            )
-
+        # ── Thành công ────────────────────────────────────────────────
         for child in view.children:
             child.disabled = True
 

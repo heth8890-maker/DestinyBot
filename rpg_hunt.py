@@ -31,9 +31,10 @@ from rpg_core import (
     get_item_by_id, get_weapon_by_id,
     roll_hunt_items, handle_egg,
     add_item, calc_hunt_cooldown, parse_effects,
-    CRATES, get_base_id
+    CRATES, get_base_id,
+    get_user, load_data, save_data, get_user_lock,
+    calc_hunt_exp, grant_weapon_exp,
 )
-from rpg_database import get_user, save_user, calc_hunt_exp, grant_weapon_exp
 from rpg_addon import parse_effects_upgraded
 from rpg_quest import add_quest_progress
 from cash import update_balance_safe
@@ -55,17 +56,6 @@ OK  = "<:Tick:1495466684520206528>"
 # ─────────────────────────────────────────────────────────
 _cv2_flags       = discord.MessageFlags()
 _cv2_flags.value = 1 << 15
-
-# ─────────────────────────────────────────────────────────
-# PER-USER LOCK  (tránh race condition khi 2 lệnh đồng thời)
-# ─────────────────────────────────────────────────────────
-_USER_LOCKS: dict[str, asyncio.Lock] = {}
-
-def _get_user_lock(uid: str) -> asyncio.Lock:
-    if uid not in _USER_LOCKS:
-        _USER_LOCKS[uid] = asyncio.Lock()
-    return _USER_LOCKS[uid]
-
 
 # ─────────────────────────────────────────────────────────
 # SLASH CHECKS  (guild_only)
@@ -218,12 +208,10 @@ def _equipped_display(equipped: list, user: dict | None = None) -> str:
             em = w["emoji"] if w else "⚔️"
             lv     = wi.get("level", 1)
             broken = wi.get("broken", False)
-            dur    = wi.get("durability", 0)
-            dur_mx = wi.get("durability_max", 1)
             if broken:
                 lines.append(f"  `[{i}]` {em} ~~**{nm}**~~ _(Lv {lv})_ **Broken**")
             else:
-                lines.append(f"  `[{i}]` {em} **{nm}** _(Lv {lv} • {dur}/{dur_mx})_")
+                lines.append(f"  `[{i}]` {em} **{nm}** _(Lv {lv})_")
         else:
             w = get_weapon_by_id(get_base_id(wid))
             if w:
@@ -276,11 +264,12 @@ async def _run_hunt(
 ) -> None:
     uid = str(author_id)
 
-    async with _get_user_lock(uid):
+    async with get_user_lock(uid):
         try:
             # ── Load data ───────────────────────────────────────
             try:
-                user, _ = get_user(uid)
+                data = load_data(uid)
+                user = get_user(uid, data)
             except Exception as e:
                 return await send_fn(content=f"{ERR} | Failed to get user data: `{e}`")
 
@@ -382,16 +371,21 @@ async def _run_hunt(
 
                 cv2_children.append(discord.ui.TextDisplay(equipped_text))
 
-                # ── Footer ───────────────────────────────────────
+                # ── Footer — EXP per weapon ──────────────────────
                 try:
-                    active_fx = [k for k, v in effects_full.items() if v]
-                    if active_fx:
-                        footer_text = (
-                            "-# <:Effect:1495466103047061679> Hiệu ứng: "
-                            + ", ".join(active_fx[:5])
-                        )
+                    active_slots = [
+                        w for w in equipped
+                        if w is not None and "-" in str(w)
+                    ]
+                    total_exp    = calc_hunt_exp(found) if found else 0
+                    weapon_count = len(active_slots)
+
+                    if weapon_count > 0 and total_exp > 0:
+                        footer_text = f"-# {weapon_count} Weapon  |  {total_exp:,} exp"
+                    elif weapon_count > 0:
+                        footer_text = f"-# {weapon_count} Weapon  |  0 exp"
                     else:
-                        footer_text = f"-# Cooldown: {HUNT_CD_SEC}s  |  Trang bị weapon để tăng hiệu quả!"
+                        footer_text = "-# Trang bị weapon để nhận EXP khi hunt!"
                 except Exception as e:
                     print(f"⚠️  Warning: footer failed: {e}")
                     footer_text = f"-# Cooldown: {HUNT_CD_SEC}s"
@@ -529,7 +523,7 @@ async def _run_hunt(
 
             # ── Save ────────────────────────────────────────────
             try:
-                ok = save_user(uid, user)
+                ok = await save_data(data, uid)
                 if not ok:
                     return await send_fn(content=f"{ERR} | Failed to save data.")
             except Exception as e:
@@ -587,7 +581,8 @@ async def _run_hunt_bonus(author_id: int, display_name: str, send_fn) -> None:
     """Core logic hunt bonus — dùng chung prefix + slash."""
     try:
         uid     = str(author_id)
-        user, _ = get_user(uid)
+        data    = load_data(uid)
+        user    = get_user(uid, data)
         now     = int(time.time())
 
         old_reset  = user.get("hunt_bonus", {}).get("reset_at", 0)
@@ -601,7 +596,7 @@ async def _run_hunt_bonus(author_id: int, display_name: str, send_fn) -> None:
 
         if needs_save:
             try:
-                save_user(uid, user)
+                await save_data(data, uid)
             except Exception as e:
                 print(f"⚠️  Warning: hunt_bonus save failed: {e}")
 

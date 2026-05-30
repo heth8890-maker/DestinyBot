@@ -15,6 +15,28 @@ from rpg_weapon_data import (
     _rarity_tier,
 )
 from rpg_instance import resolve_passive, quality_label
+import re
+
+
+# ═══════════════════════════════════════════════════════════
+# HELPER: parse custom emoji string → PartialEmoji
+# ═══════════════════════════════════════════════════════════
+
+def _parse_partial_emoji(s: str):
+    """Chuyển '<:name:id>' hoặc '<a:name:id>' thành discord.PartialEmoji.
+    Nếu là unicode emoji (ví dụ ⚔️) thì trả về nguyên chuỗi.
+    Trả về None nếu chuỗi rỗng hoặc None.
+    """
+    if not s:
+        return None
+    m = re.match(r'<(a?):(\w+):(\d+)>', s)
+    if m:
+        return discord.PartialEmoji(
+            name     = m.group(2),
+            id       = int(m.group(3)),
+            animated = bool(m.group(1)),
+        )
+    return s   # unicode emoji — Discord chấp nhận string thường
 
 
 # ═══════════════════════════════════════════════════════════
@@ -48,41 +70,39 @@ class RPGWeapon(commands.Cog):
     # ─────────────────────────────────────────────────────────
     @commands.hybrid_command(name="weapon", aliases=["w"])
     async def weapon(self, ctx, weapon_id: str = None, slot: int = None):
-        from rpg_core import WeaponID, get_weapon_entity, get_base_id
-        from rpg_database import get_user
+        from rpg_core import WeaponID, get_base_id, load_data, get_user
 
         author_uid = str(ctx.author.id)
-        user, _    = get_user(author_uid)
-
-        wi_map = {
-            wi["uid"]: wi
-            for wi in user.get("weapon_instances", [])
-            if isinstance(wi, dict) and "uid" in wi
-        }
 
         # ── dtn weapon <uid> <slot> — trang bị nhanh ────────────────
         if weapon_id and slot is not None:
-            from rpg_core import equip_weapon, WeaponID
+            from rpg_core import equip_weapon, get_user_lock, save_data
             from rpg_quest import add_quest_progress
-            from rpg_database import save_user
 
             base_id, _ = WeaponID.parse(weapon_id)
             w_new      = get_weapon_by_id(base_id)
 
-            for i, wid in enumerate(user.get("equipped", []), 1):
-                if wid is None:
-                    continue
-                existing_base, _ = WeaponID.parse(str(wid))
-                if existing_base == base_id:
-                    return await ctx.send(
-                        f"{ERR} | Đã có **{w_new['name'] if w_new else base_id}** "
-                        f"ở ô [{i}]. Dùng `dtn unequip {i}` trước."
-                    )
+            async with get_user_lock(author_uid):
+                data = load_data(author_uid)
+                user = get_user(author_uid, data)
 
-            ok, msg = equip_weapon(user, weapon_id, slot)
-            if ok:
-                if not save_user(author_uid, user):
+                for i, wid in enumerate(user.get("equipped", []), 1):
+                    if wid is None:
+                        continue
+                    existing_base, _ = WeaponID.parse(str(wid))
+                    if existing_base == base_id:
+                        return await ctx.send(
+                            f"{ERR} | Đã có **{w_new['name'] if w_new else base_id}** "
+                            f"ở ô [{i}]. Dùng `dtn unequip {i}` trước."
+                        )
+
+                ok, msg = equip_weapon(user, weapon_id, slot)
+                if not ok:
+                    return await ctx.send(f"{ERR} | {msg}")
+
+                if not await save_data(data, author_uid):
                     return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu. Thử lại.")
+
                 slot_used = next(
                     (i+1 for i, wid in enumerate(user["equipped"])
                      if wid == weapon_id), "?"
@@ -93,23 +113,32 @@ class RPGWeapon(commands.Cog):
                     f"{OK} | Đã trang bị **{name}** vào ô **[{slot_used}]**.\n"
                     f"-# `{weapon_id}`"
                 )
-            else:
-                return await ctx.send(f"{ERR} | {msg}")
+
+        # ── read-only paths: load không cần lock ────────────────────
+        data = load_data(author_uid)
+        user = get_user(author_uid, data)
+
+        wi_map = {
+            wi["uid"]: wi
+            for wi in user.get("weapon_instances", [])
+            if isinstance(wi, dict) and "uid" in wi
+        }
 
         # ── dtn weapon <uid> — chi tiết ──────────────────────────────
         if weapon_id:
             base_id = get_base_id(weapon_id) or weapon_id
             w       = get_weapon_by_id(base_id)
-            entity  = get_weapon_entity(user, weapon_id)
 
-            if not entity and not w:
+            if not w:
                 return await ctx.send(
                     f"{ERR} | Không tìm thấy vũ khí `{weapon_id}`."
                 )
 
-            embed = entity.build_embed() if entity else discord.Embed(
-                title=f"⚔️ {weapon_id}",
-                color=0xE91E63,
+            rarity = w.get("rarity", "common")
+            embed  = discord.Embed(
+                title       = f"{w.get('emoji', '⚔️')} {w['name']}",
+                description = w.get("description", ""),
+                color       = RARITY_COLOR.get(rarity, 0xE91E63),
             )
 
             # Lệnh nhanh — đặt ở đầu embed
@@ -269,8 +298,14 @@ class RPGWeapon(commands.Cog):
         # Hằng số dùng chung trong WeaponPages
         PAGE_SIZE    = 9
         RARITY_ORDER = {
-            "legendary": 0, "epic": 1, "rare": 2,
-            "uncommon": 3, "common": 4, "special": 5,
+            "mythical":  0,
+            "special":   1,
+            "legendary": 2,
+            "legend":    2,
+            "epic":      3,
+            "rare":      4,
+            "uncommon":  5,
+            "common":    6,
         }
         RARITY_LABEL = {
             "common": "Common", "uncommon": "Uncommon", "rare": "Rare",
@@ -289,7 +324,7 @@ class RPGWeapon(commands.Cog):
                 self.message       = None
                 self.show_help     = False
                 self.rarity_filter = []     # list[str], empty = tất cả
-                self.sort_mode     = "rarity"
+                self.sort_mode     = "newest"
                 self._build_view(0)
 
             # ── check author ─────────────────────────────────────────
@@ -346,9 +381,9 @@ class RPGWeapon(commands.Cog):
                 if self.rarity_filter:
                     labels = [RARITY_LABEL.get(r, r) for r in self.rarity_filter]
                     parts.append(f"Rarity: {', '.join(labels)}")
-                if self.sort_mode != "rarity":
+                if self.sort_mode != "newest":
                     sort_labels = {
-                        "newest": "Sort latest",
+                        "rarity": "Sort rarity",
                         "oldest": "Sort oldest",
                         "type":   "Sort type",
                     }
@@ -434,8 +469,8 @@ class RPGWeapon(commands.Cog):
 
                 # [5] ActionRow StringSelect sắp xếp — trong container
                 sort_options = [
-                    discord.SelectOption(label="Sort rarity", value="rarity", default=(self.sort_mode == "rarity")),
                     discord.SelectOption(label="Sort latest", value="newest", default=(self.sort_mode == "newest")),
+                    discord.SelectOption(label="Sort rarity", value="rarity", default=(self.sort_mode == "rarity")),
                     discord.SelectOption(label="Sort oldest", value="oldest", default=(self.sort_mode == "oldest")),
                     discord.SelectOption(label="Sort type",   value="type",   default=(self.sort_mode == "type")),
                 ]
@@ -480,7 +515,7 @@ class RPGWeapon(commands.Cog):
                     ))
 
                 # [10] Storage section — không hiển thị "trang X/Y" (đã có ở nút giữa)
-                filter_active = self.rarity_filter or self.sort_mode != "rarity"
+                filter_active = self.rarity_filter or self.sort_mode != "newest"
                 filter_tag    = " _(đang lọc)_" if filter_active else ""
                 page_blocks   = pages[page_idx] if pages and pages[page_idx] else []
                 storage_text  = (
@@ -560,25 +595,27 @@ class RPGWeapon(commands.Cog):
     # ─────────────────────────────────────────────────────────
     @commands.hybrid_command(name="unequip", aliases=["ue", "une"])
     async def weapon_unequip(self, ctx, slot: int):
-        from rpg_core import unequip_weapon, WeaponID
-        from rpg_database import get_user, save_user
+        from rpg_core import unequip_weapon, WeaponID, get_user_lock, load_data, get_user, save_data
 
         author_uid = str(ctx.author.id)
-        user, _    = get_user(author_uid)
 
-        ok, result = unequip_weapon(user, slot)
-        if ok:
-            if not save_user(author_uid, user):
-                return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu. Thử lại.")
-            base_id, _ = WeaponID.parse(result)
-            w    = get_weapon_by_id(base_id)
-            name = w["name"] if w else result
-            await ctx.send(
-                f"{OK} | Đã bỏ trang bị ô **[{slot}]**: "
-                f"**{name}** về kho.\n-# `{result}`"
-            )
-        else:
-            await ctx.send(f"{ERR} | {result}")
+        async with get_user_lock(author_uid):
+            data = load_data(author_uid)
+            user = get_user(author_uid, data)
+
+            ok, result = unequip_weapon(user, slot)
+            if ok:
+                if not await save_data(data, author_uid):
+                    return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu. Thử lại.")
+                base_id, _ = WeaponID.parse(result)
+                w    = get_weapon_by_id(base_id)
+                name = w["name"] if w else result
+                await ctx.send(
+                    f"{OK} | Đã bỏ trang bị ô **[{slot}]**: "
+                    f"**{name}** về kho.\n-# `{result}`"
+                )
+            else:
+                await ctx.send(f"{ERR} | {result}")
 
     @weapon_unequip.error
     async def weapon_unequip_error(self, ctx, error):
@@ -595,11 +632,11 @@ class RPGWeapon(commands.Cog):
     # ─────────────────────────────────────────────────────────
     @commands.hybrid_command(name="wi", aliases=["myw", "myweapon"])
     async def display_weapon_info(self, ctx):
-        from rpg_core import get_base_id, get_weapon_entity
-        from rpg_database import get_user
+        from rpg_core import get_base_id, get_weapon_entity, load_data, get_user
 
         author_uid   = str(ctx.author.id)
-        user, _      = get_user(author_uid)
+        data         = load_data(author_uid)
+        user         = get_user(author_uid, data)
         equipped_raw = user.get("equipped", [None, None, None])
 
         if not any(equipped_raw):
@@ -775,11 +812,16 @@ class RPGWeapon(commands.Cog):
                         s_wi     = wi_map.get(s_uid)
                         s_lv     = s_wi.get("level", 1) if s_wi else 1
                         s_p      = resolve_passive(s_wi.get("passive", {})) if isinstance(s_wi, dict) else None
-                        s_picon  = s_p.get("emoji", "") if s_p and s_p.get("id") else ""
+                        s_pname  = s_p.get("name", "") if s_p and s_p.get("id") else ""
+                        # description: passive dùng tên text thuần (không emoji thô)
+                        s_desc   = f"Lv {s_lv}  \u2022  {s_rlabel}"
+                        if s_pname:
+                            s_desc += f"  \u2022  {s_pname}"
                         select_options.append(discord.SelectOption(
-                            label=f"[Ô {s_idx}] {s_em}{s_picon} {s_nm}",
+                            label=f"[Ô {s_idx}] {s_nm}",
+                            emoji=_parse_partial_emoji(s_em),
                             value=s_uid,
-                            description=f"Lv {s_lv}  •  {s_rlabel}",
+                            description=s_desc,
                         ))
                     sel = discord.ui.StringSelect(
                         custom_id=f"wi_select_{ctx.author.id}",
@@ -846,8 +888,7 @@ class RPGWeapon(commands.Cog):
     @commands.command(name="givew")
     @commands.is_owner()
     async def give_weapon(self, ctx, member: discord.Member, weapon_id: str):
-        from rpg_core import add_weapon, get_weapon_entity
-        from rpg_database import get_user, save_user
+        from rpg_core import add_weapon, get_weapon_entity, get_user_lock, load_data, get_user, save_data
 
         w = get_weapon_by_id(weapon_id)
         if not w:
@@ -855,17 +896,36 @@ class RPGWeapon(commands.Cog):
                 f"{ERR} | Không tìm thấy vũ khí ID `{weapon_id}`."
             )
 
-        user, _ = get_user(str(member.id))
-        new_uid = add_weapon(user, weapon_id)
+        target_uid = str(member.id)
 
-        # FIX: kiểm tra return value của save_user
-        if not save_user(str(member.id), user):
-            return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu. Vũ khí chưa được trao.")
+        async with get_user_lock(target_uid):
+            data    = load_data(target_uid)
+            user    = get_user(target_uid, data)
+            new_uid = add_weapon(user, weapon_id)
 
-        entity       = get_weapon_entity(user, new_uid)
-        rarity_color = RARITY_COLOR.get(w.get("rarity", "common"), 0xFFFFFF)
-        display_name = entity.fmt_name() if entity else f"`{new_uid}`"
-        stats_value  = entity.fmt_stats() if entity else "—"
+            if not await save_data(data, target_uid):
+                return await ctx.send(f"{ERR} | Lỗi lưu dữ liệu. Vũ khí chưa được trao.")
+
+            entity = get_weapon_entity(user, new_uid)
+
+        rarity       = w.get("rarity", "common")
+        rarity_color = RARITY_COLOR.get(rarity, 0xFFFFFF)
+
+        # fmt_name đã bị xoá khỏi core — build inline từ weapon data
+        display_name = (
+            f"{w.get('emoji', '⚔️')} **{w['name']}** — {RARITY_LABEL.get(rarity, rarity)}\n"
+            f"`{new_uid}`"
+        )
+
+        # fmt_stats đã bị xoá khỏi core — dùng get_rolled_stats() để lấy data
+        if entity:
+            rolled      = entity.get_rolled_stats()
+            stats_value = (
+                "\n".join(f"**{k}**: {v}" for k, v in rolled.items())
+                if rolled else "—"
+            )
+        else:
+            stats_value = "—"
 
         embed = discord.Embed(
             title=f"{OK} | Trao tặng vũ khí",
@@ -887,7 +947,7 @@ class RPGWeapon(commands.Cog):
         )
         embed.add_field(
             name="<:Key:1496098633395998740> Độ hiếm",
-            value=_rarity_tier(w.get("rarity", "common")),
+            value=_rarity_tier(rarity),
             inline=True,
         )
         embed.add_field(

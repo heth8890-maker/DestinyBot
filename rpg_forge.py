@@ -468,6 +468,10 @@ class RerollView(discord.ui.View):
                 await self.message.edit(embed=embed, view=self)
             except Exception:
                 pass
+        else:
+            # FIX BUG 1: message=None xảy ra khi cả 2 lần send trong cmd_reroll đều fail.
+            # _active_rr đã được pop ở trên nên không bị leak, chỉ cần log để debug.
+            logger.warning("rpg_forge: on_timeout — self.message is None cho uid %s", self.wi.get("uid", "?"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -517,6 +521,11 @@ async def cmd_reroll(ctx, args: list[str]):
 
         old = wi.get(mode)
 
+        # FIX BUG 2: set _active_rr TRONG lock, trước remove_item.
+        # Trước đây set sau khi thoát lock → khoảng trống race condition cho phép
+        # 2 lệnh rr cùng uid vũ khí đều pass check và trừ shard 2 lần.
+        _active_rr[wi["uid"]] = uid
+
         remove_item(user, SHARD_ID, cost)
 
         await save_data(data, uid)
@@ -526,12 +535,10 @@ async def cmd_reroll(ctx, args: list[str]):
         else:
             new = _rr_roll_quality(w_data)
 
-        _active_rr[wi["uid"]] = uid
-
     view = RerollView(
         invoker_id=uid,
         uid=uid,
-        wi=wi,
+        wi=dict(wi),   # FIX: shallow copy — tránh giữ reference vào data dict gốc
         w_data=w_data,
         mode=mode,
         old=old,

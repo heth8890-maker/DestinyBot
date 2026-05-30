@@ -9,12 +9,16 @@ import os
 import random
 import time
 import uuid
+_uuid = uuid   # alias dùng bởi migration functions (moved from rpg_database.py)
+
+import pymongo.errors
 
 from database_helper import (
     load_core_data,
     save_core_data,
-    _with_retry,
+    _with_retry,          # sync — dùng cho load_data()
     MAX_RETRIES as _MAX_RETRIES,
+    RETRY_DELAY as _RETRY_DELAY,  # giây giữa các lần retry
 )
 
 from rpg_item import (
@@ -40,12 +44,11 @@ from rpg_instance import (
     roll_passive,
     resolve_passive,
     build_weapon_effects,
-    migrate_weapon_instance_fields,
     decrease_durability,
     fmt_instance_info,
     quality_label,
     DURABILITY_BY_RARITY,
-    quality_color, 
+    quality_color,
 )
 
 from rpg_effect import (
@@ -67,22 +70,31 @@ __all__ = [
     "calc_sell_value", "calc_hunt_cooldown",
     "roll_weapon",
     "ITEMS", "WEAPONS", "CRATES", "RARITY_COLOR", "RARITY_LABEL",
-    # ── Weapon Identity Layer ───────────────────────────────────────────────────
+    #  Weapon Identity Layer 
     "get_base_id",                          # canonical ID resolver
     "WeaponID", "WeaponEntity", "get_weapon_entity",
     "ensure_weapon_uid",                    # promote base weapon → UID (lazy, no upgrade data)
     "ensure_upgrade_entry",                 # create upgraded_weapons entry ONLY when upgrading
     "get_user_lock",
-    # ── integrity ───────────────────────────────────────────────────────────────
+    #  integrity 
     "_validate_data_integrity",
-    "ITEMS", "WEAPONS", "CRATES", "RARITY_COLOR", "RARITY_LABEL",
     "DARK_CRATE_WEAPON",
+    #  migration functions (moved from rpg_database.py) 
+    "WEAPON_LEVEL_CAP",
+    "RARITY_EXP_WEIGHT",
+    "exp_to_next",
+    "calc_hunt_exp",
+    "grant_weapon_exp",
+    "make_weapon_instance",
+    "migrate_upgraded_weapons",
+    "migrate_all_weapons_to_uid",
+    "migrate_weapon_instance_fields",
 ]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 #  CANONICAL ID RESOLVER — THE ONLY PERMITTED CALL SITE FOR .split("-")
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 
 def get_base_id(wid: str) -> str:
     """
@@ -91,16 +103,15 @@ def get_base_id(wid: str) -> str:
     This is THE ONLY function in the entire project allowed to call .split('-').
     All other modules MUST call get_base_id() instead of doing str.split('-') directly.
 
-    Examples:
-        get_base_id("467")            → "467"   (bare base ID — passthrough)
+    Examples: get_base_id = ("467")            → "467"   (bare base ID — passthrough)
         get_base_id("467-A3B2C1")     → "467"   (Unique ID)
         get_base_id("467-A3B2C1_fix") → "467"   (repaired UID — still correct)
     """
     return str(wid).split("-")[0]
 
 
-# ─── v5.5: Deterministic stat seed secret ───────────────────────────────────────
-# Override via environment: export RPG_WEAPON_SECRET="your-secret"
+#  v5.5: Deterministic stat seed secret 
+# Override via environment: export RPG_WEAPON_SECRET"your-secret"
 # MUST be changed from default in production!
 GLOBAL_SECRET: bytes = os.environb.get(
     b"RPG_WEAPON_SECRET",
@@ -108,9 +119,9 @@ GLOBAL_SECRET: bytes = os.environb.get(
 )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 #  CONCURRENCY — per-user lock + global save lock
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 
 _user_locks: dict[str, asyncio.Lock] = {}
 
@@ -128,8 +139,7 @@ def get_user_lock(uid: str) -> asyncio.Lock:
     Returns the asyncio.Lock for user_id — creates one if absent.
     Thread-safe within a single-threaded asyncio event loop.
 
-    Usage:
-        async with get_user_lock(uid):
+    Usage: async with get_user_lock = (uid):
             data = load_data(uid)
             user = get_user(uid, data)
             # ... modify user ...
@@ -140,9 +150,9 @@ def get_user_lock(uid: str) -> asyncio.Lock:
     return _user_locks[uid]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 #  WEAPON IDENTITY LAYER — WeaponID · WeaponEntity · get_weapon_entity
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 
 class WeaponID:
     """
@@ -153,11 +163,11 @@ class WeaponID:
 
     UID format:
         Base ID    : "467"              (stack weapon — valid, not legacy)
-        Unique ID  : "467-A3B2C1"      (instance of the same weapon type)
-        Repaired   : "467-A3B2C1_fix_xxxxxx"  (duplicate collision repair)
+        Unique ID = : "467-A3B2C1"      (instance of the same weapon type)
+        Repaired = : "467-A3B2C1_fix_xxxxxx" = (duplicate collision repair)
 
-    Both forms are first-class citizens.  UID is an EXTENSION of base_id,
-    not a separate weapon type.  Use get_base_id() to resolve either form.
+    Both forms are first-class citizens. = UID is an EXTENSION of base_id,
+    not a separate weapon type. = Use get_base_id() to resolve either form.
     """
 
     @staticmethod
@@ -167,8 +177,7 @@ class WeaponID:
 
         Delegates to get_base_id() — no direct .split('-') here.
 
-        Examples:
-            "467-A3B2C1"          → ("467", True)
+        Examples:  = "467-A3B2C1"          → ("467", True)
             "467-A3B2C1_fix_ab"   → ("467", True)
             "467"                 → ("467", False)   ← stack weapon (valid)
             "" / None             → ("",    False)
@@ -185,7 +194,7 @@ class WeaponID:
         return isinstance(uid, str) and "-" in uid
 
 
-# ─── v5.5: Deterministic per-stat seed ─────────────────────────────────────────
+#  v5.5: Deterministic per-stat seed 
 
 def _weapon_stat_seed(uid: str, stat_key: str) -> int:
     """
@@ -211,9 +220,8 @@ class WeaponEntity:
     All commands MUST use WeaponEntity; no direct access to WEAPONS dict
     or upgraded_weapons from UI code.
 
-    Attributes:
-        uid          — Stored weapon identifier: "467-A3B2C1" (UID) or "467" (base_id)
-        base_data    — Weapon dict from WEAPONS / RARE_CRATE_WEAPONS / SPECIAL_WEAPONS
+    Attributes: uid = — Stored weapon identifier: "467-A3B2C1" (UID) or "467" (base_id)
+        base_data = — Weapon dict from WEAPONS / RARE_CRATE_WEAPONS / SPECIAL_WEAPONS
         upgrade_data — Entry in user["upgraded_weapons"], or None if not yet upgraded.
                        None is the normal state for unupgraded weapons — it is NOT an error.
     """
@@ -221,58 +229,12 @@ class WeaponEntity:
     def __init__(self, uid: str, base_data: dict,
                  upgrade_data: dict | None = None,
                  instance_data: dict | None = None):
-        self.uid           = uid
-        self.base_data     = base_data
-        self.upgrade_data  = upgrade_data   # backward compat, sẽ bỏ dần
+        self.uid = uid
+        self.base_data = base_data
+        self.upgrade_data = upgrade_data   # backward compat, sẽ bỏ dần
         self.instance_data = instance_data  # hệ thống mới
 
-    # ── Display helpers ────────────────────────────────────────────────────────
-
-    def fmt_name(self) -> str:
-        """Name + emoji + [<:Upgradeeffect:1498218616376524912> if upgraded]. Used in all lists."""
-        name  = self.base_data.get("name", self.uid)
-        emoji = self.base_data.get("emoji", "")
-        has_data = self.upgrade_data is not None or self.instance_data is not None
-        tag      = " <:Upgradeeffect:1498218616376524912>" if has_data else ""
-        return f"{emoji} **{name}**{tag}"
-
-    def fmt_stats(self) -> str:
-        """
-        Unified effects string — shows scaled values if upgrade exists.
-        Returns a single str (do NOT iterate over this; use it as a field value).
-        Used by: inv, status panel, upgrade panel, givew embed.
-        """
-        effects = self.base_data.get("effects", {})
-        wi      = self.instance_data
-
-        scaled = build_weapon_effects(effects, wi)
-
-        lines = []
-        for k, v in scaled.items():
-            if k == "extra_slot":
-                lines.append(f"• `{k}`: +{int(v)} ô")
-            elif isinstance(v, float):
-                lines.append(f"• `{k}`: **{v:+.1%}**")
-            elif isinstance(v, (int, float)):
-                lines.append(f"• `{k}`: **{v:+}**")
-
-        if not lines:
-            lines.append("Không có hiệu ứng.")
-
-        # Quality, durability, passive — dùng fmt_instance_info từ rpg_instance
-        if wi:
-            lines.append(fmt_instance_info(wi))
-
-        return "\n".join(lines)
-
-    def get_price(self) -> int:
-        """Random sell price within [min, max] from base weapon data."""
-        return random.randint(
-            self.base_data.get("min", 100),
-            self.base_data.get("max", 1000),
-        )
-
-    # ── v5.5: Deterministic stat rolls ────────────────────────────────────────
+    #  v5.5: Deterministic stat rolls 
 
     def get_rolled_stats(self) -> dict:
         """
@@ -289,7 +251,7 @@ class WeaponEntity:
         for stat_key, base_val in effects.items():
             # Deterministic seed: unique per (weapon-instance, stat)
             seed = _weapon_stat_seed(self.uid, stat_key)
-            rng  = random.Random(seed)
+            rng = random.Random(seed)
 
             # ±10% uniform variance
             factor = rng.uniform(0.90, 1.10)
@@ -303,73 +265,19 @@ class WeaponEntity:
 
         return rolled
 
-    def build_embed(self):
-        """
-        Build a full discord.Embed for this weapon — SINGLE SOURCE for UI.
-        Used by: dtn status, dtn inv, dtn weapon <id>.
-        """
-        import discord as _discord
-
-        rarity = self.base_data.get("rarity", "common")
-        color  = RARITY_COLOR.get(rarity, 0x5865F2)
-        label  = RARITY_LABEL.get(rarity, rarity)
-        name   = self.base_data.get("name", self.uid)
-        emoji  = self.base_data.get("emoji", "")
-
-        if self.upgrade_data:
-            eff_lvs = self.upgrade_data.get("effect_levels", {})
-            max_lv  = max(eff_lvs.values()) if eff_lvs else 1
-            title   = (
-                f"<:Effect:1495466103047061679> {emoji} **{name}** <:Upgradeeffect:1498218616376524912>"
-                f" _(max lv{max_lv}/30)_"
-            )
-            desc = f"Unique ID: `{self.uid}` | {label}"
-        else:
-            title = f"{emoji} **{name}**"
-            desc  = f"{label}  |  ID: `{self.uid}`"
-
-        wi_level = 1
-        if self.instance_data:
-            wi_level = max(1, min(50, self.instance_data.get("level", 1)))
-
-        if wi_level > 1:
-            title = f"{title} <:Effect:1495466103047061679> _(Lv{wi_level}/50)_"
-
-        _COIN = "<:Coin:1495831576397742241>"
-        embed = _discord.Embed(title=title, description=desc, color=color)
-        embed.add_field(
-            name="<:Effect:1495466103047061679> | Hiệu ứng",
-            value=self.fmt_stats(),
-            inline=False,
-        )
-        embed.add_field(
-            name="📖 Mô tả",
-            value=self.base_data.get("description", "—"),
-            inline=False,
-        )
-        embed.add_field(
-            name=f"{_COIN} Giá bán",
-            value=f"**{self.base_data.get('min', 0):,}** {_COIN}",
-            inline=True,
-        )
-        return embed
-
 
 def get_weapon_entity(user: dict, uid: str) -> "WeaponEntity | None":
     """
     SINGLE ENTRY POINT for weapon data — used by all UI commands.
 
-    Rules:
-    - Never raises — returns None instead of crashing.
+    Rules:  = - Never raises — returns None instead of crashing.
     - O(1) upgraded_weapons lookup via dict comprehension.
     - Works with both base ID ("467") and unique ID ("467-A3B2C1").
 
-    Args:
-        user: dict from get_user()
-        uid:  base ID ("467") or unique ID ("467-A3B2C1")
+    Args: user = : dict from get_user()
+        uid: = base ID ("467") or unique ID ("467-A3B2C1")
 
-    Returns:
-        WeaponEntity if base_data found, None otherwise.
+    Returns: WeaponEntity if base_data found, None otherwis = e.
     """
     if not isinstance(uid, str) or not uid:
         return None
@@ -380,7 +288,7 @@ def get_weapon_entity(user: dict, uid: str) -> "WeaponEntity | None":
 
     base_data = get_weapon_by_id(base_id)
     if base_data is None:
-        logger.debug(f"get_weapon_entity: no base_data for base_id='{base_id}'")
+        logger.debug(f"get_weapon_entity: no base_data for base_id'{base_id}'")
         return None
 
     # O(1) lookup — never scan the full list on every call
@@ -402,9 +310,43 @@ def get_weapon_entity(user: dict, uid: str) -> "WeaponEntity | None":
                         instance_data=instance_data)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 #  INTERNAL HELPERS — emergency dump
-# ══════════════════════════════════════════════════════════════════════════════
+# 
+
+async def _async_with_retry(fn, *args, **kwargs):
+    """
+    Async wrapper cho pymongo operations bên trong save_data().
+
+    Dùng asyncio.sleep thay time.sleep để không block event loop trong lúc
+    retry — đặc biệt quan trọng khi gọi từ bên trong _data_lock, vì
+    time.sleep ở đây sẽ treo toàn bộ bot trong suốt thời gian retry.
+
+    fn vẫn là hàm sync (pymongo driver dùng blocking I/O) — chạy trực tiếp
+    trên event loop thread. Nếu sau này chuyển sang Motor (async pymongo),
+    chỉ cần thêm await fn() ở đây.
+
+    Raises: Exception cuối cùng nếu tất cả _MAX_RETRIES lần đều thất bại.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            return fn(*args, **kwargs)
+        except (
+            pymongo.errors.AutoReconnect,
+            pymongo.errors.ServerSelectionTimeoutError,
+            pymongo.errors.NetworkTimeout,
+        ) as exc:
+            last_exc = exc
+            if attempt == _MAX_RETRIES:
+                raise
+            wait = _RETRY_DELAY * attempt
+            logger.warning(
+                "[ASYNC_RETRY] attempt %d/%d failed (%s) — retry sau %.1fs",
+                attempt, _MAX_RETRIES, exc, wait,
+            )
+            await asyncio.sleep(wait)   # ← không block event loop
+    raise last_exc  # mypy safety (unreachable khi _MAX_RETRIES >= 1)
 
 def _emergency_dump(data: dict) -> None:
     """
@@ -417,7 +359,7 @@ def _emergency_dump(data: dict) -> None:
         Nếu cần persistent backup, forward log sang external sink (Papertrail v.v.).
     """
     try:
-        ts       = int(time.time())
+        ts = int(time.time())
         emg_path = f"rpg_data.EMERGENCY_{ts}.json"
         with open(emg_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
@@ -429,13 +371,13 @@ def _emergency_dump(data: dict) -> None:
         logger.critical(f"🚨 EMERGENCY DUMP ALSO FAILED: {e} — DATA MAY BE LOST!")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 #  v5.5: SELF-HEALING INTEGRITY VALIDATOR
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 
 def _validate_data_integrity(data: dict) -> tuple[bool, list[str]]:
     """
-    Scan structural integrity across ALL users.  DETECTION ONLY — never mutates data.
+    Scan structural integrity across ALL users. = DETECTION ONLY — never mutates data.
 
     Phase 1 — Global duplicate UID detection:
         Builds a global uid → "user_id:source" map.
@@ -443,20 +385,19 @@ def _validate_data_integrity(data: dict) -> tuple[bool, list[str]]:
 
     NOTE: UIDs that have NO entry in user["upgraded_weapons"] are VALID.
     A UID is simply an instance identifier; upgrade data is created lazily,
-    only when the weapon is actually upgraded.  Flagging missing upgrade
+    only when the weapon is actually upgraded. = Flagging missing upgrade
     entries would produce false positives and is NOT performed here.
 
     NOTE (v1.8): "upgraded_weapons" is a reserved key in the data dict holding
-    the global weapons dict from MongoDB.  It is automatically skipped so it
+    the global weapons dict from MongoDB. = It is automatically skipped so it
     is never mistaken for a user record.
 
-    Returns:
-        (is_valid, audit_log) — is_valid is True only if zero issues were found.
+    Returns:  = (is_valid, audit_log) — is_valid is True only if zero issues were found.
     """
-    audit:  list[str] = []
-    issues: int       = 0
+    audit: list[str] = []
+    issues: int = 0
 
-    # ── Phase 1: Collect all Unique IDs globally; detect duplicates ───────────
+    #  Phase 1: Collect all Unique IDs globally; detect duplicates 
     global_uids: dict[str, str] = {}   # uid → "user_id:source" (first occurrence)
 
     for user_id, user in data.items():
@@ -479,7 +420,7 @@ def _validate_data_integrity(data: dict) -> tuple[bool, list[str]]:
             if uid in global_uids:
                 issues += 1
                 msg = (
-                    f"DUPLICATE UID '{uid}' found on user={user_id} ({source}); "
+                    f"DUPLICATE UID '{uid}' found on user{user_id} ({source}); "
                     f"first seen on {global_uids[uid]}"
                 )
                 audit.append(msg)
@@ -498,9 +439,9 @@ def _validate_data_integrity(data: dict) -> tuple[bool, list[str]]:
     return is_valid, audit
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 #  SALVAGE HELPERS (unchanged)
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 
 def _salvage_numeric(user: dict, key: str, default: int | float, uid: str) -> None:
     """
@@ -520,7 +461,7 @@ def _salvage_numeric(user: dict, key: str, default: int | float, uid: str) -> No
         user[key] = converted
         logger.warning(f"User {uid}: '{key}' = {val!r} ({type(val).__name__}) → converted {converted}")
     except (TypeError, ValueError):
-        logger.warning(f"User {uid}: '{key}' = {val!r} not convertible → default={default}")
+        logger.warning(f"User {uid}: '{key}' = {val!r} not convertible → default{default}")
         user[key] = default
 
 
@@ -528,9 +469,9 @@ def _salvage_list_of_str(user: dict, key: str, uid: str) -> None:
     """
     Ensure user[key] is list[str].
     Non-list → reset [].
-    List     → keep only valid str elements.
+    List = → keep only valid str elements.
 
-    ⚠️  Use ONLY for list[str] fields (e.g. "weapons").
+    ⚠️ = Use ONLY for list[str] fields (e.g. "weapons").
         Do NOT use for "upgraded_weapons" (list[dict]) — use _salvage_upgraded_weapons.
     """
     raw = user.get(key)
@@ -542,7 +483,7 @@ def _salvage_list_of_str(user: dict, key: str, uid: str) -> None:
         user[key] = []
         return
     cleaned = [item for item in raw if isinstance(item, str) and item]
-    dropped  = len(raw) - len(cleaned)
+    dropped = len(raw) - len(cleaned)
     if dropped:
         logger.warning(
             f"User {uid}: '{key}' filtered {dropped}/{len(raw)} invalid elements "
@@ -584,13 +525,13 @@ def _salvage_upgraded_weapons(user: dict, uid_str: str) -> None:
 
 def _salvage_inv(user: dict, uid: str) -> None:
     """
-    Ensure user["inv"] is dict{str: int >= 0} — salvage per-entry, never wipe the whole inv.
+    Ensure user["inv"] is dict{str: int > 0} — salvage per-entry, never wipe the whole inv.
 
     Per-entry strategy:
       value None      → 1   (item exists, unknown qty → assume 1)
       value float     → int(round(value))
       value str-digit → int(value)
-      value negative  → 0
+      value negative = → 0
       value unrecoverable → drop that entry only
       key non-str     → drop that entry
     """
@@ -606,7 +547,7 @@ def _salvage_inv(user: dict, uid: str) -> None:
         user["inv"] = {}
         return
 
-    fixed     = {}
+    fixed = {}
     bad_count = 0
 
     for item_id, qty in raw.items():
@@ -666,13 +607,12 @@ def _salvage_equipped(user: dict, uid: str) -> None:
     """
     Ensure user["equipped"] is list[3] where each element is None or a valid str.
 
-    Rules:
-      Non-list         → [None, None, None]
+    Rules: Non = -list         → [None, None, None]
       Too few (< 3)    → pad with None (do NOT drop existing weapons)
       Too many (> 3)   → slice [:3], return valid str elements at 3+ to weapons bag
-      Wrong-type slot  → set None at that slot
+      Wrong-type slot = → set None at that slot
     """
-    raw     = user.get("equipped")
+    raw = user.get("equipped")
     weapons = user.get("weapons", [])
     if not isinstance(weapons, list):
         weapons = []
@@ -704,34 +644,33 @@ def _salvage_equipped(user: dict, uid: str) -> None:
         eq[i] = None
 
     user["equipped"] = eq
-    user["weapons"]  = weapons
+    user["weapons"] = weapons
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 #  v5.5: LEGACY WEAPON MIGRATION (called from get_user)
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 
 def _migrate_legacy_weapons(user: dict, uid_str: str) -> None:
     """
     OPT-IN UTILITY — convert bare base IDs in user["weapons"] to UIDs.
 
-    NOT called automatically from get_user().  Invoke explicitly only when
+    NOT called automatically from get_user(). = Invoke explicitly only when
     you want to bulk-promote a user's entire bag (e.g. a one-off admin command).
     For on-demand promotion during upgrade, use ensure_weapon_uid() instead.
 
-    Promotes base_id → UID in-place.  Does NOT create upgraded_weapons entries;
+    Promotes base_id → UID in-place. = Does NOT create upgraded_weapons entries;
     upgrade data is created lazily when the player upgrades via ensure_upgrade_entry().
 
-    Technique:
-    - Clone the list before iterating (spec requirement).
+    Technique:  = - Clone the list before iterating (spec requirement).
     - Track already-assigned UIDs to prevent collisions within this user.
     - Deduplicate the final list (list-to-set-to-list, order-preserving).
     - Runs AFTER _salvage_list_of_str so only valid str entries exist.
     """
     raw_weapons = list(user.get("weapons", []))   # ← CLONE: do NOT iterate original in-place
 
-    migrated:  list[str] = []
-    changed:   bool      = False
+    migrated: list[str] = []
+    changed: bool = False
     # Seed the seen set with existing unique IDs + equipped to avoid collisions
     assigned: set[str] = {
         w for w in raw_weapons if WeaponID.is_unique(w)
@@ -745,13 +684,13 @@ def _migrate_legacy_weapons(user: dict, uid_str: str) -> None:
             migrated.append(wid)
             continue
 
-        # ── Legacy bare base ID detected → generate UID ──────────────────────
-        suffix  = uuid.uuid4().hex[:6].upper()
+        #  Legacy bare base ID detected → generate UID 
+        suffix = uuid.uuid4().hex[:6].upper()
         new_uid = f"{wid}-{suffix}"
 
         # Collision guard (extremely rare, but correct)
         while new_uid in assigned:
-            suffix  = uuid.uuid4().hex[:6].upper()
+            suffix = uuid.uuid4().hex[:6].upper()
             new_uid = f"{wid}-{suffix}"
 
         assigned.add(new_uid)
@@ -769,7 +708,7 @@ def _migrate_legacy_weapons(user: dict, uid_str: str) -> None:
 
     if changed:
         # Deduplicate while preserving order
-        seen:   set[str]  = set()
+        seen: set[str] = set()
         unique: list[str] = []
         for wid in migrated:
             if wid not in seen:
@@ -783,29 +722,28 @@ def _migrate_legacy_weapons(user: dict, uid_str: str) -> None:
         )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 #  v1.8: VALIDATE USER — chạy sau khi load từ MongoDB
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 
 def _validate_user(user_data: dict) -> dict:
     """
     Kiểm tra và sửa chữa từng field của user_data sau khi load từ MongoDB.
 
-    Strategy: Salvage-First — chỉ reset field nào thực sự sai,
+    Strategy: Salvage = -First — chỉ reset field nào thực sự sai,
     không wipe toàn bộ user trừ khi user_data không phải dict.
 
     Fields được validate:
-        inv              → dict
-        weapons          → list[str]
+        inv = → dict
+        weapons = → list[str]
         upgraded_weapons → list[dict] (mỗi entry có 'uid' + 'base_id')
-        equipped         → list, len == 3, mỗi slot là None | str
-        hunt_cd          → numeric (int/float)
-        crate_cd         → numeric (int/float)
-        passives         → dict
-        hunt_log         → list
+        equipped = → list, len = 3, mỗi slot là None | str
+        hunt_cd = → numeric (int/float)
+        crate_cd = → numeric (int/float)
+        passives = → dict
+        hunt_log = → list
 
-    Returns:
-        user_data đã được sửa chữa in-place (cùng object).
+    Returns: user_data đã được sửa chữa in = -place (cùng object).
         Nếu user_data không phải dict → trả về _make_default_user().
     """
     if not isinstance(user_data, dict):
@@ -814,29 +752,29 @@ def _validate_user(user_data: dict) -> dict:
 
     uid = user_data.get("_id", "<unknown>")
 
-    # ── inventory → dict ──────────────────────────────────────────────────────
+    #  inventory → dict 
     if not isinstance(user_data.get("inv"), dict):
-        logger.warning("[VALIDATE] uid=%s: 'inv' không hợp lệ → reset {}", uid)
+        logger.warning("[VALIDATE] uid%s: 'inv' không hợp lệ → reset {}", uid)
         user_data["inv"] = {}
 
-    # ── weapons → list[str] ───────────────────────────────────────────────────
+    #  weapons → list[str] 
     raw_weapons = user_data.get("weapons")
     if not isinstance(raw_weapons, list):
-        logger.warning("[VALIDATE] uid=%s: 'weapons' không phải list → reset []", uid)
+        logger.warning("[VALIDATE] uid%s: 'weapons' không phải list → reset []", uid)
         user_data["weapons"] = []
     else:
         cleaned = [w for w in raw_weapons if isinstance(w, str) and w]
         if len(cleaned) != len(raw_weapons):
             logger.warning(
-                "[VALIDATE] uid=%s: 'weapons' lọc %d/%d phần tử không hợp lệ",
+                "[VALIDATE] uid%s: 'weapons' lọc %d/%d phần tử không hợp lệ",
                 uid, len(raw_weapons) - len(cleaned), len(raw_weapons),
             )
         user_data["weapons"] = cleaned
 
-    # ── upgraded_weapons → list[dict] với 'uid' + 'base_id' ──────────────────
+    #  upgraded_weapons → list[dict] với 'uid' + 'base_id' 
     raw_uw = user_data.get("upgraded_weapons")
     if not isinstance(raw_uw, list):
-        logger.warning("[VALIDATE] uid=%s: 'upgraded_weapons' không phải list → reset []", uid)
+        logger.warning("[VALIDATE] uid%s: 'upgraded_weapons' không phải list → reset []", uid)
         user_data["upgraded_weapons"] = []
     else:
         valid_uw = [
@@ -845,15 +783,15 @@ def _validate_user(user_data: dict) -> dict:
         ]
         if len(valid_uw) != len(raw_uw):
             logger.warning(
-                "[VALIDATE] uid=%s: 'upgraded_weapons' loại bỏ %d entry thiếu 'uid'/'base_id'",
+                "[VALIDATE] uid%s: 'upgraded_weapons' loại bỏ %d entry thiếu 'uid'/'base_id'",
                 uid, len(raw_uw) - len(valid_uw),
             )
         user_data["upgraded_weapons"] = valid_uw
 
-    # ── equipped → list, độ dài 3, mỗi slot None | str ───────────────────────
+    #  equipped → list, độ dài 3, mỗi slot None | str 
     raw_eq = user_data.get("equipped")
     if not isinstance(raw_eq, list):
-        logger.warning("[VALIDATE] uid=%s: 'equipped' không phải list → reset [None,None,None]", uid)
+        logger.warning("[VALIDATE] uid%s: 'equipped' không phải list → reset [None,None,None]", uid)
         user_data["equipped"] = [None, None, None]
     else:
         eq = list(raw_eq)
@@ -865,36 +803,36 @@ def _validate_user(user_data: dict) -> dict:
             overflow = [s for s in eq[3:] if isinstance(s, str) and s]
             if overflow:
                 user_data.setdefault("weapons", []).extend(overflow)
-                logger.warning("[VALIDATE] uid=%s: equipped > 3 slots, trả %s về bag", uid, overflow)
+                logger.warning("[VALIDATE] uid%s: equipped > 3 slots, trả %s về bag", uid, overflow)
             eq = eq[:3]
         # Sửa từng slot
         for i, slot in enumerate(eq):
             if slot is None or (isinstance(slot, str) and slot):
                 continue
-            logger.warning("[VALIDATE] uid=%s: equipped[%d]=%r không hợp lệ → None", uid, i, slot)
+            logger.warning("[VALIDATE] uid%s: equipped[%d]%r không hợp lệ → None", uid, i, slot)
             eq[i] = None
         user_data["equipped"] = eq
 
-    # ── cooldowns → numeric ───────────────────────────────────────────────────
+    #  cooldowns → numeric 
     for cd_key in ("hunt_cd", "crate_cd"):
         val = user_data.get(cd_key)
         if not isinstance(val, (int, float)):
-            logger.warning("[VALIDATE] uid=%s: '%s'=%r không hợp lệ → 0", uid, cd_key, val)
+            logger.warning("[VALIDATE] uid%s: '%s'%r không hợp lệ → 0", uid, cd_key, val)
             user_data[cd_key] = 0
 
-    # ── passives → dict ───────────────────────────────────────────────────────
+    #  passives → dict 
     if not isinstance(user_data.get("passives"), dict):
         user_data["passives"] = {}
 
-    # ── hunt_log → list ───────────────────────────────────────────────────────
+    #  hunt_log → list 
     if not isinstance(user_data.get("hunt_log"), list):
         user_data["hunt_log"] = []
 
-    # ── weapon_instances → list[dict] với 'uid' + 'base_id' ──────────────────
+    #  weapon_instances → list[dict] với 'uid' + 'base_id' 
     raw_wi = user_data.get("weapon_instances")
     if not isinstance(raw_wi, list):
         logger.warning(
-            "[VALIDATE] uid=%s: 'weapon_instances' không phải list → reset []", uid
+            "[VALIDATE] uid%s: 'weapon_instances' không phải list → reset []", uid
         )
         user_data["weapon_instances"] = []
     else:
@@ -904,7 +842,7 @@ def _validate_user(user_data: dict) -> dict:
         ]
         if len(valid_wi) != len(raw_wi):
             logger.warning(
-                "[VALIDATE] uid=%s: loại bỏ %d weapon_instance không hợp lệ",
+                "[VALIDATE] uid%s: loại bỏ %d weapon_instance không hợp lệ",
                 uid, len(raw_wi) - len(valid_wi),
             )
         user_data["weapon_instances"] = valid_wi
@@ -912,34 +850,28 @@ def _validate_user(user_data: dict) -> dict:
     return user_data
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 #  LOAD — MongoDB (thay thế JSON multi-tier recovery)
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 
 def load_data(user_id=None) -> dict:
     """
-    Tải dữ liệu user + global upgraded_weapons từ MongoDB.
+    Tải dữ liệu user từ MongoDB.
 
     Không bao giờ raise — trả về {} nếu DB lỗi hoàn toàn.
 
-    Args:
-        user_id: Discord user ID (int hoặc str).
+    Args: user_id = : Discord user ID (int hoặc str).
                  Nếu None → trả về {} ngay (no-op).
 
     Returns:
         {
-            uid_str:            user_dict,        # dùng bởi get_user(uid, data)
-            "upgraded_weapons": global_uw_dict,   # global weapons index (tương thích cũ)
+            uid_str: user_dict,           # dùng bởi get_user(uid, data)
+            "upgraded_weapons": {},       # key tương thích — luôn rỗng (dead code)
         }
 
-    Lưu ý về hai loại "upgraded_weapons":
-        • data["upgraded_weapons"]         — GLOBAL dict {uid: wdata, ...} từ
-                                             global_metadata collection (dùng để
-                                             cross-user UID lookup và global write).
-        • user["upgraded_weapons"]         — PER-USER list[dict] bên trong user_dict,
-                                             lưu trong economy collection (game logic
-                                             dùng cái này qua get_user()).
-        save_data() phân biệt và lưu đúng chỗ cho cả hai.
+    Lưu ý: "upgraded_weapons" global là dead code — global_metadata collection
+        không tồn tại, global_uw đã bị xoá khỏi save_data(). Key giữ lại chỉ
+        để không break callers cũ tham chiếu data["upgraded_weapons"].
 
     Callers điển hình:
         async with get_user_lock(uid):
@@ -958,30 +890,30 @@ def load_data(user_id=None) -> dict:
         result = _with_retry(load_core_data, uid_str)
     except Exception as exc:
         logger.error(
-            "[LOAD] Không thể tải uid=%s sau %d lần thử: %s",
+            "[LOAD] Không thể tải uid%s sau %d lần thử: %s",
             uid_str, _MAX_RETRIES, exc, exc_info=True,
         )
         return {}
 
     if not isinstance(result, dict):
         logger.warning(
-            "[LOAD] load_core_data trả về %s cho uid=%s → dict rỗng.",
+            "[LOAD] load_core_data trả về %s cho uid%s → dict rỗng.",
             type(result).__name__, uid_str,
         )
         return {}
 
     # load_core_data trả về {"user": {...}, "upgraded_weapons": {...}}
-    user_doc       = result.get("user") or {}
+    user_doc = result.get("user") or {}
     global_weapons = result.get("upgraded_weapons") or {}
 
     if not isinstance(user_doc, dict):
-        logger.warning("[LOAD] 'user' không phải dict cho uid=%s → dict rỗng.", uid_str)
+        logger.warning("[LOAD] 'user' không phải dict cho uid%s → dict rỗng.", uid_str)
         user_doc = {}
 
     # Validate + salvage trước khi trả về — sửa field lỗi, không crash
     _validate_user(user_doc)
 
-    logger.debug("[LOAD] ✅ uid=%s loaded (%d keys)", uid_str, len(user_doc))
+    logger.debug("[LOAD] ✅ uid%s loaded (%d keys)", uid_str, len(user_doc))
 
     return {
         uid_str:            user_doc,
@@ -989,9 +921,8 @@ def load_data(user_id=None) -> dict:
     }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 #  v1.8: SAVE — MongoDB (thay thế JSON atomic save)
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 
 async def save_data(data: dict, user_id=None) -> bool:
     """
@@ -999,24 +930,21 @@ async def save_data(data: dict, user_id=None) -> bool:
 
     Pipeline (inside _data_lock):
         1. Validate tham số đầu vào
-        2. Tách user_data (per-user) và global_uw (global index) từ data dict
-        3. Gọi save_core_data qua _with_retry
-           • user_data["upgraded_weapons"] (list)  → economy collection ($set)
-           • global_uw dict                        → global_metadata ($set dot-notation)
+        2. Lấy user_data từ data dict
+        3. Gọi save_core_data(uid_str, user_data) qua _async_with_retry
+           • Dùng asyncio.sleep giữa các retry → không block event loop
+           • user_data["upgraded_weapons"] (list[dict]) → economy collection ($set)
         4. Commit RAM snapshot sau khi DB xác nhận thành công
         5. Rollback RAM từ snapshot + emergency dump nếu tất cả retry thất bại
 
-    Args:
-        data:    dict trả về từ load_data() — đã được modify bởi caller.
-        user_id: Discord user ID (int hoặc str).
+    Args: data = :    dict trả về từ load_data() — đã được modify bởi caller.
+        user_id: Discord user ID = (int hoặc str).
                  Nếu None → trả về False ngay (no-op).
 
-    Returns:
-        True  — lưu thành công.
+    Returns: True = — lưu thành công.
         False — lưu thất bại (đã log, KHÔNG crash bot).
 
-    Concurrency:
-        get_user_lock(uid) ở caller đảm bảo một user không bị modify song song.
+    Concurrency: get_user_lock = (uid) ở caller đảm bảo một user không bị modify song song.
         _data_lock bên trong đảm bảo chỉ một save_data() ghi DB tại một thời điểm.
         save_core_data dùng upsert + $set nên an toàn với race condition còn lại.
 
@@ -1037,33 +965,29 @@ async def save_data(data: dict, user_id=None) -> bool:
         logger.debug("[SAVE] user_id=None → bỏ qua.")
         return False
 
-    uid_str   = str(user_id)
+    uid_str = str(user_id)
     user_data = data.get(uid_str)
 
     if not isinstance(user_data, dict) or not user_data:
         logger.warning(
-            "[SAVE] Không tìm thấy user_data hợp lệ cho uid=%s — bỏ qua.", uid_str
+            "[SAVE] Không tìm thấy user_data hợp lệ cho uid%s — bỏ qua.", uid_str
         )
         return False
 
-    # ── Integrity validation (detect only — no mutations) ────────────────────
+    #  Integrity validation (detect only — no mutations) 
     is_valid, audit_log = _validate_data_integrity(data)
     if audit_log:
         for entry in audit_log:
             logger.info(f"[Integrity Audit] {entry}")
 
-    # ── Tách global upgraded_weapons ─────────────────────────────────────────
-    # data["upgraded_weapons"] = global dict {uid: wdata, ...} từ global_metadata.
-    # user_data["upgraded_weapons"] = per-user list[dict] → lưu qua payload $set.
-    # Hai cái này KHÁC NHAU — save_core_data xử lý đúng chỗ cho từng cái.
-    global_uw = data.get("upgraded_weapons")
-    if not isinstance(global_uw, dict):
-        global_uw = {}
+    # user_data["upgraded_weapons"] là per-user list[dict], đã nằm trong user_data,
+    # được lưu trực tiếp vào economy collection qua $set trong save_core_data.
+    # global_metadata collection không tồn tại — global_uw là dead code, đã xoá.
 
     async with _data_lock:   # Một save tại một thời điểm — tránh torn writes
         try:
-            _with_retry(save_core_data, uid_str, user_data, global_uw)
-            logger.debug("[SAVE] ✅ uid=%s lưu thành công.", uid_str)
+            await _async_with_retry(save_core_data, uid_str, user_data)
+            logger.debug("[SAVE] ✅ uid%s lưu thành công.", uid_str)
 
             # Commit RAM snapshot sau khi DB xác nhận
             snapshot = copy.deepcopy(data)
@@ -1075,11 +999,11 @@ async def save_data(data: dict, user_id=None) -> bool:
 
         except Exception as exc:
             logger.error(
-                "[SAVE] ❌ Không thể lưu uid=%s sau %d lần thử: %s",
+                "[SAVE] ❌ Không thể lưu uid%s sau %d lần thử: %s",
                 uid_str, _MAX_RETRIES, exc, exc_info=True,
             )
 
-            # ── RAM Rollback — khôi phục về snapshot cuối cùng tốt nhất ─────
+            #  RAM Rollback — khôi phục về snapshot cuối cùng tốt nhất 
             if _good_snapshots:
                 last_good = _good_snapshots[-1]
                 data.clear()
@@ -1099,9 +1023,453 @@ async def save_data(data: dict, user_id=None) -> bool:
             return False
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────
+# MIGRATION FUNCTIONS (moved from rpg_database.py)
+# ─────────────────────────────────────────────
+log = logger   # bridge: migration functions dùng 'log', rpg_core dùng 'logger'
+
+WEAPON_LEVEL_CAP = 30
+
+# EXP nhận được khi hunt theo độ hiếm của item nhặt được.
+# calc_hunt_exp() dùng dict này để tính tổng EXP cho một lần hunt.
+RARITY_EXP_WEIGHT: dict[str, int] = {
+    "common":    3,
+    "uncommon":  8,
+    "rare":      12,
+    "epic":      32,
+    "legendary": 128,
+}
+
+
+def exp_to_next(level: int) -> int:
+    """EXP cần để lên level tiếp theo. Công thức: level * 40 + 40."""
+    level = min(max(1, level), WEAPON_LEVEL_CAP)
+    return level * 40 + 40
+
+
+def calc_hunt_exp(found_items: list) -> int:
+    """
+    Tính tổng EXP từ danh sách item nhặt được khi hunt.
+
+    Mỗi item đóng góp EXP theo độ hiếm của nó — tra cứu qua RARITY_EXP_WEIGHT.
+    Item thiếu trường 'rarity' hoặc có rarity không xác định → đóng góp 1 EXP.
+
+    Args:
+        found_items: list[dict] trả về từ roll_hunt_items() — mỗi phần tử
+                     là một item dict có ít nhất trường 'rarity'.
+
+    Returns:
+        Tổng EXP (int >= 0). Trả về 0 nếu found_items rỗng hoặc không hợp lệ.
+
+    Ví dụ:
+        found_items = [{"rarity": "rare"}, {"rarity": "common"}, {"rarity": "epic"}]
+        calc_hunt_exp(found_items)  →  4 + 1 + 8  =  13
+    """
+    if not found_items or not isinstance(found_items, list):
+        return 0
+    total = 0
+    for item in found_items:
+        if not isinstance(item, dict):
+            continue
+        rarity = item.get("rarity", "common")
+        total += RARITY_EXP_WEIGHT.get(rarity, 1)
+    return total
+
+
+def make_weapon_instance(base_id: str, uid: str, level: int = 1) -> dict:
+    """Tạo weapon instance mới với uid, base_id và level cho trước."""
+    lvl = min(max(1, level), WEAPON_LEVEL_CAP)
+    return {
+        "uid":         uid,
+        "base_id":     base_id,
+        "level":       lvl,
+        "exp":         0,
+        "exp_to_next": exp_to_next(lvl),
+    }
+
+
+def grant_weapon_exp(user: dict, uid: str, exp_amount: int) -> dict:
+    """
+    Cộng exp_amount vào weapon instance được chỉ định bởi uid.
+    Tự động level-up nếu đủ EXP — có thể level-up nhiều lần liên tiếp
+    nếu exp_amount đủ lớn.
+
+    Args:
+        user:       dict user (từ get_user())
+        uid:        UID của weapon instance (vd: "467-ABC12")
+        exp_amount: lượng EXP cần cộng vào (nên >= 0; giá trị âm bị bỏ qua)
+
+    Returns:
+        dict với các field:
+            leveled_up   (bool) — True nếu có ít nhất 1 lần level-up
+            old_level    (int)  — level trước khi cộng EXP
+            new_level    (int)  — level sau khi xử lý xong
+            levels_gained (int) — số lần level-up đã xảy ra
+            uid          (str)  — uid của weapon (passthrough, tiện cho caller)
+
+        Nếu uid không tìm thấy trong weapon_instances → trả về result mặc định
+        với leveled_up=False; KHÔNG raise, KHÔNG mutate user.
+
+    Ghi chú:
+        - Defensive defaults: instance tạo trước khi hệ thống leveling ra đời
+          có thể thiếu các field level/exp/exp_to_next — hàm này tự điền.
+        - Hard cap: khi đạt WEAPON_LEVEL_CAP, exp và exp_to_next đặt về 0.
+        - Idempotent trên instance đã đạt cap: gọi lại không thay đổi gì.
+    """
+    result: dict = {
+        "found":         False,   # tường minh hơn old_level==0
+        "leveled_up":    False,
+        "old_level":     0,       # giữ 0 để backward compat (caller dùng == 0 detect not-found)
+        "new_level":     0,       # giữ 0 để backward compat
+        "levels_gained": 0,
+        "uid":           uid,
+    }
+
+    if not isinstance(uid, str) or not uid:
+        return result
+    if not isinstance(exp_amount, (int, float)) or exp_amount <= 0:
+        return result
+
+    exp_amount = int(exp_amount)
+
+    # Tìm weapon instance theo uid
+    wi: dict | None = None
+    for inst in user.get("weapon_instances", []):
+        if isinstance(inst, dict) and inst.get("uid") == uid:
+            wi = inst
+            break
+
+    if wi is None:
+        logger.debug("grant_weapon_exp: uid '%s' không có trong weapon_instances", uid)
+        return result  # found=False, old_level=0, new_level=0
+
+    # Từ đây trở đi: uid đã tìm thấy
+    result["found"] = True
+
+    # Điền defensive defaults — instance cũ có thể thiếu các field này
+    wi.setdefault("level",       1)
+    wi.setdefault("exp",         0)
+    wi.setdefault("exp_to_next", exp_to_next(wi["level"]))
+
+    old_level = wi["level"]
+    result["old_level"] = old_level
+
+    # Đã đạt cap — không thay đổi gì, đảm bảo trạng thái nhất quán
+    if old_level >= WEAPON_LEVEL_CAP:
+        result["new_level"] = WEAPON_LEVEL_CAP
+        wi["level"]         = WEAPON_LEVEL_CAP
+        wi["exp"]           = 0
+        wi["exp_to_next"]   = 0
+        return result
+
+    wi["exp"] += exp_amount
+
+    # Level-up loop — có thể chạy nhiều vòng nếu exp_amount lớn
+    while wi["level"] < WEAPON_LEVEL_CAP and wi["exp"] >= wi["exp_to_next"]:
+        wi["exp"]         -= wi["exp_to_next"]
+        wi["level"]       += 1
+        wi["exp_to_next"]  = exp_to_next(wi["level"])
+        result["levels_gained"] += 1
+
+    # Hard cap tại WEAPON_LEVEL_CAP
+    if wi["level"] >= WEAPON_LEVEL_CAP:
+        wi["level"]       = WEAPON_LEVEL_CAP
+        wi["exp"]         = 0
+        wi["exp_to_next"] = 0
+
+    if result["levels_gained"] > 0:
+        result["leveled_up"] = True
+
+    result["new_level"] = wi["level"]
+
+    if result["leveled_up"]:
+        logger.info(
+            "grant_weapon_exp: uid='%s' level %d → %d (+%d levels, +%d exp)",
+            uid, old_level, wi["level"], result["levels_gained"], exp_amount,
+        )
+
+    return result
+
+
+def migrate_upgraded_weapons(user: dict) -> bool:
+    """
+    Chuyển đổi user["upgraded_weapons"] (format cũ) sang user["weapon_instances"].
+    Chỉ chạy nếu upgraded_weapons không rỗng.
+    Trả về True nếu đã migrate, False nếu không cần.
+
+    FIX — Partial-failure safety:
+        Old code: user["upgraded_weapons"] = []  (unconditional wipe)
+        New code: only remove entries whose uid was successfully written to
+                  weapon_instances. Entries with missing uid/base_id stay in
+                  the list so they are not silently discarded.
+        WHY: If an exception fires mid-loop, or an entry is malformed, the old
+        code would still clear the list on the next clean run — destroying data
+        that was never actually migrated.
+
+    FIX — Level preservation:
+        We first check if the entry already has a "level" field (set by a
+        previous partial migration). Only fall back to the effect_levels
+        heuristic when no explicit level is present.
+        WHY: The heuristic (max of effect_levels values) is a lossy
+        approximation. Trusting an already-computed level is safer.
+    """
+    old_list = user.get("upgraded_weapons", [])
+    if not old_list:
+        return False
+
+    existing_uids: set[str] = {
+        wi["uid"] for wi in user.get("weapon_instances", [])
+        if isinstance(wi, dict) and "uid" in wi
+    }
+
+    # Track which entries we successfully migrate so we only remove those.
+    # WHY: Prevents unconditional wipe from discarding un-migratable entries.
+    successfully_migrated: set[str] = set()
+
+    for entry in old_list:
+        if not isinstance(entry, dict):
+            continue
+        uid     = entry.get("uid")
+        base_id = entry.get("base_id")
+        if not uid or not base_id:
+            # Cannot migrate without both fields; leave in list (do not discard).
+            continue
+
+        if uid in existing_uids:
+            # Already migrated in a previous pass — idempotent skip.
+            successfully_migrated.add(uid)
+            continue
+
+        # FIX: Prefer an explicit "level" field over the effect_levels heuristic.
+        # WHY: effect_levels stores per-effect upgrade counts (e.g. {"atk": 3})
+        # which are not the same unit as weapon level. An already-computed level
+        # field (from a prior partial migration) is more trustworthy.
+        level = entry.get("level")
+        if level is None:
+            eff_levels = entry.get("effect_levels", {})
+            raw_values = [v for v in eff_levels.values() if isinstance(v, (int, float))]
+            level = int(max(raw_values)) if raw_values else 1
+
+        level = min(max(1, level), WEAPON_LEVEL_CAP)
+
+        user.setdefault("weapon_instances", []).append(
+            make_weapon_instance(base_id, uid, level)
+        )
+        existing_uids.add(uid)
+        successfully_migrated.add(uid)
+
+    if not successfully_migrated:
+        return False
+
+    # FIX: Only remove entries that were successfully migrated.
+    # WHY: Unconditionally clearing the list (old behaviour) destroys entries
+    # that were skipped due to malformed data — they can never be recovered.
+    user["upgraded_weapons"] = [
+        e for e in old_list
+        if not (isinstance(e, dict) and e.get("uid") in successfully_migrated)
+    ]
+    return True
+
+
+def migrate_all_weapons_to_uid(user: dict) -> bool:
+    """
+    Đảm bảo toàn bộ weapons[] và equipped[] đều là UID (có dấu "-").
+    Với mỗi bare base_id tìm thấy:
+      - Ưu tiên tái sử dụng weapon_instance có cùng base_id mà chưa được link
+        (orphan, thường do migrate_upgraded_weapons tạo ra).
+      - Nếu không có orphan → mới tạo UID mới và instance level=1.
+    Trả về True nếu có thay đổi, False nếu không cần.
+
+    FIX — Orphan instance reuse:
+        Old code: always generated a new uid + fresh level=1 instance.
+        New code: first checks for an existing weapon_instance whose base_id
+                  matches and whose uid is not yet referenced in weapons[]
+                  or equipped[] (an "orphan"). If found, reuse that uid.
+        WHY: migrate_upgraded_weapons() runs before this function and may
+        have already created a leveled instance for the same weapon. Without
+        reuse, the player's weapon slot gets a new uid at level 1, and the
+        leveled instance becomes an unreachable orphan forever.
+    """
+    changed = False
+
+    # Build set of all UIDs currently referenced in slots (linked).
+    # WHY: "linked" means the uid already appears in weapons[] or equipped[].
+    # An instance whose uid is NOT linked is an orphan — eligible for reuse.
+    linked_uids: set[str] = set()
+    for w in user.get("weapons", []):
+        if isinstance(w, str) and "-" in w:
+            linked_uids.add(w)
+    for w in user.get("equipped", []):
+        if isinstance(w, str) and w and "-" in w:
+            linked_uids.add(w)
+
+    # All known uid strings (linked + unlinked) — used to guarantee uid uniqueness.
+    existing_uids: set[str] = set(linked_uids)
+    for wi in user.get("weapon_instances", []):
+        if isinstance(wi, dict) and "uid" in wi:
+            existing_uids.add(wi["uid"])
+
+    existing_wi_uids: set[str] = {
+        wi["uid"] for wi in user.get("weapon_instances", [])
+        if isinstance(wi, dict) and "uid" in wi
+    }
+
+    # FIX: Build a map of base_id → list of orphan uids.
+    # WHY: When a bare base_id is encountered in weapons[], we pop one orphan
+    # uid from this map to reuse instead of creating a fresh level=1 instance.
+    # This preserves progression that migrate_upgraded_weapons() stored.
+    orphan_by_base_id: dict[str, list[str]] = {}
+    for wi in user.get("weapon_instances", []):
+        if not isinstance(wi, dict):
+            continue
+        uid     = wi.get("uid")
+        base_id = wi.get("base_id")
+        if uid and base_id and uid not in linked_uids:
+            orphan_by_base_id.setdefault(base_id, []).append(uid)
+
+    def _make_uid(base_id: str) -> str:
+        """Generate a collision-free uid for a given base_id."""
+        suffix = _uuid.uuid4().hex[:5].upper()
+        uid = f"{base_id}-{suffix}"
+        while uid in existing_uids:
+            suffix = _uuid.uuid4().hex[:5].upper()
+            uid = f"{base_id}-{suffix}"
+        existing_uids.add(uid)
+        return uid
+
+    def _ensure_instance(uid: str, base_id: str) -> None:
+        """
+        Create a minimal level=1 instance only if no instance exists for uid.
+        WHY: This path is only reached when no orphan was available, meaning
+        the weapon truly had no prior tracking — level=1 is correct.
+        """
+        if uid not in existing_wi_uids:
+            user.setdefault("weapon_instances", []).append(
+                make_weapon_instance(base_id, uid, level=1)
+            )
+            existing_wi_uids.add(uid)
+
+    # Convert weapons[] (bag)
+    for i, wid in enumerate(user.get("weapons", [])):
+        if not isinstance(wid, str) or "-" in wid:
+            continue  # already a uid, skip
+
+        orphans = orphan_by_base_id.get(wid, [])
+        if orphans:
+            # FIX: Reuse an existing orphan instance instead of creating level=1.
+            # WHY: Preserves level/exp that migrate_upgraded_weapons() recovered.
+            reuse_uid = orphans.pop(0)
+            user["weapons"][i] = reuse_uid
+            linked_uids.add(reuse_uid)
+            # Instance already in weapon_instances — no creation needed.
+        else:
+            new_uid = _make_uid(wid)
+            user["weapons"][i] = new_uid
+            _ensure_instance(new_uid, wid)
+            linked_uids.add(new_uid)
+        changed = True
+
+    # Convert equipped[]
+    for i, wid in enumerate(user.get("equipped", [])):
+        if not isinstance(wid, str) or not wid or "-" in wid:
+            continue  # None, empty, or already a uid — skip
+
+        orphans = orphan_by_base_id.get(wid, [])
+        if orphans:
+            reuse_uid = orphans.pop(0)
+            user["equipped"][i] = reuse_uid
+            linked_uids.add(reuse_uid)
+        else:
+            new_uid = _make_uid(wid)
+            user["equipped"][i] = new_uid
+            _ensure_instance(new_uid, wid)
+            linked_uids.add(new_uid)
+        changed = True
+
+    return changed
+
+
+def migrate_weapon_instance_fields(user: dict) -> bool:
+    """
+    Đảm bảo tất cả weapon_instances có đủ các field: level, exp, exp_to_next.
+    Chạy sau migrate_upgraded_weapons() và migrate_all_weapons_to_uid().
+    Trả về True nếu có thay đổi, False nếu không cần.
+
+    HOÀN TOÀN MỚI — hàm này không tồn tại trước đây.
+
+    Pass 1 — Normalize existing instances:
+        WHY: Instances saved before the leveling system was added lack level/exp
+        fields entirely. Any direct field access (wi["level"]) causes KeyError.
+        grant_weapon_exp() uses setdefault defensively, but not all callers do.
+        This pass fills missing fields ADDITIVELY — it never overwrites existing
+        level or exp values, so running it on an already-migrated user is safe.
+
+    Pass 2 — Create stubs for orphan UIDs in weapons[]/equipped[]:
+        WHY: A uid in weapons[] or equipped[] with no matching weapon_instance
+        causes grant_weapon_exp() to silently return zeros (uid not found). The
+        weapon appears owned but can never gain EXP or level up. This can happen
+        if a save was interrupted after the uid was written to weapons[] but before
+        the instance was written. Level=1 is the safe default for unknown history.
+    """
+    changed = False
+
+    # Pass 1: Normalize existing instances (additive, never destructive).
+    for wi in user.get("weapon_instances", []):
+        if not isinstance(wi, dict):
+            continue
+
+        # Clamp level to valid range without resetting it.
+        raw_level = wi.get("level", None)
+        if raw_level is None:
+            wi["level"] = 1
+            changed = True
+        else:
+            clamped = min(max(1, raw_level), WEAPON_LEVEL_CAP)
+            if clamped != raw_level:
+                wi["level"] = clamped
+                changed = True
+
+        if "exp" not in wi:
+            wi["exp"] = 0
+            changed = True
+
+        if "exp_to_next" not in wi:
+            wi["exp_to_next"] = exp_to_next(wi["level"])
+            changed = True
+
+    # Pass 2: Create level=1 stubs for UIDs referenced in slots but missing instances.
+    existing_wi_uids: set[str] = {
+        wi["uid"] for wi in user.get("weapon_instances", [])
+        if isinstance(wi, dict) and "uid" in wi
+    }
+
+    for slot_list in (user.get("weapons", []), user.get("equipped", [])):
+        for wid in slot_list:
+            if not isinstance(wid, str) or not wid or "-" not in wid:
+                continue  # None, empty, or bare base_id — skip
+            if wid in existing_wi_uids:
+                continue  # instance already present — skip
+
+            # Parse base_id from "base_id-SUFFIX" format.
+            # WHY: We need base_id to construct the instance. rsplit keeps the
+            # suffix intact even if base_id itself contains a hyphen.
+            base_id = wid.rsplit("-", 1)[0]
+            user.setdefault("weapon_instances", []).append(
+                make_weapon_instance(base_id, wid, level=1)
+            )
+            existing_wi_uids.add(wid)
+            changed = True
+            log.warning(
+                "migrate_weapon_instance_fields: created stub for orphan uid=%s "
+                "(was in weapons/equipped with no matching instance)", wid
+            )
+
+    return changed
+
+
+# 
 #  GET USER — Salvage-First + v5.5 Legacy Migration
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 
 def _make_default_user() -> dict:
     """Return a fresh default user dict (avoid mutating a shared constant)."""
@@ -1110,7 +1478,7 @@ def _make_default_user() -> dict:
         "weapons":          [],
         "weapon_instances": [],
         "equipped":         [None, None, None],
-        "coins":            0,
+        "cash":            0,
         "passives":         {},
         "hunt_cd":          0,
         "crate_cd":         0,
@@ -1122,17 +1490,16 @@ def get_user(uid, data: dict) -> dict:
     """
     Retrieve or create a user safely — Salvage-First philosophy.
 
-    Principles:
-    - NEVER delete player data if it can be recovered.
+    Principles:  = - NEVER delete player data if it can be recovered.
     - Each field has its own salvage strategy (convert, filter, patch).
     - Reset a field only when truly irrecoverable (logged explicitly).
     - Reset the whole user only when it is not a dict at all (extremely rare).
 
-    Note (v1.8): user doc từ MongoDB có field '_id' (= uid_str).
+    Note (v1.8): user doc từ MongoDB có field '_id' ( uid_str).
     Field này được giữ nguyên — save_core_data tự strip trước khi $set.
 
-    Note: bare base_id weapons ("467") are valid stack weapons and are left
-    as-is.  Call ensure_weapon_uid() from the upgrade command when a UID is
+    Note: bare base_id weapons = ("467") are valid stack weapons and are left
+    as-is. = Call ensure_weapon_uid() from the upgrade command when a UID is
     needed — do NOT force-migrate here.
     """
     uid = str(uid)
@@ -1154,11 +1521,11 @@ def get_user(uid, data: dict) -> dict:
         return data[uid]
 
     # Back-fill new fields for existing users
-    if "coins" not in user:
-        user["coins"] = 0
+    if "cash" not in user:
+        user["cash"] = 0
 
-    # ── Salvage each field in priority order ──────────────────────────────────
-    _salvage_numeric(user, "coins",    0, uid)
+    #  Salvage each field in priority order 
+    _salvage_numeric(user, "cash",    0, uid)
     _salvage_numeric(user, "hunt_cd",  0, uid)
     _salvage_numeric(user, "crate_cd", 0, uid)
 
@@ -1184,22 +1551,19 @@ def get_user(uid, data: dict) -> dict:
             and "base_id" in wi
         ]
 
-    # Gọi migration để đảm bảo weapon_instances nhất quán
-    # (phòng trường hợp file cũ vẫn dùng load_data → get_user pattern)
-    from rpg_database import (
-        migrate_upgraded_weapons,
-        migrate_all_weapons_to_uid,
-    )
+    # Migration chạy tại đây theo pattern chuẩn: load → get_user → [modify] → save.
+    # Migration functions defined above in this file (moved from rpg_database.py).
+    # Caller chịu trách nhiệm save sau khi modify user.
     migrate_upgraded_weapons(user)
     migrate_all_weapons_to_uid(user)
-    migrate_weapon_instance_fields(user)
+    migrate_weapon_instance_fields(user)   # defined in MIGRATION FUNCTIONS section above
 
     return user
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 #  INVENTORY HELPERS (unchanged)
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 
 def add_item(user: dict, item_id: str, amount: int = 1) -> None:
     """Add item to inventory."""
@@ -1216,16 +1580,16 @@ def remove_item(user: dict, item_id: str, amount: int = 1) -> bool:
     return True
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 #  v5.5: add_weapon — FIXED (was appending raw base ID; now generates proper UID)
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 
 def add_weapon(user: dict, base_id: str, make_unique: bool = True) -> str:
     """
     Add a weapon to the bag.
 
-    make_unique=False  → append base_id directly (stack weapon, e.g. "467").
-    make_unique=True   → generate a UID instance (e.g. "467-ABC12") and append it.
+    make_unique=False = → append base_id directly (stack weapon, e.g. "467").
+    make_unique=True = → generate a UID instance (e.g. "467-ABC12") and append it.
 
     In BOTH cases NO upgraded_weapons entry is created.
     Upgrade data is created lazily — only when the player actually upgrades
@@ -1256,10 +1620,10 @@ def add_weapon(user: dict, base_id: str, make_unique: bool = True) -> str:
     }
 
     # 5-char suffix keeps UIDs short and readable for trading
-    suffix  = uuid.uuid4().hex[:5].upper()
+    suffix = uuid.uuid4().hex[:5].upper()
     new_uid = f"{base_id}-{suffix}"
     while new_uid in existing_uids:          # collision guard loop
-        suffix  = uuid.uuid4().hex[:5].upper()
+        suffix = uuid.uuid4().hex[:5].upper()
         new_uid = f"{base_id}-{suffix}"
 
     user["weapons"].append(new_uid)
@@ -1272,11 +1636,10 @@ def add_weapon(user: dict, base_id: str, make_unique: bool = True) -> str:
     }
     if new_uid not in existing_wi_uids:
         try:
-            w_data  = get_weapon_by_id(base_id) or {}
-            rarity  = w_data.get("rarity", "common")
+            w_data = get_weapon_by_id(base_id) or {}
+            rarity = w_data.get("rarity", "common")
             quality = roll_quality(rarity)
-            q_multi = QUALITY_TIERS.get(quality, {}).get("multiplier", 1.0)
-            dur_max = int(DURABILITY_BY_RARITY.get(rarity, 30) * q_multi)
+            dur_max = DURABILITY_BY_RARITY.get(rarity, 30)
             passive = roll_passive(rarity, quality)
         except Exception:
             quality = "medium"
@@ -1288,7 +1651,7 @@ def add_weapon(user: dict, base_id: str, make_unique: bool = True) -> str:
             "base_id":        base_id,
             "level":          1,
             "exp":            0,
-            "exp_to_next":    40,
+            "exp_to_next":    80,  # exp_to_next(1) = level*40+40
             "quality":        quality,
             "durability":     dur_max,
             "durability_max": dur_max,
@@ -1301,10 +1664,10 @@ def add_weapon(user: dict, base_id: str, make_unique: bool = True) -> str:
 
 def _find_weapon_in_bag(weapons: list, weapon_id: str) -> int | None:
     """
-    ID-aware bag search.  Returns the index of the first matching weapon, or None.
+    ID-aware bag search. = Returns the index of the first matching weapon, or None.
 
     Search priority:
-      1. Exact string match  — "467-ABC12" == "467-ABC12"
+      1. Exact string match = — "467-ABC12" = "467-ABC12"
       2. Base-ID match       — "467" finds the first "467-XXXXX" or bare "467"
 
     Pass 2 returns a result ONLY when exactly ONE weapon matches the base_id.
@@ -1330,7 +1693,7 @@ def _find_weapon_in_bag(weapons: list, weapon_id: str) -> int | None:
 
 def remove_weapon_from_bag(user: dict, weapon_id: str) -> bool:
     """
-    Remove one weapon from the bag.  Returns True if found and removed.
+    Remove one weapon from the bag. = Returns True if found and removed.
 
     Uses ID-aware lookup so both base_id and UID are accepted.
     For stack weapons (bare base_id) it removes the first matching entry.
@@ -1344,9 +1707,9 @@ def remove_weapon_from_bag(user: dict, weapon_id: str) -> bool:
     return True
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 #  UPGRADE FLOW HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 
 def ensure_upgrade_entry(user: dict, uid: str, base_id: str | None = None) -> None:
     """Deprecated: upgrade system đã được thay bằng weapon level system."""
@@ -1358,15 +1721,14 @@ def ensure_weapon_uid(user: dict, weapon_id: str) -> str | None:
     Guarantee that the weapon has a UID in the bag.
 
     Call this at the START of any upgrade command to obtain the UID before
-    reading or writing upgrade data.  After this call, use ensure_upgrade_entry()
+    reading or writing upgrade data. = After this call, use ensure_upgrade_entry()
     to create the upgraded_weapons record when the actual upgrade happens.
 
     This function ONLY handles UID identity — it does NOT create upgrade data.
     A UID can and should exist without an upgraded_weapons entry until the
     first upgrade is performed.
 
-    Behaviour:
-      • weapon_id is already a UID ("467-ABC12") and in bag:
+    Behaviour:  = • weapon_id is already a UID ("467-ABC12") and in bag:
             Returns the UID unchanged.
 
       • weapon_id is a bare base_id ("467") and bag entry is already a UID:
@@ -1395,7 +1757,7 @@ def ensure_weapon_uid(user: dict, weapon_id: str) -> str | None:
         return None
 
     stored_id = weapons[idx]
-    base_id   = get_base_id(stored_id)
+    base_id = get_base_id(stored_id)
 
     # Already a UID — return as-is (no upgrade entry creation)
     if WeaponID.is_unique(stored_id):
@@ -1409,10 +1771,10 @@ def ensure_weapon_uid(user: dict, weapon_id: str) -> str | None:
         if isinstance(e, str) and WeaponID.is_unique(e)
     }
 
-    suffix  = uuid.uuid4().hex[:5].upper()
+    suffix = uuid.uuid4().hex[:5].upper()
     new_uid = f"{base_id}-{suffix}"
     while new_uid in existing_uids:
-        suffix  = uuid.uuid4().hex[:5].upper()
+        suffix = uuid.uuid4().hex[:5].upper()
         new_uid = f"{base_id}-{suffix}"
 
     weapons[idx] = new_uid   # promote in-place (bag entry updated)
@@ -1424,11 +1786,10 @@ def ensure_weapon_uid(user: dict, weapon_id: str) -> str | None:
     }
     if new_uid not in existing_wi_uids:
         try:
-            w_data  = get_weapon_by_id(base_id) or {}
-            rarity  = w_data.get("rarity", "common")
+            w_data = get_weapon_by_id(base_id) or {}
+            rarity = w_data.get("rarity", "common")
             quality = roll_quality(rarity)
-            q_multi = QUALITY_TIERS.get(quality, {}).get("multiplier", 1.0)
-            dur_max = int(DURABILITY_BY_RARITY.get(rarity, 30) * q_multi)
+            dur_max = DURABILITY_BY_RARITY.get(rarity, 30)
             passive = roll_passive(rarity, quality)
         except Exception:
             quality = "medium"
@@ -1440,7 +1801,7 @@ def ensure_weapon_uid(user: dict, weapon_id: str) -> str | None:
             "base_id":        base_id,
             "level":          1,
             "exp":            0,
-            "exp_to_next":    120,
+            "exp_to_next":    80,  # exp_to_next(1) = level*40+40
             "quality":        quality,
             "durability":     dur_max,
             "durability_max": dur_max,
@@ -1454,13 +1815,13 @@ def ensure_weapon_uid(user: dict, weapon_id: str) -> str | None:
     return new_uid
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 #  EQUIP / UNEQUIP (unchanged)
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 
 def equip_weapon(user: dict, weapon_id: str, slot: int | None = None) -> tuple[bool, str]:
     """
-    Equip a weapon.  Returns (success, message).
+    Equip a weapon. = Returns (success, message).
 
     Accepts either base_id ("467") or UID ("467-ABC12") — uses ID-aware bag lookup.
     Always equips the actual stored identifier so UIDs are preserved in equipped[].
@@ -1477,12 +1838,12 @@ def equip_weapon(user: dict, weapon_id: str, slot: int | None = None) -> tuple[b
         equipped.append(None)
 
     if actual_id in equipped:
-        return False, "Vũ khí này đã được trang bị ở 1 ô rồi."
+        return False, "Vũ khí này đã được trang bị ở 1  rồi."
 
     if slot is not None:
         if slot not in (1, 2, 3):
             return False, "Ô trang bị chỉ từ 1 đến 3."
-        idx_slot      = slot - 1
+        idx_slot = slot - 1
         old_weapon_id = equipped[idx_slot]   # capture before overwrite (may be None)
 
         # FIX: remove new weapon from bag FIRST, then assign to slot, then return old.
@@ -1526,7 +1887,7 @@ def unequip_weapon(user: dict, slot: int) -> tuple[bool, str]:
     if equipped[idx] is None:
         return False, f"Ô {slot} đang trống."
 
-    weapon_id     = equipped[idx]
+    weapon_id = equipped[idx]
     equipped[idx] = None
     user["equipped"] = equipped
 
@@ -1539,15 +1900,20 @@ def unequip_weapon(user: dict, slot: int) -> tuple[bool, str]:
 
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 #  EGG HANDLER (unchanged)
-# ══════════════════════════════════════════════════════════════════════════════
+# 
 
 def handle_egg(user: dict) -> list[dict]:
-    """Hatch egg. Returns list of egg item dicts."""
+    """
+    Hatch 1 egg from inventory.
+    Consumes 1 egg (item "004"), returns a list of hatched item dicts.
+    Returns [] if the user has no eggs.
+    """
+    if not remove_item(user, "004", 1):
+        return []
     egg_item = get_item_by_id("004")
     count    = random.randint(1, 4)
-    add_item(user, "004", count)
     return [egg_item] * count
 
 

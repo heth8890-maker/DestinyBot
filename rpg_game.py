@@ -39,8 +39,9 @@ from discord.ext import commands
 from rpg_core import (
     get_item_by_id,
     CRATES,
+    get_user,
+    load_data,
 )
-from rpg_database import get_user
 from rpg_weapon_data import _rarity_tier
 from cash import get_balance
 
@@ -267,7 +268,8 @@ class RPGInventory(commands.Cog):
     @commands.command(name="inv")
     async def inv(self, ctx):
         uid     = str(ctx.author.id)
-        user, _ = get_user(uid)
+        data    = load_data(uid)
+        user    = get_user(uid, data)
         balance = get_balance(ctx.author.id)
         embeds  = _build_inv_embeds(ctx.author.display_name, balance, user)
         await _send_paged(ctx, embeds)
@@ -279,7 +281,8 @@ class RPGInventory(commands.Cog):
         await interaction.response.defer()
         try:
             uid     = str(interaction.user.id)
-            user, _ = get_user(uid)
+            data    = load_data(uid)
+            user    = get_user(uid, data)
             balance = get_balance(interaction.user.id)
             embeds  = _build_inv_embeds(interaction.user.display_name, balance, user)
             await _send_paged(interaction, embeds)
