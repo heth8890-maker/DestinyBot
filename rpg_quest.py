@@ -40,7 +40,7 @@ from discord.ext import commands
 import pymongo
 
 # ── Internal ──────────────────────────────────────────────────────────────────
-from rpg_core import _get_client, _with_retry, DB_NAME
+from database_helper import _get_client, _with_retry, DB_NAME
 from cash import update_balance_safe, get_balance
 # TODO: import hàm thêm crate vào kho của bạn, ví dụ:
 # from inventory import add_item
