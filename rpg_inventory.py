@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 import random
 from rpg_core import load_data, save_data, get_user, get_user_lock, get_item_by_id
-from cash import update_balance  # Liên kết với cash.py
+from cash import update_balance_safe  # Liên kết với cash.py
 
 
 class RPGInventory(commands.Cog):
@@ -79,7 +79,7 @@ class RPGInventory(commands.Cog):
             await save_data(data, uid)
 
         # Trả tiền cho user thông qua cash.py
-        update_balance(ctx.author.id, total)
+        update_balance_safe(ctx.author.id, total)
 
         await ctx.send(f"<:2246:1493575210132312095> | Đã bán {qty} {item['emoji']} {item['name']} và nhận {total} .")
 
