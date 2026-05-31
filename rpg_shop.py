@@ -54,8 +54,6 @@ from rpg_game import (
     OK,
     _split_field,
     _paginate_fields,
-    _send_paged,
-    PageView,
 )
 from cash import update_balance_safe, get_balance
 
@@ -662,7 +660,12 @@ class RPGShop(commands.Cog):
     # ─── ITEM ───
     @shop.command(name="item")
     async def shop_item(self, ctx):
-        await _send_paged(ctx, _build_shop_item_embeds())
+        embeds = _build_shop_item_embeds()
+        if not embeds:
+            await ctx.send("Không có dữ liệu item.")
+            return
+        for e in embeds:
+            await ctx.send(embed=e)
 
     # ─── WEAPON SHOP ───
     @shop.command(name="weapon")

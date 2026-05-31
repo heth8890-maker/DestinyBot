@@ -26,7 +26,7 @@ from discord import app_commands
 from rpg_core import (
     add_item, remove_item,
     add_weapon,
-    get_user, save_user,
+    get_user_lock, load_data, get_user, save_data,
     WEAPONS,
     CRATES, RARITY_COLOR, RARITY_LABEL,
     roll_weapon,
@@ -133,7 +133,9 @@ class RPGCrate(commands.Cog):
 
             crate_data = CRATES[crate_id]
             uid  = str(ctx.author.id)
-            user, _ = get_user(uid)
+            async with get_user_lock(uid):
+                data = load_data(uid)
+                user = get_user(uid, data)
             owned = user["inv"].get(f"crate_{crate_id}", 0)
 
             # Màu embed theo rarity
@@ -212,15 +214,17 @@ class RPGCrate(commands.Cog):
 
         await update_balance_safe(ctx.author.id, -price)
 
-        # ✅ Tải user SAU khi trừ tiền — tránh save_user overwrite lại cash cũ
-        user, _ = get_user(uid)
+        # ✅ Tải user SAU khi trừ tiền — tránh save_data overwrite lại cash cũ
+        async with get_user_lock(uid):
+            data = load_data(uid)
+            user = get_user(uid, data)
 
-        # 👉 STACK ITEM CRATE (base_id)
-        crate_key = f"crate_{crate_id}"
-        add_item(user, crate_key, amount)
+            # 👉 STACK ITEM CRATE (base_id)
+            crate_key = f"crate_{crate_id}"
+            add_item(user, crate_key, amount)
 
-        # ✅ Lưu lên MongoDB
-        save_user(uid, user)
+            # ✅ Lưu lên MongoDB
+            await save_data(data, uid)
 
         await ctx.send(
             f"{OK} | Đã mua **{amount}x** {crate['emoji']} {crate['name']} "
@@ -257,28 +261,30 @@ class RPGCrate(commands.Cog):
         uid       = str(ctx.author.id)
 
         # ── Pre-flight: inventory & cooldown check (once for the entire batch) ──
-        user, _ = get_user(uid)
+        async with get_user_lock(uid):
+            data = load_data(uid)
+            user = get_user(uid, data)
 
-        owned = user["inv"].get(crate_key, 0)
-        if owned <= 0:
-            return await ctx.send(
-                f"{ERR} | Bạn không có {CRATES[crate_id]['name']}. "
-                f"Mua bằng `dtn crate buy {crate_id}`."
-            )
+            owned = user["inv"].get(crate_key, 0)
+            if owned <= 0:
+                return await ctx.send(
+                    f"{ERR} | Bạn không có {CRATES[crate_id]['name']}. "
+                    f"Mua bằng `dtn crate buy {crate_id}`."
+                )
 
-        now = time.time()
-        if now < user.get("crate_cd", 0):
-            remaining = int(user["crate_cd"] - now)
-            return await ctx.send(f"⏳ Đang cooldown, còn **{remaining}s**.")
+            now = time.time()
+            if now < user.get("crate_cd", 0):
+                remaining = int(user["crate_cd"] - now)
+                return await ctx.send(f"⏳ Đang cooldown, còn **{remaining}s**.")
 
-        # ── Resolve final count (silently capped at 6 and at owned) ──
-        count = _parse_amount(raw_amount, owned)
+            # ── Resolve final count (silently capped at 6 and at owned) ──
+            count = _parse_amount(raw_amount, owned)
 
-        # ── Deduct ALL crates + set cooldown upfront, then save once ──
-        user["crate_cd"] = now + CRATE_OPEN_COOLDOWN
-        for _ in range(count):
-            remove_item(user, crate_key)
-        save_user(uid, user)
+            # ── Deduct ALL crates + set cooldown upfront, then save once ──
+            user["crate_cd"] = now + CRATE_OPEN_COOLDOWN
+            for _ in range(count):
+                remove_item(user, crate_key)
+            await save_data(data, uid)
 
         author_tag = ctx.author.mention
 
@@ -293,50 +299,52 @@ class RPGCrate(commands.Cog):
             congrat_lines: list[str] = []
 
             for _ in range(count):
-                user, _ = get_user(uid)
-                roll = random.uniform(0, 100)
+                async with get_user_lock(uid):
+                    data = load_data(uid)
+                    user = get_user(uid, data)
+                    roll = random.uniform(0, 100)
 
-                # 1. Special weapon (0.6%)
-                if roll <= 0.6:
-                    special_pool = ["5001", "5002", "5003"]
-                    w_id = random.choice(special_pool)
-                    new_uid = add_weapon(user, w_id)
-                    passive_emoji = _get_passive_emoji(user, new_uid)
-                    save_user(uid, user)
-                    add_quest_progress(ctx.author.id, "crates_opened")
-                    w_data = WEAPONS.get(w_id, {})
-                    rarity_label = RARITY_LABEL.get(w_data.get("rarity", "special"), "special")
-                    result_lines.append(
-                        f"<:Opensoulcrate:1498617029077499935> | "
-                        f"Chúc mừng đã triệu hồi thành công {rarity_label} "
-                        f"`{new_uid}` {w_data.get('emoji','')} {passive_emoji} vũ khí từ **Soul Crate**!"
-                    )
-                    congrat_lines.append(
-                        f"{LIGHT_ICON} **Congratulation!** {LIGHT_ICON}\n{ctx.author.mention}"
-                    )
+                    # 1. Special weapon (0.6%)
+                    if roll <= 0.6:
+                        special_pool = ["5001", "5002", "5003"]
+                        w_id = random.choice(special_pool)
+                        new_uid = add_weapon(user, w_id)
+                        passive_emoji = _get_passive_emoji(user, new_uid)
+                        await save_data(data, uid)
+                        add_quest_progress(ctx.author.id, "crates_opened")
+                        w_data = WEAPONS.get(w_id, {})
+                        rarity_label = RARITY_LABEL.get(w_data.get("rarity", "special"), "special")
+                        result_lines.append(
+                            f"<:Opensoulcrate:1498617029077499935> | "
+                            f"Chúc mừng đã triệu hồi thành công {rarity_label} "
+                            f"`{new_uid}` {w_data.get('emoji','')} {passive_emoji} vũ khí từ **Soul Crate**!"
+                        )
+                        congrat_lines.append(
+                            f"{LIGHT_ICON} **Congratulation!** {LIGHT_ICON}\n{ctx.author.mention}"
+                        )
 
-                # 2. Linh hoả (35%)
-                elif roll <= 35.6:
-                    amount_linh = random.randint(4, 18)
-                    add_item(user, "5200", amount_linh)
-                    save_user(uid, user)
-                    add_quest_progress(ctx.author.id, "crates_opened")
-                    result_lines.append(
-                        f"<:Opensoulcrate:1498617029077499935> | "
-                        f"Chúc mừng bạn đã mở ra **x{amount_linh}** "
-                        f"<:Linh_hoa:1498614127386562601> **Linh hoả**"
-                    )
+                    # 2. Linh hoả (35%)
+                    elif roll <= 35.6:
+                        amount_linh = random.randint(4, 18)
+                        add_item(user, "5200", amount_linh)
+                        await save_data(data, uid)
+                        add_quest_progress(ctx.author.id, "crates_opened")
+                        result_lines.append(
+                            f"<:Opensoulcrate:1498617029077499935> | "
+                            f"Chúc mừng bạn đã mở ra **x{amount_linh}** "
+                            f"<:Linh_hoa:1498614127386562601> **Linh hoả**"
+                        )
 
-                # 3. Coin (64.4%)
-                else:
-                    coins = random.randint(2000, 6000)
-                    await update_balance_safe(ctx.author.id, coins)
-                    add_quest_progress(ctx.author.id, "crates_opened")
-                    result_lines.append(
-                        f"<:Opensoulcrate:1498617029077499935> | "
-                        f"Chúc mừng bạn đã mở ra **x{coins:,}** "
-                        f"{COIN_EMOJI} **Coin**"
-                    )
+                    # 3. Coin (64.4%)
+                    else:
+                        coins = random.randint(2000, 6000)
+                        await update_balance_safe(ctx.author.id, coins)
+                        add_quest_progress(ctx.author.id, "crates_opened")
+                        result_lines.append(
+                            f"<:Opensoulcrate:1498617029077499935> | "
+                            f"Chúc mừng bạn đã mở ra **x{coins:,}** "
+                            f"{COIN_EMOJI} **Coin**"
+                        )
 
             if result_lines:
                 await ctx.send("\n".join(result_lines))
@@ -353,10 +361,12 @@ class RPGCrate(commands.Cog):
 
             result_lines: list[str] = []
             for _ in range(count):
-                user, _ = get_user(uid)
-                new_uid = add_weapon(user, "5001")
-                passive_emoji = _get_passive_emoji(user, new_uid)
-                save_user(uid, user)
+                async with get_user_lock(uid):
+                    data = load_data(uid)
+                    user = get_user(uid, data)
+                    new_uid = add_weapon(user, "5001")
+                    passive_emoji = _get_passive_emoji(user, new_uid)
+                    await save_data(data, uid)
                 add_quest_progress(ctx.author.id, "crates_opened")
                 result_lines.append(
                     f"<:Opensoulcrate:1498617029077499935> | "
@@ -380,10 +390,12 @@ class RPGCrate(commands.Cog):
 
             result_lines: list[str] = []
             for _ in range(count):
-                user, _ = get_user(uid)
-                new_uid = add_weapon(user, "5003")
-                passive_emoji = _get_passive_emoji(user, new_uid)
-                save_user(uid, user)
+                async with get_user_lock(uid):
+                    data = load_data(uid)
+                    user = get_user(uid, data)
+                    new_uid = add_weapon(user, "5003")
+                    passive_emoji = _get_passive_emoji(user, new_uid)
+                    await save_data(data, uid)
                 add_quest_progress(ctx.author.id, "crates_opened")
                 result_lines.append(
                     f"<:Opensoulcrate:1498617029077499935> | "
@@ -407,10 +419,12 @@ class RPGCrate(commands.Cog):
 
             result_lines: list[str] = []
             for _ in range(count):
-                user, _ = get_user(uid)
-                new_uid = add_weapon(user, "5002")
-                passive_emoji = _get_passive_emoji(user, new_uid)
-                save_user(uid, user)
+                async with get_user_lock(uid):
+                    data = load_data(uid)
+                    user = get_user(uid, data)
+                    new_uid = add_weapon(user, "5002")
+                    passive_emoji = _get_passive_emoji(user, new_uid)
+                    await save_data(data, uid)
                 add_quest_progress(ctx.author.id, "crates_opened")
                 result_lines.append(
                     f"<:Opensoulcrate:1498617029077499935> | "
@@ -436,15 +450,17 @@ class RPGCrate(commands.Cog):
             congrat_lines: list[str] = []
 
             for _ in range(count):
-                user, _ = get_user(uid)
                 weapon = roll_paradise_crate_weapon()
 
                 # Special: roll ra Book of Godly → mở ngay crate 009
                 if weapon["id"] == "005_book":
-                    godly_weapon = roll_book_of_godly_weapon()
-                    new_uid = add_weapon(user, godly_weapon["id"])
-                    passive_emoji = _get_passive_emoji(user, new_uid)
-                    save_user(uid, user)
+                    async with get_user_lock(uid):
+                        data = load_data(uid)
+                        user = get_user(uid, data)
+                        godly_weapon = roll_book_of_godly_weapon()
+                        new_uid = add_weapon(user, godly_weapon["id"])
+                        passive_emoji = _get_passive_emoji(user, new_uid)
+                        await save_data(data, uid)
                     add_quest_progress(ctx.author.id, "crates_opened")
                     rarity_label = RARITY_LABEL.get(godly_weapon["rarity"], godly_weapon["rarity"])
                     result_lines.append(
@@ -456,9 +472,12 @@ class RPGCrate(commands.Cog):
                     if congrat:
                         congrat_lines.append(f"{congrat}\n{ctx.author.mention}")
                 else:
-                    new_uid = add_weapon(user, weapon["id"])
-                    passive_emoji = _get_passive_emoji(user, new_uid)
-                    save_user(uid, user)
+                    async with get_user_lock(uid):
+                        data = load_data(uid)
+                        user = get_user(uid, data)
+                        new_uid = add_weapon(user, weapon["id"])
+                        passive_emoji = _get_passive_emoji(user, new_uid)
+                        await save_data(data, uid)
                     add_quest_progress(ctx.author.id, "crates_opened")
                     rarity_label = RARITY_LABEL.get(weapon["rarity"], weapon["rarity"])
                     result_lines.append(
@@ -485,11 +504,13 @@ class RPGCrate(commands.Cog):
 
             result_lines: list[str] = []
             for _ in range(count):
-                user, _ = get_user(uid)
-                weapon = roll_book_of_godly_weapon()
-                new_uid = add_weapon(user, weapon["id"])
-                passive_emoji = _get_passive_emoji(user, new_uid)
-                save_user(uid, user)
+                async with get_user_lock(uid):
+                    data = load_data(uid)
+                    user = get_user(uid, data)
+                    weapon = roll_book_of_godly_weapon()
+                    new_uid = add_weapon(user, weapon["id"])
+                    passive_emoji = _get_passive_emoji(user, new_uid)
+                    await save_data(data, uid)
                 add_quest_progress(ctx.author.id, "crates_opened")
                 rarity_label = RARITY_LABEL.get(weapon["rarity"], weapon["rarity"])
                 result_lines.append(
@@ -519,8 +540,6 @@ class RPGCrate(commands.Cog):
         for _ in range(count):
             # Reload each iteration — ensures weapon_instances list is fresh
             # before add_weapon writes to it.
-            user, _ = get_user(uid)
-
             if crate_id == "003":
                 weapon = roll_dark_crate_weapon()
             elif crate_id == "002":
@@ -528,9 +547,12 @@ class RPGCrate(commands.Cog):
             else:
                 weapon = roll_weapon()
 
-            new_uid = add_weapon(user, weapon["id"])
-            passive_emoji = _get_passive_emoji(user, new_uid)
-            save_user(uid, user)
+            async with get_user_lock(uid):
+                data = load_data(uid)
+                user = get_user(uid, data)
+                new_uid = add_weapon(user, weapon["id"])
+                passive_emoji = _get_passive_emoji(user, new_uid)
+                await save_data(data, uid)
             add_quest_progress(ctx.author.id, "crates_opened")
 
             rarity_label = RARITY_LABEL.get(weapon["rarity"], weapon["rarity"])
@@ -578,26 +600,29 @@ class RPGCrate(commands.Cog):
             return await ctx.send(f"{ERR} | Số lượng phải >= 1.")
 
         uid  = str(ctx.author.id)
-        user, _ = get_user(uid)
-        crate_key = f"crate_{crate_id}"
-        owned = user["inv"].get(crate_key, 0)
+        async with get_user_lock(uid):
+            data = load_data(uid)
+            user = get_user(uid, data)
+            crate_key = f"crate_{crate_id}"
+            owned = user["inv"].get(crate_key, 0)
 
-        if owned <= 0:
-            return await ctx.send(
-                f"{ERR} | Bạn không có {crate_data['name']}. "
-                f"Mua bằng `dtn crate buy {crate_id}`."
-            )
+            if owned <= 0:
+                return await ctx.send(
+                    f"{ERR} | Bạn không có {crate_data['name']}. "
+                    f"Mua bằng `dtn crate buy {crate_id}`."
+                )
 
-        amount = min(amount, owned)
+            amount = min(amount, owned)
 
-        # Crate 004 (Soul Crate): chỉ hoàn 30% giá gốc; còn lại 60%
-        sell_rate = 0.30 if crate_id == "004" else 0.60
-        sell_price = int(base_price * sell_rate * amount)
+            # Crate 004 (Soul Crate): chỉ hoàn 30% giá gốc; còn lại 60%
+            sell_rate = 0.30 if crate_id == "004" else 0.60
+            sell_price = int(base_price * sell_rate * amount)
 
-        # Trừ crate, cộng tiền
-        for _ in range(amount):
-            remove_item(user, crate_key)
-        save_user(uid, user)
+            # Trừ crate, cộng tiền
+            for _ in range(amount):
+                remove_item(user, crate_key)
+            await save_data(data, uid)
+
         await update_balance_safe(ctx.author.id, sell_price)
 
         rate_pct = int(sell_rate * 100)
