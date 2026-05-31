@@ -32,13 +32,17 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+# ── rpg_core đã gộp rpg_database — dùng load_data / save_data / get_user từ đây ──
 from rpg_core import (
     get_user_lock,
+    get_user,
+    load_data,
+    save_data,
+    get_base_id,          # dùng thay cho .split("-")[0] trực tiếp
     get_item_by_id,
     add_item, remove_item,
     add_weapon, remove_weapon_from_bag,
 )
-from rpg_database import get_user, save_user
 from rpg_instance import resolve_passive
 from rpg_weapon_data import (
     get_weapon_by_id,
@@ -67,8 +71,10 @@ _ALL_WEAPONS: list[dict] = WEAPONS + RARE_CRATE_WEAPONS + DARK_CRATE_WEAPON + SP
 # ══════════════════════════════════════════════════════════════════════
 
 def _find_weapon(wid: str) -> dict | None:
-    """Tìm weapon definition theo ID hoặc UID (xxx-YYYY)."""
-    base_id = wid.split("-")[0]
+    """Tìm weapon definition theo ID hoặc UID (xxx-YYYY).
+    Dùng get_base_id() thay vì gọi .split("-") trực tiếp.
+    """
+    base_id = get_base_id(wid)
     return get_weapon_by_id(base_id)
 
 
@@ -292,7 +298,7 @@ def _build_embed(session: dict, bot, guild) -> discord.Embed:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# EXECUTE TRADE — giữ nguyên logic gốc
+# EXECUTE TRADE
 # ══════════════════════════════════════════════════════════════════════
 
 async def _execute_trade(ctx, session: dict) -> str:
@@ -323,14 +329,15 @@ async def _execute_trade(ctx, session: dict) -> str:
     pending_crates_to_b:  list[dict] = []
 
     async with get_user_lock(uid_a):
-        user_a, _ = get_user(uid_a)
+        data_a  = load_data(uid_a)
+        user_a  = get_user(uid_a, data_a)
 
         for wid in sa["weapons"]:
             if wid not in user_a.get("weapons", []):
                 notes.append(f"⚠️ <@{uid_a}> không có vũ khí `{wid}` → bỏ qua.")
                 continue
             remove_weapon_from_bag(user_a, wid)
-            wi_entry = None
+            wi_entry    = None
             instances_a = user_a.setdefault("weapon_instances", [])
             for i, wi in enumerate(instances_a):
                 if isinstance(wi, dict) and wi.get("uid") == wid:
@@ -357,7 +364,7 @@ async def _execute_trade(ctx, session: dict) -> str:
                     del inv_a[cid]
                 pending_crates_to_b.append({"id": cid, "qty": qty})
 
-        save_user(uid_a, user_a)
+        await save_data(data_a, uid_a)
 
     # ── Phase 2: Add vào B + Remove từ B ─────────────────────────────
     received_weapons_from_b: list[tuple[str, dict | None]] = []
@@ -365,7 +372,8 @@ async def _execute_trade(ctx, session: dict) -> str:
     received_crates_from_b:  list[dict] = []
 
     async with get_user_lock(uid_b):
-        user_b, _ = get_user(uid_b)
+        data_b = load_data(uid_b)
+        user_b = get_user(uid_b, data_b)
 
         for wid, wi_entry in pending_weapons_to_b:
             add_weapon(user_b, wid)
@@ -382,7 +390,7 @@ async def _execute_trade(ctx, session: dict) -> str:
                 notes.append(f"⚠️ <@{uid_b}> không có vũ khí `{wid}` → bỏ qua.")
                 continue
             remove_weapon_from_bag(user_b, wid)
-            wi_entry = None
+            wi_entry    = None
             instances_b = user_b.setdefault("weapon_instances", [])
             for i, wi in enumerate(instances_b):
                 if isinstance(wi, dict) and wi.get("uid") == wid:
@@ -409,11 +417,12 @@ async def _execute_trade(ctx, session: dict) -> str:
                     del inv_b[cid]
                 received_crates_from_b.append({"id": cid, "qty": qty})
 
-        save_user(uid_b, user_b)
+        await save_data(data_b, uid_b)
 
     # ── Phase 3: Add received từ B vào A ─────────────────────────────
     async with get_user_lock(uid_a):
-        user_a, _ = get_user(uid_a)
+        data_a = load_data(uid_a)
+        user_a = get_user(uid_a, data_a)
 
         for wid, wi_entry in received_weapons_from_b:
             add_weapon(user_a, wid)
@@ -425,7 +434,7 @@ async def _execute_trade(ctx, session: dict) -> str:
             inv_a = user_a.setdefault("crates", {})
             inv_a[entry["id"]] = inv_a.get(entry["id"], 0) + entry["qty"]
 
-        save_user(uid_a, user_a)
+        await save_data(data_a, uid_a)
 
     # ── Quest progress ────────────────────────────────────────────────
     add_quest_progress(uid_a, "trades_done")
@@ -440,6 +449,410 @@ async def _execute_trade(ctx, session: dict) -> str:
     if notes:
         result += "\n" + "\n".join(notes)
     return result
+
+
+# ══════════════════════════════════════════════════════════════════════
+# UI HELPERS — [➕ Add] button flow
+# ══════════════════════════════════════════════════════════════════════
+
+def _build_inventory_options(uid: str, category: str, side: dict) -> list[discord.SelectOption]:
+    """Tạo danh sách SelectOption cho vật phẩm user đang sở hữu (tối đa 24 mục).
+
+    category: "weapons" | "items" | "crates"
+    side    : session[sk] — để tính available = owned - already_in_trade
+    """
+    options: list[discord.SelectOption] = []
+
+    if category == "weapons":
+        data = load_data(uid)
+        user = get_user(uid, data)
+        bag  = user.get("weapons", [])
+        seen: set[str] = set()
+        for uid_w in bag:
+            if uid_w in seen:
+                continue
+            seen.add(uid_w)
+            already_in_trade = side["weapons"].count(uid_w)
+            available        = bag.count(uid_w) - already_in_trade
+            if available <= 0:
+                continue
+            w      = _find_weapon(uid_w)
+            wi     = next(
+                (wi for wi in user.get("weapon_instances", [])
+                 if isinstance(wi, dict) and wi.get("uid") == uid_w),
+                None,
+            )
+            lv     = wi.get("level", 1) if wi else 1
+            p      = resolve_passive(wi.get("passive")) if wi else None
+            p_icon = p.get("emoji", "") if p and p.get("id") else ""
+            emoji  = w["emoji"] if w else "⚔️"
+            name_  = w["name"]  if w else uid_w
+            label  = f"{emoji}{p_icon} {name_} Lv{lv}"[:100]
+            options.append(discord.SelectOption(
+                label=label,
+                value=uid_w,
+                description=f"UID: {uid_w} · Còn lại: {available}",
+            ))
+            if len(options) >= 24:
+                break
+
+    elif category == "items":
+        data = load_data(uid)
+        user = get_user(uid, data)
+        inv  = user.get("inv", {})
+        for item_id, owned in inv.items():
+            already   = sum(e["qty"] for e in side["items"] if e["id"] == item_id)
+            available = owned - already
+            if available <= 0:
+                continue
+            item  = _find_item(item_id)
+            emoji = item["emoji"] if item else "🎒"
+            name_ = item["name"]  if item else item_id
+            label = f"{emoji} {name_}"[:100]
+            options.append(discord.SelectOption(
+                label=label,
+                value=item_id,
+                description=f"ID: {item_id} · Có thể thêm: {available}",
+            ))
+            if len(options) >= 24:
+                break
+
+    else:  # crates
+        data       = load_data(uid)
+        user       = get_user(uid, data)
+        crates_inv = user.get("crates", {})
+        for cid, owned in crates_inv.items():
+            already   = sum(e["qty"] for e in side.get("crates", []) if e["id"] == cid)
+            available = owned - already
+            if available <= 0:
+                continue
+            crate = _find_crate(cid)
+            emoji = crate["emoji"] if crate else "📦"
+            name_ = crate["name"]  if crate else cid
+            label = f"{emoji} {name_}"[:100]
+            options.append(discord.SelectOption(
+                label=label,
+                value=cid,
+                description=f"ID: {cid} · Có thể thêm: {available}",
+            ))
+            if len(options) >= 24:
+                break
+
+    if not options:
+        return [discord.SelectOption(
+            label="(Không có vật phẩm khả dụng)",
+            value="__empty__",
+            default=True,
+        )]
+    return options
+
+
+# ─────────────────────────────────────────────────────────────────────
+
+class ItemQtyModal(discord.ui.Modal, title="Nhập số lượng"):
+    """Modal để nhập số lượng cho item / crate."""
+
+    def __init__(
+        self,
+        category: str,
+        item_id: str,
+        item_label: str,
+        max_available: int,
+        session: dict,
+        cog,
+        original_interaction: discord.Interaction,
+        uid: str,
+    ):
+        super().__init__()
+        self._category             = category
+        self._item_id              = item_id
+        self._session              = session
+        self._cog                  = cog
+        self._original_interaction = original_interaction
+        self._uid                  = uid
+
+        self.qty_input = discord.ui.TextInput(
+            label=f"Số lượng ({item_label})"[:45],
+            placeholder=f"Nhập 1 – {max_available}",
+            default="1",
+            min_length=1,
+            max_length=4,
+            style=discord.TextStyle.short,
+        )
+        self.add_item(self.qty_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # 1. Parse qty
+        try:
+            qty = int(self.qty_input.value.strip())
+            assert 1 <= qty <= 999
+        except (ValueError, AssertionError):
+            return await interaction.response.send_message(
+                f"{ERR} Số lượng không hợp lệ (phải là số nguyên dương).", ephemeral=True
+            )
+
+        # 2. Gọi core logic — không respond interaction trực tiếp
+        cat_singular = self._category.rstrip("s")  # "items"→"item", "crates"→"crate"
+        success, err_msg = await self._cog._do_add_from_interaction(
+            self._uid,
+            cat_singular,
+            self._item_id,
+            qty,
+            self._session,
+        )
+
+        if not success:
+            return await interaction.response.send_message(err_msg, ephemeral=True)
+
+        # 3. Ack modal interaction
+        await interaction.response.defer()
+
+        # 4. Xoá ephemeral container
+        try:
+            await self._original_interaction.delete_original_response()
+        except Exception:
+            pass  # token hết hạn hoặc đã bị xoá — bỏ qua
+
+
+# ─────────────────────────────────────────────────────────────────────
+
+class CategorySelect(discord.ui.Select):
+    """Dropdown chọn loại vật phẩm (weapons / items / crates)."""
+
+    def __init__(self, uid: str, session: dict, cog):
+        self._uid     = uid
+        self._session = session
+        self._cog     = cog
+        options = [
+            discord.SelectOption(label="⚔️ Vũ khí (Weapons)",  value="weapons"),
+            discord.SelectOption(label="🎒 Vật phẩm (Items)",   value="items"),
+            discord.SelectOption(label="📦 Rương (Crates)",     value="crates"),
+        ]
+        super().__init__(
+            placeholder="📋 Chọn loại vật phẩm...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.selected_category = self.values[0]
+        self.view.selected_item     = None
+        self.view.selected_label    = None
+        self.view.max_available     = 0
+        self.view._rebuild(self._uid, self._session, self._cog)
+        await interaction.response.edit_message(
+            content="Chọn vật phẩm trong danh sách:",
+            view=self.view,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────
+
+class ItemPickSelect(discord.ui.Select):
+    """Dropdown chọn vật phẩm cụ thể từ inventory."""
+
+    def __init__(
+        self,
+        options: list[discord.SelectOption],
+        uid: str,
+        session: dict,
+        cog,
+        category: str,
+    ):
+        self._uid      = uid
+        self._session  = session
+        self._cog      = cog
+        self._category = category
+        is_empty = (len(options) == 1 and options[0].value == "__empty__")
+        super().__init__(
+            placeholder="🔍 Chọn vật phẩm...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            disabled=is_empty,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        value = self.values[0]
+        if value == "__empty__":
+            return await interaction.response.defer()
+
+        # Tìm label từ option đã chọn
+        chosen_opt = next((o for o in self.options if o.value == value), None)
+        label = chosen_opt.label if chosen_opt else value
+
+        # Tính max_available
+        sk   = _side_key(self._session, self._uid)
+        side = self._session[sk]
+        data = load_data(self._uid)
+        user = get_user(self._uid, data)
+
+        if self._category == "weapons":
+            bag       = user.get("weapons", [])
+            already   = side["weapons"].count(value)
+            max_avail = bag.count(value) - already
+        elif self._category == "items":
+            owned     = user.get("inv", {}).get(value, 0)
+            already   = sum(e["qty"] for e in side["items"] if e["id"] == value)
+            max_avail = owned - already
+        else:  # crates
+            owned     = user.get("crates", {}).get(value, 0)
+            already   = sum(e["qty"] for e in side.get("crates", []) if e["id"] == value)
+            max_avail = owned - already
+
+        self.view.selected_item  = value
+        self.view.selected_label = label
+        self.view.max_available  = max(1, max_avail)
+        self.view._rebuild(self._uid, self._session, self._cog)
+
+        await interaction.response.edit_message(
+            content=f"Đã chọn: **{label}**\nNhấn **✅ Xác nhận** để thêm vào bảng trade.",
+            view=self.view,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────
+
+class ConfirmAddButton(discord.ui.Button):
+    """Nút xác nhận thêm vật phẩm vào bảng trade."""
+
+    def __init__(
+        self,
+        uid: str,
+        session: dict,
+        cog,
+        original_interaction: discord.Interaction,
+    ):
+        self._uid                  = uid
+        self._session              = session
+        self._cog                  = cog
+        self._original_interaction = original_interaction
+        super().__init__(
+            label="✅ Xác nhận",
+            style=discord.ButtonStyle.success,
+            row=2,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        category  = self.view.selected_category  # "weapons" | "items" | "crates"
+        item_id   = self.view.selected_item
+        label     = self.view.selected_label
+        max_avail = self.view.max_available
+
+        if not item_id:
+            return await interaction.response.send_message(
+                f"{ERR} Chưa chọn vật phẩm.", ephemeral=True
+            )
+
+        if category == "weapons":
+            # Weapons qty cố định = 1
+            success, err_msg = await self._cog._do_add_from_interaction(
+                self._uid, "weapon", item_id, 1, self._session
+            )
+            if not success:
+                return await interaction.response.send_message(err_msg, ephemeral=True)
+            await interaction.response.defer()
+            try:
+                await self._original_interaction.delete_original_response()
+            except Exception:
+                pass
+
+        else:
+            # items / crates → mở Modal để nhập qty
+            modal = ItemQtyModal(
+                category=category,
+                item_id=item_id,
+                item_label=label or item_id,
+                max_available=max_avail,
+                session=self._session,
+                cog=self._cog,
+                original_interaction=self._original_interaction,
+                uid=self._uid,
+            )
+            await interaction.response.send_modal(modal)
+
+
+# ─────────────────────────────────────────────────────────────────────
+
+class TradeAddView(discord.ui.View):
+    """View ephemeral chứa luồng chọn vật phẩm để thêm vào bảng trade."""
+
+    def __init__(
+        self,
+        uid: str,
+        session: dict,
+        cog,
+        original_interaction: discord.Interaction,
+    ):
+        super().__init__(timeout=120)
+        self.uid                  = uid
+        self.session              = session
+        self.cog                  = cog
+        self.original_interaction = original_interaction
+        self.selected_category: str | None = None
+        self.selected_item:     str | None = None
+        self.selected_label:    str | None = None
+        self.max_available: int = 0
+        self._rebuild(uid, session, cog)
+
+    def _rebuild(self, uid: str, session: dict, cog):
+        """Xoá toàn bộ children rồi build lại từ state hiện tại."""
+        self.clear_items()
+        sk   = _side_key(session, uid)
+        side = session[sk]
+
+        # Row 0: CategorySelect luôn hiện
+        self.add_item(CategorySelect(uid, session, cog))
+
+        # Row 1: ItemPickSelect — chỉ hiện khi đã chọn category
+        if self.selected_category:
+            options = _build_inventory_options(uid, self.selected_category, side)
+            self.add_item(ItemPickSelect(options, uid, session, cog, self.selected_category))
+
+        # Row 2: ConfirmAddButton — chỉ hiện khi đã chọn item
+        if self.selected_item:
+            self.add_item(ConfirmAddButton(uid, session, cog, self.original_interaction))
+
+    async def on_timeout(self):
+        pass  # ephemeral tự hết hạn, không cần xử lý
+
+
+# ─────────────────────────────────────────────────────────────────────
+
+class TradeMainView(discord.ui.View):
+    """View gắn vào bảng trade public, cung cấp nút [➕ Add]."""
+
+    def __init__(self, session: dict, cog):
+        super().__init__(timeout=None)  # bảng trade không timeout
+        self._session = session
+        self._cog     = cog
+
+    @discord.ui.button(label="➕ Add", style=discord.ButtonStyle.primary, row=0)
+    async def add_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = str(interaction.user.id)
+
+        # Guard: chỉ 2 người trong session mới được dùng
+        session = self._cog._by_uid(uid)
+        if not session or uid not in (session["uid_a"], session["uid_b"]):
+            return await interaction.response.send_message(
+                f"{ERR} Bạn không tham gia giao dịch này.", ephemeral=True
+            )
+
+        # Guard: session có thể đã kết thúc
+        if session["sid"] not in self._cog.sessions:
+            return await interaction.response.send_message(
+                f"{ERR} Giao dịch này đã kết thúc.", ephemeral=True
+            )
+
+        view = TradeAddView(uid, session, self._cog, original_interaction=interaction)
+        await interaction.response.send_message(
+            content="📦 Chọn loại vật phẩm muốn thêm vào bảng trade:",
+            view=view,
+            ephemeral=True,
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -465,6 +878,114 @@ class RPGTrade(commands.Cog):
         session["side_a"]["accepted"] = False
         session["side_b"]["accepted"] = False
 
+    async def _do_add_from_interaction(
+        self,
+        uid: str,
+        category: str,
+        item_id: str,
+        qty: int,
+        session: dict,
+    ) -> tuple[bool, str]:
+        """Core logic thêm item vào bảng trade từ UI interaction.
+
+        Không gọi interaction.response — caller tự xử lý response.
+        Trả về (True, "") khi thành công, (False, error_msg) khi thất bại.
+        """
+        sk   = _side_key(session, uid)
+        side = session[sk]
+        cat  = category.lower()
+
+        # ── Weapon ────────────────────────────────────────────────
+        if cat == "weapon":
+            wid  = item_id
+            data = load_data(uid)
+            user = get_user(uid, data)
+            bag  = user.get("weapons", [])
+
+            if wid not in bag:
+                return False, f"{ERR} | Bạn không có vũ khí `{wid}` trong bag."
+            if wid in side["weapons"]:
+                return False, f"{ERR} | `{wid}` đã có trong bảng rồi."
+
+            owned_count   = bag.count(wid)
+            already_added = side["weapons"].count(wid)
+            if already_added >= owned_count:
+                return False, f"{ERR} | Bạn chỉ có {owned_count}x `{wid}`."
+
+            side["weapons"].append(wid)
+            wi_snap = next(
+                (wi for wi in user.get("weapon_instances", [])
+                 if isinstance(wi, dict) and wi.get("uid") == wid),
+                {},
+            )
+            side.setdefault("weapon_snapshots", {})[wid] = {
+                "level":   wi_snap.get("level", 1),
+                "passive": wi_snap.get("passive"),
+            }
+            self._invalidate_accepted(session)
+
+        # ── Item ──────────────────────────────────────────────────
+        elif cat == "item":
+            if not _find_item(item_id):
+                return False, f"{ERR} | Item `{item_id}` không tồn tại."
+
+            data      = load_data(uid)
+            user      = get_user(uid, data)
+            owned_qty = user["inv"].get(item_id, 0)
+            already   = sum(e["qty"] for e in side["items"] if e["id"] == item_id)
+
+            if owned_qty < already + qty:
+                return False, (
+                    f"{ERR} | Bạn có {owned_qty}x `{item_id}` "
+                    f"(đã thêm {already}x vào bảng)."
+                )
+            for e in side["items"]:
+                if e["id"] == item_id:
+                    e["qty"] += qty
+                    break
+            else:
+                side["items"].append({"id": item_id, "qty": qty})
+
+            self._invalidate_accepted(session)
+
+        # ── Crate ─────────────────────────────────────────────────
+        elif cat == "crate":
+            crate = _find_crate(item_id)
+            if not crate:
+                return False, (
+                    f"{ERR} | Crate `{item_id}` không tồn tại. "
+                    f"Hợp lệ: `001` Common · `002` Rare · `003` Dark · `004` Soul"
+                )
+
+            data      = load_data(uid)
+            user      = get_user(uid, data)
+            owned_qty = user.get("crates", {}).get(str(item_id), 0)
+            already   = sum(e["qty"] for e in side.get("crates", []) if e["id"] == item_id)
+
+            if owned_qty < already + qty:
+                return False, (
+                    f"{ERR} | Bạn có {owned_qty}x crate `{item_id}` "
+                    f"(đã thêm {already}x vào bảng)."
+                )
+            for e in side["crates"]:
+                if e["id"] == item_id:
+                    e["qty"] += qty
+                    break
+            else:
+                side["crates"].append({"id": item_id, "qty": qty})
+
+            self._invalidate_accepted(session)
+
+        else:
+            return False, f"{ERR} | Loại không hợp lệ: `{category}`."
+
+        # Cập nhật bảng trade public
+        channel = self.bot.get_channel(session["channel_id"])
+        if channel:
+            await self._update_embed(session, channel)
+
+        return True, ""
+
     async def _update_embed(self, session: dict, channel: discord.TextChannel):
         """Xoá bảng cũ → gửi bảng mới (tránh bị cuốn trôi)."""
         msg_id = session.get("msg_id")
@@ -476,7 +997,8 @@ class RPGTrade(commands.Cog):
                 pass
         try:
             new_msg = await channel.send(
-                embed=_build_embed(session, self.bot, channel.guild)
+                embed=_build_embed(session, self.bot, channel.guild),
+                view=TradeMainView(session, self),
             )
             session["msg_id"] = new_msg.id
         except Exception:
@@ -568,9 +1090,11 @@ class RPGTrade(commands.Cog):
 
         # ── Weapon ────────────────────────────────────────────────
         if cat == "weapon":
-            wid      = item_id
-            user, _  = get_user(uid)
-            bag      = user.get("weapons", [])
+            wid  = item_id
+            # Load user theo pattern chuẩn (không cần lock — chỉ đọc để kiểm tra)
+            data = load_data(uid)
+            user = get_user(uid, data)
+            bag  = user.get("weapons", [])
 
             if wid not in bag:
                 return await ctx.send(f"{ERR} | Bạn không có vũ khí `{wid}` trong bag.")
@@ -583,9 +1107,8 @@ class RPGTrade(commands.Cog):
                 return await ctx.send(f"{ERR} | Bạn chỉ có {owned_count}x `{wid}`.")
 
             side["weapons"].append(wid)
-            user_snap, _ = get_user(uid)
             wi_snap = next(
-                (wi for wi in user_snap.get("weapon_instances", [])
+                (wi for wi in user.get("weapon_instances", [])
                  if isinstance(wi, dict) and wi.get("uid") == wid),
                 {},
             )
@@ -606,7 +1129,8 @@ class RPGTrade(commands.Cog):
             if not _find_item(item_id):
                 return await ctx.send(f"{ERR} | Item `{item_id}` không tồn tại.")
 
-            user, _   = get_user(uid)
+            data      = load_data(uid)
+            user      = get_user(uid, data)
             owned_qty = user["inv"].get(item_id, 0)
             already   = sum(e["qty"] for e in side["items"] if e["id"] == item_id)
 
@@ -637,7 +1161,8 @@ class RPGTrade(commands.Cog):
             except (ValueError, AssertionError):
                 return await ctx.send(f"{ERR} | Số lượng không hợp lệ.")
 
-            user, _   = get_user(uid)
+            data      = load_data(uid)
+            user      = get_user(uid, data)
             owned_qty = user.get("crates", {}).get(str(item_id), 0)
             already   = sum(e["qty"] for e in side.get("crates", []) if e["id"] == item_id)
 
@@ -657,7 +1182,7 @@ class RPGTrade(commands.Cog):
         else:
             return await ctx.send(
                 f"{ERR} | Loại không hợp lệ. Dùng `weapon`, `item`, hoặc `crate`.\n"
-                f"💡 Xem hướng dẫn: **`dtn trade help`**"
+                f" Xem hướng dẫn: **`dtn trade help`**"
             )
 
         channel = self.bot.get_channel(session.get("channel_id", ctx.channel.id))
@@ -756,7 +1281,7 @@ class RPGTrade(commands.Cog):
         else:
             return await ctx.send(
                 f"{ERR} | Loại không hợp lệ. Dùng `weapon`, `item`, `crate`, hoặc `gold`.\n"
-                f"💡 Xem hướng dẫn: **`dtn trade help`**"
+                f" Xem hướng dẫn: **`dtn trade help`**"
             )
 
         channel = self.bot.get_channel(session.get("channel_id", ctx.channel.id))
@@ -793,7 +1318,6 @@ class RPGTrade(commands.Cog):
         if not parts:
             return
 
-        # Tạo context từ message để tái sử dụng helper methods
         ctx = await self.bot.get_context(message)
         cmd = parts[0].lower()
 
@@ -817,7 +1341,6 @@ class RPGTrade(commands.Cog):
                 qty     = parts[3] if len(parts) > 3 else "1"
                 await self._do_add(ctx, second, item_id, qty)
             else:
-                # Coi là thêm tiền
                 try:
                     amount = int(parts[1])
                     await self._do_give_inner(ctx, uid, session, amount)
@@ -827,7 +1350,6 @@ class RPGTrade(commands.Cog):
                         f"📖 Xem chi tiết: **`dtn trade help`**"
                     )
         else:
-            # Lệnh không hợp lệ — gợi ý nhẹ
             await ctx.send(
                 f"{ERR} | Lệnh reply không nhận ra. Có thể dùng:\n"
                 f"`add <tiền>` · `add weapon <id>` · `accept` · `cancel`\n"
@@ -838,7 +1360,6 @@ class RPGTrade(commands.Cog):
     # COMMANDS — Hybrid (prefix + slash)
     # ══════════════════════════════════════════════════════════════
 
-    # ── trade (group) ─────────────────────────────────────────────
     @commands.hybrid_group(
         name="trade",
         invoke_without_command=True,
@@ -888,25 +1409,19 @@ class RPGTrade(commands.Cog):
                 f"`add <tiền>` · `add weapon <id>` · `accept` · `cancel`\n"
                 f"📖 Xem đầy đủ: **`dtn trade help`**  ·  Slash: `/trade help`"
             )
-            msg = await ctx.send(tip, embed=embed)
+            msg = await ctx.send(tip, embed=embed, view=TradeMainView(session, self))
             session["msg_id"]     = msg.id
             session["channel_id"] = ctx.channel.id
 
         else:
-            # Không có mention → gợi ý ngắn
             await ctx.send(
                 f"{TRADE_ICON} | Dùng **`dtn trade @user`** để mở giao dịch.\n"
                 f"📖 Xem hướng dẫn chi tiết: **`dtn trade help`**",
                 ephemeral=bool(ctx.interaction),
             )
 
-    # ── trade help ────────────────────────────────────────────────
     @trade.command(name="help", description="Xem hướng dẫn trade chi tiết (2 trang).")
     async def trade_help(self, ctx: commands.Context):
-        """
-        Hiển thị help trade có nút ◀ ▶ để chuyển trang.
-        Trang 1: lệnh reply nhanh | Trang 2: lệnh prefix & slash đầy đủ
-        """
         view = TradeHelpView()
         await ctx.send(
             embed=_build_help_page(0),
@@ -914,7 +1429,6 @@ class RPGTrade(commands.Cog):
             ephemeral=bool(ctx.interaction),
         )
 
-    # ── trade add ─────────────────────────────────────────────────
     @trade.command(name="add", description="Thêm weapon / item / crate / tiền vào bảng trade.")
     @app_commands.describe(
         category="Loại muốn thêm",
@@ -950,7 +1464,6 @@ class RPGTrade(commands.Cog):
         else:
             await self._do_add(ctx, category, value, qty)
 
-    # ── trade remove ──────────────────────────────────────────────
     @trade.command(name="remove", description="Bỏ weapon / item / crate / tiền khỏi bảng trade.")
     @app_commands.describe(
         category="Loại muốn bỏ",
@@ -974,7 +1487,6 @@ class RPGTrade(commands.Cog):
             )
         await self._do_remove_inner(ctx, uid, session, category, value, qty)
 
-    # ── trade accept ──────────────────────────────────────────────
     @trade.command(name="accept", description="Xác nhận giao dịch. Cả 2 accept → trade sau 5 giây.")
     async def trade_accept(self, ctx: commands.Context):
         """Xác nhận giao dịch."""
@@ -987,7 +1499,6 @@ class RPGTrade(commands.Cog):
             )
         await self._do_accept(ctx, uid, session)
 
-    # ── trade cancel ──────────────────────────────────────────────
     @trade.command(name="cancel", description="Huỷ giao dịch đang mở.")
     async def trade_cancel(self, ctx: commands.Context):
         """Huỷ giao dịch."""

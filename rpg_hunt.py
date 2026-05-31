@@ -74,13 +74,22 @@ def _slash_guild_only():
 # ─────────────────────────────────────────────────────────
 # BONUS SYSTEM — CONSTANTS
 # ─────────────────────────────────────────────────────────
-CRATE_DROP_CHANCE        = 1.0    # % tỉ lệ gốc
-COIN_DROP_CHANCE         = 1.75   # % tỉ lệ gốc
-ITEM_1099_DROP_CHANCE    = 0.75   # % tỉ lệ gốc
+CRATE_DROP_CHANCE        = 0.6    # % tỉ lệ gốc (sau lần đầu)
+COIN_DROP_CHANCE         = 0.7    # % tỉ lệ gốc (sau lần đầu)
+ITEM_1099_DROP_CHANCE    = 0.3    # % tỉ lệ gốc (sau lần đầu)
 BONUS_MAX                = 10     # tối đa lần bonus mỗi chu kỳ (chung cả 3 loại)
 BONUS_RESET_SEC          = 6 * 3600  # 6 tiếng
-FIRST_DROP_CHANCE        = 60.0   # % lần đầu chưa ra treasure loại đó trong chu kỳ
+CRATE_FIRST_DROP_CHANCE  = 60.0   # % lần đầu crate trong chu kỳ
+COIN_FIRST_DROP_CHANCE   = 60.0   # % lần đầu coin trong chu kỳ
+ITEM_1099_FIRST_DROP_CHANCE = 5.0 # % lần đầu item 1099 trong chu kỳ
 SECOND_ROLL_MULTIPLIER   = 0.5    # roll 2 = roll 1 × 50%
+TREASURE_DECAY_PER_HIT   = 0.15   # giảm 15% tỉ lệ sau mỗi lần ra treasure
+
+# ─── Coin drop amount ────────────────────────────────────────────────────────
+COIN_FIRST_AMOUNT_MIN    = 800
+COIN_FIRST_AMOUNT_MAX    = 1200
+COIN_AMOUNT_MIN          = 2000
+COIN_AMOUNT_MAX          = 6500
 
 # ─── Treasure item 1099 drop config ─────────────────────────────────────────
 ITEM_1099_AMOUNT_MIN        = 88
@@ -116,21 +125,23 @@ _CRATE_FALLBACK = {
 # ─────────────────────────────────────────────────────────
 # BONUS HELPERS
 # ─────────────────────────────────────────────────────────
-def _roll_treasure(roll_type: str, is_first: bool, second_roll: bool, extra_chance: float = 0.0) -> bool:
+def _roll_treasure(roll_type: str, is_first: bool, second_roll: bool, extra_chance: float = 0.0, decay: float = 0.0) -> bool:
     """
     Roll xem treasure loại roll_type có rơi không.
     - roll_type   : "crate" | "coin" | "item1099"
-    - is_first    : True → dùng FIRST_DROP_CHANCE (60%)
+    - is_first    : True → dùng FIRST_DROP_CHANCE riêng từng loại
     - second_roll : True → nhân × SECOND_ROLL_MULTIPLIER (0.5)
     - extra_chance: bonus từ treasure_hunt effect (raw, × 100 để ra %)
+    - decay       : tổng hệ số giảm tích luỹ (0.0 → 1.0), áp dụng sau mỗi lần ra treasure
     """
     if roll_type == "crate":
-        base = FIRST_DROP_CHANCE if is_first else CRATE_DROP_CHANCE
+        base = CRATE_FIRST_DROP_CHANCE if is_first else CRATE_DROP_CHANCE
     elif roll_type == "coin":
-        base = FIRST_DROP_CHANCE if is_first else COIN_DROP_CHANCE
+        base = COIN_FIRST_DROP_CHANCE if is_first else COIN_DROP_CHANCE
     else:  # item1099
-        base = FIRST_DROP_CHANCE if is_first else ITEM_1099_DROP_CHANCE
+        base = ITEM_1099_FIRST_DROP_CHANCE if is_first else ITEM_1099_DROP_CHANCE
     base += extra_chance * 100
+    base *= max(0.0, 1.0 - decay)
     if second_roll:
         base *= SECOND_ROLL_MULTIPLIER
     return random.uniform(0, 100) < base
@@ -159,6 +170,7 @@ def _get_bonus_data(user: dict, now: int) -> dict:
     """
     bonus = user.setdefault("hunt_bonus", {
         "count": 0, "reset_at": 0,
+        "drop_count":          0,
         "item1099_dropped":    False,
         "crate_first_dropped": False,
         "coin_first_dropped":  False,
@@ -166,10 +178,12 @@ def _get_bonus_data(user: dict, now: int) -> dict:
     if now >= bonus["reset_at"]:
         bonus["count"]               = 0
         bonus["reset_at"]            = now + BONUS_RESET_SEC
+        bonus["drop_count"]          = 0
         bonus["item1099_dropped"]    = False
         bonus["crate_first_dropped"] = False
         bonus["coin_first_dropped"]  = False
     # Backward-compat
+    bonus.setdefault("drop_count",          0)
     bonus.setdefault("item1099_dropped",    False)
     bonus.setdefault("crate_first_dropped", False)
     bonus.setdefault("coin_first_dropped",  False)
@@ -381,9 +395,9 @@ async def _run_hunt(
                     weapon_count = len(active_slots)
 
                     if weapon_count > 0 and total_exp > 0:
-                        footer_text = f"-# {weapon_count} Weapon  |  {total_exp:,} exp"
+                        footer_text = f"-# {weapon_count} Weapon  | +{total_exp:,} exp"
                     elif weapon_count > 0:
-                        footer_text = f"-# {weapon_count} Weapon  |  0 exp"
+                        footer_text = f"-# {weapon_count} Weapon  | +0 exp"
                     else:
                         footer_text = "-# Trang bị weapon để nhận EXP khi hunt!"
                 except Exception as e:
@@ -441,6 +455,7 @@ async def _run_hunt(
                         break
                     roll_type   = random.choice(_TREASURE_TYPES)
                     second_roll = (roll_idx == 1)
+                    decay       = bonus["drop_count"] * TREASURE_DECAY_PER_HIT
 
                     if roll_type == "crate":
                         is_first = not bonus["crate_first_dropped"]
@@ -449,12 +464,14 @@ async def _run_hunt(
                             is_first     = is_first,
                             second_roll  = second_roll,
                             extra_chance = treasure_hunt_val,
+                            decay        = decay,
                         )
                         if hit:
                             crate_id  = _roll_crate_id()
                             crate_key = f"crate_{crate_id}"
                             add_item(user, crate_key)
                             bonus["count"] += 1
+                            bonus["drop_count"] += 1
                             bonus["crate_first_dropped"] = True
 
                             emoji, name  = _crate_display(crate_id)
@@ -474,11 +491,16 @@ async def _run_hunt(
                             is_first     = is_first,
                             second_roll  = second_roll,
                             extra_chance = treasure_hunt_val,
+                            decay        = decay,
                         )
                         if hit:
-                            c = random.randint(2000, 6500)
+                            if not bonus["coin_first_dropped"]:
+                                c = random.randint(COIN_FIRST_AMOUNT_MIN, COIN_FIRST_AMOUNT_MAX)
+                            else:
+                                c = random.randint(COIN_AMOUNT_MIN, COIN_AMOUNT_MAX)
                             total_coins += c
                             bonus["count"] += 1
+                            bonus["drop_count"] += 1
                             bonus["coin_first_dropped"] = True
 
                             remaining    = BONUS_MAX - bonus["count"]
@@ -497,6 +519,7 @@ async def _run_hunt(
                             is_first     = is_first,
                             second_roll  = second_roll,
                             extra_chance = treasure_hunt_val,
+                            decay        = decay,
                         )
                         if hit:
                             try:
@@ -507,6 +530,7 @@ async def _run_hunt(
                                 for _ in range(qty):
                                     add_item(user, "1099")
                                 bonus["count"] += 1
+                                bonus["drop_count"] += 1
                                 bonus["item1099_dropped"] = True
                                 reset_in_min = max(0, (bonus["reset_at"] - now) // 60)
                                 bonus_msgs.append(

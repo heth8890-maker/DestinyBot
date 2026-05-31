@@ -24,6 +24,13 @@ COMMAND MAP
   - RPGSell + _resolve_sell_weapon_targets tách sang rpg_sell.py
   - Thêm slash command /inv cho RPGInventory
 
+⚡ THAY ĐỔI v6 (Components v2):
+  - Chuyển toàn bộ từ Embed → Container (Components v2)
+  - Dùng Separator để phân trang giữa các section
+  - Thêm header text hướng dẫn lệnh ở trên cùng container
+  - Crate hiển thị id và rarity giống item thường
+  - _paginate_fields / PageView / _send_paged giữ nguyên cho compat
+
 ⚡ THAY ĐỔI v5 (Cleanup):
   - Xoá toàn bộ import thừa còn lại từ các cog đã tách (refactoring debt)
   - Gộp _send_paged + _send_paged_inter thành _send_paged chung
@@ -53,6 +60,10 @@ HUNT_CD_SEC = 16
 
 ERR = "<:X_:1495466670616219819>"
 OK  = "<:Tick:1495466684520206528>"
+
+# ── Components v2 flag ─────────────────────────────────────
+_cv2_flags = discord.MessageFlags()
+_cv2_flags.value = 1 << 15   # IS_COMPONENTS_V2
 
 
 
@@ -193,50 +204,148 @@ class PageView(discord.ui.View):
                 pass
 
 
-async def _send_paged(
+async def _send_paged_components(
     target: commands.Context | discord.Interaction,
-    embeds: list[discord.Embed],
+    pages: list[discord.ui.Container],
 ) -> None:
     """
-    Gửi embed phân trang cho cả prefix lẫn slash (đã defer).
-    - prefix : dùng ctx.send()
-    - slash  : dùng interaction.followup.send()
-    Tự động lưu message vào PageView.message để on_timeout có thể edit.
+    Gửi Components v2 phân trang.
+    - prefix  : LayoutView + ctx.send(view=lv)  — không cần flags=
+    - slash   : followup.send(components=[...], flags=_cv2_flags)
+    Buttons được nhúng vào ActionRow bên trong Container (View thường pattern).
     """
     is_interaction = isinstance(target, discord.Interaction)
-    send_fn = target.followup.send if is_interaction else target.send
 
-    if len(embeds) == 1:
-        await send_fn(embed=embeds[0])
+    if is_interaction:
+        # Slash / interaction: dùng components= + flags=
+        if len(pages) == 1:
+            await target.followup.send(components=[pages[0]], flags=_cv2_flags)
+        else:
+            view = PageViewV2(pages, author_id=target.user.id)
+            await target.followup.send(
+                components=[view.build_container()],
+                flags=_cv2_flags,
+            )
     else:
-        view = PageView(embeds)
-        msg  = await send_fn(embed=embeds[0], view=view)
-        # followup.send trả về Message; ctx.send cũng trả về Message
-        view.message = msg
+        # Prefix: LayoutView + ctx.send(view=lv)
+        if len(pages) == 1:
+            lv = discord.ui.LayoutView()
+            lv.add_item(pages[0])
+            await target.send(view=lv)
+        else:
+            view = PageViewV2(pages, author_id=target.author.id)
+            lv = discord.ui.LayoutView()
+            lv.add_item(view.build_container())
+            view.message = await target.send(view=lv)
+
+
+class PageViewV2(discord.ui.View):
+    """
+    View phân trang cho Components v2.
+    Buttons nhúng vào ActionRow bên trong Container (theo pattern View thường).
+    """
+
+    def __init__(self, pages: list[discord.ui.Container], author_id: int, page: int = 0):
+        super().__init__(timeout=60)
+        self.pages     = pages
+        self.page      = max(0, min(page, len(pages) - 1))
+        self.author_id = author_id
+        self.message: discord.Message | None = None
+        self._sync_buttons()
+
+    def _sync_buttons(self) -> None:
+        self.prev_btn.disabled = (self.page == 0)
+        self.next_btn.disabled = (self.page >= len(self.pages) - 1)
+
+    def build_container(self) -> discord.ui.Container:
+        """Trả về Container của trang hiện tại, nhúng buttons vào cuối."""
+        base = self.pages[self.page]
+        # Lấy children của container gốc rồi thêm ActionRow buttons
+        children = list(base.children) + [discord.ui.ActionRow(*self.children)]
+        return discord.ui.Container(*children, accent_color=discord.Color(0x5865F2))
+
+    @discord.ui.button(label="◀ Trước", style=discord.ButtonStyle.secondary)
+    async def prev_btn(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message(
+                "Không phải inventory của bạn.", ephemeral=True
+            )
+        self.page -= 1
+        self._sync_buttons()
+        await interaction.response.edit_message(
+            components=[self.build_container()],
+            flags=_cv2_flags,
+        )
+
+    @discord.ui.button(label="Tiếp ▶", style=discord.ButtonStyle.primary)
+    async def next_btn(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message(
+                "Không phải inventory của bạn.", ephemeral=True
+            )
+        self.page += 1
+        self._sync_buttons()
+        await interaction.response.edit_message(
+            components=[self.build_container()],
+            flags=_cv2_flags,
+        )
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.NotFound:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════
-# INTERNAL: build inv embeds (dùng chung prefix + slash)
+# COMPONENTS v2 — INVENTORY BUILDER
 # ═══════════════════════════════════════════════════════════
 
-def _build_inv_embeds(
+_HEADER_TEXT = (
+    "[?] `dtn sell all` - để bán tất cả item\n"
+    "`dtn shop` - để xem các shop\n"
+    "`dtn weapon` để xem vũ khí bản thân"
+)
+
+_ITEMS_PER_PAGE = 15   # số dòng item/crate tối đa mỗi trang
+
+
+def _chunk_lines(lines: list[str], size: int) -> list[list[str]]:
+    """Chia list thành chunks kích thước cố định."""
+    return [lines[i : i + size] for i in range(0, max(len(lines), 1), size)]
+
+
+def _build_inv_components(
     display_name: str,
     balance: int,
     user: dict,
-) -> list[discord.Embed]:
+) -> list[discord.ui.Container]:
     """
-    Trả về list[Embed] phân trang cho inventory.
+    Trả về list[discord.ui.Container] phân trang cho inventory.
     Nhận balance sẵn từ ngoài — tránh gọi DB bên trong builder.
+    Buttons chưa nhúng ở đây — PageViewV2.build_container() sẽ thêm vào.
     """
-    item_lines, crate_lines = [], []
+    item_lines: list[str] = []
+    crate_lines: list[str] = []
 
     for item_id, qty in user["inv"].items():
         if item_id.startswith("crate_"):
-            cid   = item_id.split("_", 1)[1]
-            crate = CRATES.get(cid)
-            emoji = crate["emoji"] if crate else "📦"
-            name  = crate["name"]  if crate else item_id
-            crate_lines.append(f"{emoji} {name} x{qty}")
+            cid    = item_id.split("_", 1)[1]
+            crate  = CRATES.get(cid)
+            emoji  = crate["emoji"]  if crate else "📦"
+            name   = crate["name"]   if crate else item_id
+            rarity = crate.get("rarity", "common") if crate else "common"
+            tier   = _rarity_tier(rarity)
+            crate_lines.append(
+                f"{emoji} `crate_{cid}` **{name}** x{qty}  _{tier}_"
+            )
             continue
         item = get_item_by_id(item_id)
         if item:
@@ -245,14 +354,39 @@ def _build_inv_embeds(
                 f"{item['emoji']} `{item_id}` **{item['name']}** x{qty}  _{tier}_"
             )
 
-    fields: list[tuple] = []
-    fields += _split_field("<:2851:1495250164116492469> Vật phẩm", item_lines)
+    # Flatten sections → list dòng có heading
+    all_blocks: list[str] = []
+    if item_lines:
+        all_blocks.append("<:2851:1495250164116492469> **Vật phẩm**")
+        all_blocks.extend(item_lines)
     if crate_lines:
-        fields += _split_field("📦 Crate", crate_lines)
+        all_blocks.append("📦 **Crate**")
+        all_blocks.extend(crate_lines)
 
-    title  = f"<:Backpack:1495462021377032202> Kho đồ của {display_name}"
-    footer = f"Số dư: {balance:,} {COIN_EMOJI}"
-    return _paginate_fields(fields, title=title, color=0x5865F2, footer=footer)
+    if not all_blocks:
+        all_blocks = ["_Kho đồ trống._"]
+
+    page_chunks = _chunk_lines(all_blocks, _ITEMS_PER_PAGE)
+    total = len(page_chunks)
+
+    containers: list[discord.ui.Container] = []
+    for page_idx, chunk in enumerate(page_chunks):
+        page_tag = f" • Trang {page_idx + 1}/{total}" if total > 1 else ""
+
+        container = discord.ui.Container(
+            discord.ui.TextDisplay(_HEADER_TEXT),
+            discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
+            discord.ui.TextDisplay(
+                f"## <:Backpack:1495462021377032202> Kho đồ của **{display_name}**{page_tag}\n"
+                f"-# {COIN_EMOJI} Số dư: **{balance:,}**"
+            ),
+            discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),
+            discord.ui.TextDisplay("\n".join(chunk)),
+            accent_color=discord.Color(0x5865F2),
+        )
+        containers.append(container)
+
+    return containers
 
 
 # ═══════════════════════════════════════════════════════════
@@ -267,12 +401,12 @@ class RPGInventory(commands.Cog):
 
     @commands.command(name="inv")
     async def inv(self, ctx):
-        uid     = str(ctx.author.id)
-        data    = load_data(uid)
-        user    = get_user(uid, data)
-        balance = get_balance(ctx.author.id)
-        embeds  = _build_inv_embeds(ctx.author.display_name, balance, user)
-        await _send_paged(ctx, embeds)
+        uid        = str(ctx.author.id)
+        data       = load_data(uid)
+        user       = get_user(uid, data)
+        balance    = get_balance(ctx.author.id)
+        pages      = _build_inv_components(ctx.author.display_name, balance, user)
+        await _send_paged_components(ctx, pages)
 
     # ─── slash: /inv ────────────────────────────────────────
 
@@ -284,8 +418,8 @@ class RPGInventory(commands.Cog):
             data    = load_data(uid)
             user    = get_user(uid, data)
             balance = get_balance(interaction.user.id)
-            embeds  = _build_inv_embeds(interaction.user.display_name, balance, user)
-            await _send_paged(interaction, embeds)
+            pages   = _build_inv_components(interaction.user.display_name, balance, user)
+            await _send_paged_components(interaction, pages)
         except Exception as e:
             await interaction.followup.send(
                 f"<:X_:1495466670616219819> Có lỗi xảy ra khi tải inventory: `{e}`",

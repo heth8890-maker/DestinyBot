@@ -10,6 +10,7 @@ COMMAND MAP
   dtn shop buy <slot>                  — ★ mua weapon từ weapon shop
   dtn shop event                       — xem shop event (Soul Crate)
   dtn ebuy 004 [amount]               — mua Soul Crate bằng Linh hoả (MongoDB)
+  dtn ebuy 006|007|008 [amount]       — mua Guaranteed Crate bằng Linh hoả
 
 SLASH COMMANDS
 ──────────────────────────────────────────────────────────
@@ -18,7 +19,7 @@ SLASH COMMANDS
   /shop weapon
   /shop buy slot:<int>
   /shop event
-  /ebuy item_id:<str> amount:<int>
+  /ebuy item_id:<str> amount:<int>     — hỗ trợ: 004, 006, 007, 008
 ──────────────────────────────────────────────────────────
 """
 
@@ -603,24 +604,36 @@ def _build_weapon_shop_container() -> discord.ui.Container:
     return discord.ui.Container(*children, accent_color=discord.Color(0x3498DB))
 
 
+# ★ Crate event bán bằng Linh hoả — thêm/bớt crate: sửa dict này
+_EVENT_SHOP: dict[str, int] = {
+    "004": 25,     # Soul Crate
+    "006": 1200,   # Hồn Giáp Bất Diệt Crate
+    "007": 1200,   # Linh Diệm Sát Thần Crate
+    "008": 1200,   # Tam Hoả Thống Soái Crate
+}
+
+
 def _build_event_embed() -> discord.Embed:
     embed = discord.Embed(
         title="<:Shop:1495464183037165763> Shop Event",
         description=(
-            "Dùng Linh hoả để đổi Soul Crate hiếm!\n"
-            "Ma Hỏa Thống Soái 0.3% | Linh Diệm Sát Thần 0.3% | "
-            "Hồn Giáp Bất Diệt 0.3% | Linh Hoả 35% | 64.4% 2000–6000 Coin"
+            "Dùng <:Linh_hoa:1498614127386562601> Linh hoả để đổi Soul Crate hiếm!\n"
+            "Crate 006/007/008 đảm bảo **100%** vũ khí special tương ứng."
         ),
         color=0xCCFFCC,
     )
-    embed.add_field(
-        name="<:Soulcrate:1498617031501807646> | Soul Crate (ID: 004)",
-        value=(
-            "**Giá:** 25x <:Linh_hoa:1498614127386562601> Linh hoả\n"
-            "**Lệnh mua:** `dtn ebuy 004 [số lượng]`  hoặc  `/ebuy item_id:004`"
-        ),
-        inline=False,
-    )
+    for crate_id, cost in _EVENT_SHOP.items():
+        crate = CRATES.get(crate_id)
+        if not crate:
+            continue
+        embed.add_field(
+            name=f"{crate['emoji']} | {crate['name']} (ID: {crate_id})",
+            value=(
+                f"**Giá:** {cost}x <:Linh_hoa:1498614127386562601> Linh hoả\n"
+                f"**Lệnh mua:** `dtn ebuy {crate_id} [số lượng]`  hoặc  `/ebuy item_id:{crate_id}`"
+            ),
+            inline=False,
+        )
     return embed
 
 
@@ -781,14 +794,14 @@ class RPGEventBuy(commands.Cog):
     # ─── PREFIX ───
     @commands.command(name="eventbuy", aliases=["ebuy"])
     async def event_buy(self, ctx, item_id: str = None, amount: int = 1):
-        """Mua Soul Crate bằng Linh hoả. `dtn ebuy 004 [số lượng]`"""
+        """Mua crate event bằng Linh hoả. `dtn ebuy <004|006|007|008> [số lượng]`"""
         await _handle_event_buy(ctx.author, item_id, amount, ctx.send)
 
     # ─── SLASH ───
     @app_commands.command(name="ebuy", description="Mua Soul Crate bằng Linh hoả")
     @app_commands.guild_only()
     @app_commands.describe(
-        item_id="ID vật phẩm (hiện tại chỉ hỗ trợ: 004)",
+        item_id="ID vật phẩm (004 · 006 · 007 · 008)",
         amount="Số lượng muốn mua (mặc định: 1)",
     )
     async def slash_ebuy(
@@ -810,7 +823,10 @@ class RPGEventBuy(commands.Cog):
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         choices = [
-            app_commands.Choice(name="Soul Crate (004)", value="004"),
+            app_commands.Choice(name="Soul Crate (004)",                  value="004"),
+            app_commands.Choice(name="Hồn Giáp Bất Diệt Crate (006)",    value="006"),
+            app_commands.Choice(name="Linh Diệm Sát Thần Crate (007)",   value="007"),
+            app_commands.Choice(name="Tam Hoả Thống Soái Crate (008)",   value="008"),
         ]
         return [c for c in choices if current.lower() in c.name.lower()]
 
@@ -825,17 +841,18 @@ async def _handle_event_buy(
     amount: int,
     send_fn,
 ) -> None:
-    if not item_id or item_id != "004":
+    if not item_id or item_id not in _EVENT_SHOP:
+        valid_ids = ", ".join(f"`{k}`" for k in _EVENT_SHOP)
         return await send_fn(
-            f"{ERR} | ID vật phẩm không đúng. Sử dụng: `dtn ebuy 004 [số lượng]` hoặc `/ebuy item_id:004`"
+            f"{ERR} | ID vật phẩm không đúng. ID hợp lệ: {valid_ids}"
         )
     if amount <= 0:
         return await send_fn(f"{ERR} | Số lượng không hợp lệ.")
 
     uid           = str(member.id)
-    currency_id   = "5200"   # Linh hoả
-    crate_id      = "004"    # Soul Crate
-    cost_per_unit = 25
+    currency_id   = "5200"          # Linh hoả
+    crate_id      = item_id
+    cost_per_unit = _EVENT_SHOP[crate_id]
     total_cost    = cost_per_unit * amount
 
     # ── Tải user từ rpg_core (unified data layer) ──
@@ -851,7 +868,7 @@ async def _handle_event_buy(
             f"để thực hiện giao dịch này."
         )
 
-    # ── Trừ Linh hoả, thêm Soul Crate ──
+    # ── Trừ Linh hoả, thêm crate ──
     user["inv"][currency_id] -= total_cost
     add_item(user, f"crate_{crate_id}", amount)
 
@@ -860,9 +877,13 @@ async def _handle_event_buy(
     if not await save_data(data, uid):
         return await send_fn(f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
 
+    crate       = CRATES.get(crate_id, {})
+    crate_emoji = crate.get("emoji", "📦")
+    crate_name  = crate.get("name", f"Crate {crate_id}")
     await send_fn(
-        f"{OK} | Chúc mừng bạn đã đổi thành công **{total_cost}** Linh hoả "
-        f"lấy **{amount}x** <:Soulcrate:1498617031501807646> **Soul Crate**!"
+        f"{OK} | Chúc mừng bạn đã đổi thành công **{total_cost}** "
+        f"<:Linh_hoa:1498614127386562601> Linh hoả "
+        f"lấy **{amount}x** {crate_emoji} **{crate_name}**!"
     )
 
 

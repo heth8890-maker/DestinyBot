@@ -25,11 +25,12 @@ from discord import app_commands
 
 from rpg_core import (
     add_item, remove_item,
-    add_weapon, roll_weapon,
+    add_weapon,
+    get_user, save_user,
+    WEAPONS,
     CRATES, RARITY_COLOR, RARITY_LABEL,
+    roll_weapon,
 )
-# ✅ Dùng get_user / save_user từ rpg_database (MongoDB) thay vì load_data / save_data JSON
-from rpg_database import get_user, save_user
 
 from rpg_weapon_data import (
     roll_rare_crate_weapon,
@@ -303,7 +304,6 @@ class RPGCrate(commands.Cog):
                     passive_emoji = _get_passive_emoji(user, new_uid)
                     save_user(uid, user)
                     add_quest_progress(ctx.author.id, "crates_opened")
-                    from rpg_core import WEAPONS
                     w_data = WEAPONS.get(w_id, {})
                     rarity_label = RARITY_LABEL.get(w_data.get("rarity", "special"), "special")
                     result_lines.append(
