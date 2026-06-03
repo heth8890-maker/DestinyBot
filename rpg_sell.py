@@ -237,8 +237,8 @@ class _ConfirmView(discord.ui.View):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("Đây không phải lệnh của bạn.", ephemeral=True)
         self.confirmed = True
-        self.stop()
         await interaction.response.defer()
+        self.stop()
 
     @discord.ui.button(
         emoji=discord.PartialEmoji.from_str("<:X_:1495466670616219819>"),
@@ -249,8 +249,8 @@ class _ConfirmView(discord.ui.View):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("Đây không phải lệnh của bạn.", ephemeral=True)
         self.confirmed = False
-        self.stop()
         await interaction.response.defer()
+        self.stop()
 
 
 # ═══════════════════════════════════════════════════════════
