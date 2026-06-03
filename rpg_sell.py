@@ -399,8 +399,10 @@ async def _do_sell_weapon(
         if not await save_data(data, uid):
             return await send_fn(content=f"{ERR} | Lỗi lưu dữ liệu, thử lại sau!")
 
-        await update_balance_safe(author_id, total_value)
-        add_quest_progress(author_id, "weapons_sold", amount)
+    # FIX: gọi ngoài lock — update_balance_safe tự acquire get_user_lock(uid)
+    # bên trong, nếu gọi trong lock sẽ deadlock (asyncio.Lock không re-entrant).
+    await update_balance_safe(author_id, total_value)
+    add_quest_progress(author_id, "weapons_sold", amount)
 
     qty_label = f"**{amount}x** " if amount > 1 else ""
     w_name    = entity.fmt_name() if hasattr(entity, "fmt_name") else weapon_arg
