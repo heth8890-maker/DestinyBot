@@ -237,8 +237,11 @@ class _ConfirmView(discord.ui.View):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("Đây không phải lệnh của bạn.", ephemeral=True)
         self.confirmed = True
-        await interaction.response.defer()
-        self.stop()
+        self.stop()                          # FIX: stop() trước — đảm bảo view.wait() unblock
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass                             # interaction token hết hạn — không sao, stop() đã gọi rồi
 
     @discord.ui.button(
         emoji=discord.PartialEmoji.from_str("<:X_:1495466670616219819>"),
@@ -249,8 +252,11 @@ class _ConfirmView(discord.ui.View):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("Đây không phải lệnh của bạn.", ephemeral=True)
         self.confirmed = False
-        await interaction.response.defer()
-        self.stop()
+        self.stop()                          # FIX: stop() trước
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
 
 
 # ═══════════════════════════════════════════════════════════
@@ -462,10 +468,13 @@ async def _do_sell_rarity(
     view.message = await send_fn(embed=embed, view=view)
     await view.wait()
 
-    # FIX: `not view.confirmed` bắt nhầm None (timeout) lẫn False (cancel).
-    # on_timeout() đã edit message rồi — nếu vào đây lần nữa sẽ gây double-edit.
-    # Chỉ abort khi user chủ động không confirm (False hoặc None).
-    if view.confirmed is not True:
+    # FIX: phân biệt rõ 3 trạng thái:
+    #   None  → timeout — on_timeout() đã edit message rồi, KHÔNG edit lại
+    #   False → user bấm Huỷ — edit thông báo huỷ
+    #   True  → tiếp tục bán
+    if view.confirmed is None:
+        return  # timeout đã xử lý trong on_timeout()
+    if view.confirmed is False:
         for child in view.children:
             child.disabled = True
         await edit_fn(view.message, content=f"{ERR} | Đã huỷ bán.", embed=None, view=view)

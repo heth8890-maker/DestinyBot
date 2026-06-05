@@ -57,6 +57,47 @@ OK  = "<:Tick:1495466684520206528>"
 _cv2_flags       = discord.MessageFlags()
 _cv2_flags.value = 1 << 15
 
+# Ephemeral + CV2 combined (ephemeral = bit 6 = 64)
+_eph_cv2_flags       = discord.MessageFlags()
+_eph_cv2_flags.value = (1 << 15) | 64
+
+# ─────────────────────────────────────────────────────────
+# HUNT SETTINGS — COLOR & DISPLAY MODE
+# ─────────────────────────────────────────────────────────
+_COLOR_MAP = {
+    "none":   None,
+    "blue":   0x3498DB,
+    "red":    0xE74C3C,
+    "purple": 0x9B59B6,
+    "black":  0x23272A,
+    "white":  0xFFFFFF,
+}
+_COLOR_LABELS = {
+    "none":   "Không màu",
+    "blue":   "Xanh dương",
+    "red":    "Đỏ",
+    "purple": "Tím",
+    "black":  "Đen",
+    "white":  "Trắng",
+}
+
+# Superscript digit map — dùng cho compact level display  e.g. ᴸⱽ⁰⁶
+_SUP_DIGITS = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+
+def _lv_superscript(lv: int) -> str:
+    """Convert level int → ᴸⱽXX superscript string."""
+    return "ᴸⱽ" + str(lv).zfill(2).translate(_SUP_DIGITS)
+
+
+def _get_hunt_settings(user: dict) -> dict:
+    """Return hunt_settings sub-dict, tạo default nếu chưa có."""
+    return user.setdefault("hunt_settings", {
+        "color":        0x4CAF50,   # màu mặc định (green)
+        "display_mode": "normal",   # "normal" | "compact"
+    })
+
+
 # ─────────────────────────────────────────────────────────
 # SLASH CHECKS  (guild_only)
 # ─────────────────────────────────────────────────────────
@@ -236,6 +277,46 @@ def _equipped_display(equipped: list, user: dict | None = None) -> str:
     return "\n".join(lines)
 
 
+def _equipped_display_compact(equipped: list, user: dict | None = None) -> str:
+    """Compact single-line equipped display dùng cho display_mode='compact'."""
+    wi_map = {
+        wi["uid"]: wi
+        for wi in (user or {}).get("weapon_instances", [])
+        if isinstance(wi, dict) and "uid" in wi
+    }
+    slots       = list(equipped) + [None] * (3 - len(equipped))
+    parts       = []
+    empty_count = 0
+
+    for wid in slots[:3]:
+        if wid is None:
+            empty_count += 1
+            parts.append("—")
+        elif wid in wi_map:
+            wi_item = wi_map[wid]
+            w       = get_weapon_by_id(wi_item.get("base_id", ""))
+            nm      = w["name"]  if w else wid
+            em      = w["emoji"] if w else "⚔️"
+            lv      = wi_item.get("level", 1)
+            sup     = _lv_superscript(lv)
+            broken  = wi_item.get("broken", False)
+            if broken:
+                parts.append(f"{em}~~**{nm}**~~ {sup} (lv {lv})")
+            else:
+                parts.append(f"{em}**{nm}** {sup} (lv {lv})")
+        else:
+            w = get_weapon_by_id(get_base_id(wid))
+            if w:
+                parts.append(f"{w['emoji']}**{w['name']}**")
+            else:
+                parts.append(f"`{wid}`")
+
+    result = f"{SWORD_EMOJI} | " + " ".join(parts)
+    if empty_count > 0:
+        result += f" ({empty_count} ô chưa trang bị)"
+    return result
+
+
 def _grant_exp_to_equipped(user: dict, found: list, equipped: list) -> None:
     """
     Grant EXP cho tất cả weapon đang equipped.
@@ -335,6 +416,16 @@ async def _run_hunt(
                 just_broken = []
                 print(f"⚠️  Warning: durability decrease failed: {e}")
 
+            # ── Hunt settings (color + display mode) ────────────
+            try:
+                _hs      = _get_hunt_settings(user)
+                _compact = _hs.get("display_mode", "normal") == "compact"
+                _raw_col = _hs.get("color", 0x4CAF50)
+                _accent  = discord.Color(int(_raw_col)) if _raw_col is not None else None
+            except Exception:
+                _compact = False
+                _accent  = discord.Color(0x4CAF50)
+
             # ── Build Components v2 Container ───────────────────
             try:
                 cv2_children = []
@@ -343,45 +434,86 @@ async def _run_hunt(
                 cv2_children.append(
                     discord.ui.TextDisplay(f"## {SKULL_EMOJI}  {display_name} đi săn!")
                 )
-                cv2_children.append(discord.ui.Separator())
+                if not _compact:
+                    cv2_children.append(discord.ui.Separator())
+
+                # ── Menu bar (Switch color / Switch display) ─────
+                # ActionRow KHÔNG được nằm trong Container — sẽ add top-level qua LayoutView
+                _menu_ar = discord.ui.ActionRow(
+                    discord.ui.Button(
+                        label="Switch color",
+                        custom_id=f"hunt_swcolor_{author_id}",
+                        style=discord.ButtonStyle.secondary,
+                    ),
+                    discord.ui.Button(
+                        label="Switch display",
+                        custom_id=f"hunt_swdisplay_{author_id}",
+                        style=discord.ButtonStyle.secondary,
+                    ),
+                )
 
                 # ── Items ────────────────────────────────────────
                 if not found:
-                    items_text = "_Bạn không tìm được gì lần này..._"
+                    items_text = (
+                        "| _Không tìm được gì lần này..._"
+                        if _compact else
+                        "_Bạn không tìm được gì lần này..._"
+                    )
                 else:
-                    lines = []
+                    lines         = []
+                    compact_parts = []
                     for item in found:
                         if item.get("special") == "egg":
                             try:
                                 eggs = handle_egg(user)
                                 for egg in eggs:
                                     lines.append(f"{egg['emoji']}  **{egg['name']}**")
+                                    compact_parts.append(f"{egg['emoji']}**{egg['name']}**")
                             except Exception as e:
                                 print(f"⚠️  Warning: handle_egg failed: {e}")
                                 lines.append("🥚  **Egg** (hatching error)")
+                                compact_parts.append("🥚**Egg**")
                         else:
                             try:
                                 add_item(user, item["id"])
                                 lines.append(f"{item['emoji']}  **{item['name']}**")
+                                compact_parts.append(f"{item['emoji']}**{item['name']}**")
                             except Exception as e:
                                 print(f"⚠️  Warning: add_item failed for {item.get('id')}: {e}")
                                 lines.append(
                                     f"{item['emoji']}  **{item.get('name', 'Unknown')}** (add error)"
                                 )
-                    items_text = "\n".join(lines) if lines else "_Lỗi hiển thị vật phẩm_"
+                                compact_parts.append(
+                                    f"{item.get('emoji', '?')}**{item.get('name', '?')}**"
+                                )
+                    if _compact:
+                        items_text = (
+                            "| " + "".join(compact_parts)
+                            if compact_parts else "| _Lỗi hiển thị vật phẩm_"
+                        )
+                    else:
+                        items_text = "\n".join(lines) if lines else "_Lỗi hiển thị vật phẩm_"
 
                 cv2_children.append(discord.ui.TextDisplay(items_text))
-                cv2_children.append(discord.ui.Separator())
+                if not _compact:
+                    cv2_children.append(discord.ui.Separator())
 
                 # ── Equipped ─────────────────────────────────────
                 try:
-                    equipped_text = (
-                        f"**{SWORD_EMOJI} Vũ khí đang trang bị**\n"
-                        + _equipped_display(equipped, user)
-                    )
+                    if _compact:
+                        equipped_text = _equipped_display_compact(equipped, user)
+                    else:
+                        equipped_text = (
+                            f"**{SWORD_EMOJI} Vũ khí đang trang bị**\n"
+                            + _equipped_display(equipped, user)
+                        )
                 except Exception as e:
                     print(f"⚠️  Warning: equipped display failed: {e}")
-                    equipped_text = f"**{SWORD_EMOJI} Vũ khí đang trang bị**\n_Error displaying weapons_"
+                    equipped_text = (
+                        f"{SWORD_EMOJI} | _Error displaying weapons_"
+                        if _compact else
+                        f"**{SWORD_EMOJI} Vũ khí đang trang bị**\n_Error displaying weapons_"
+                    )
 
                 cv2_children.append(discord.ui.TextDisplay(equipped_text))
 
@@ -394,21 +526,33 @@ async def _run_hunt(
                     total_exp    = calc_hunt_exp(found) if found else 0
                     weapon_count = len(active_slots)
 
-                    if weapon_count > 0 and total_exp > 0:
-                        footer_text = f"-# {weapon_count} Weapon  | +{total_exp:,} exp"
-                    elif weapon_count > 0:
-                        footer_text = f"-# {weapon_count} Weapon  | +0 exp"
+                    if _compact:
+                        exp_val     = total_exp if (weapon_count > 0 and total_exp > 0) else 0
+                        footer_text = f"# +{exp_val:,}xp  (+{exp_val:,} exp).\n------"
                     else:
-                        footer_text = "-# Trang bị weapon để nhận EXP khi hunt!"
+                        if weapon_count > 0 and total_exp > 0:
+                            footer_text = f"-# {weapon_count} Weapon  | +{total_exp:,} exp"
+                        elif weapon_count > 0:
+                            footer_text = f"-# {weapon_count} Weapon  | +0 exp"
+                        else:
+                            footer_text = "-# Trang bị weapon để nhận EXP khi hunt!"
                 except Exception as e:
                     print(f"⚠️  Warning: footer failed: {e}")
-                    footer_text = f"-# Cooldown: {HUNT_CD_SEC}s"
+                    footer_text = (
+                        "# +0xp  (+0 exp).\n------"
+                        if _compact else
+                        f"-# Cooldown: {HUNT_CD_SEC}s"
+                    )
 
-                cv2_children.append(discord.ui.Separator())
+                if not _compact:
+                    cv2_children.append(discord.ui.Separator())
                 cv2_children.append(discord.ui.TextDisplay(footer_text))
 
-                # ── Assemble container ───────────────────────────
-                container = discord.ui.Container(*cv2_children, accent_color=discord.Color(0x4CAF50))
+                # ── Assemble container + menu ActionRow ─────────
+                # Container chỉ chứa TextDisplay/Separator (không có ActionRow)
+                # _menu_ar được add top-level vào LayoutView bên ngoài
+                container = discord.ui.Container(*cv2_children, accent_color=_accent)
+                _hunt_menu_ar = _menu_ar
 
             except Exception as e:
                 return await send_fn(content=f"{ERR} | Failed to build response: `{e}`")
@@ -575,7 +719,7 @@ async def _run_hunt(
 
             # ── Send ────────────────────────────────────────────
             try:
-                await send_fn(components=[container])
+                await send_fn(components=[container, _hunt_menu_ar])
             except Exception as e:
                 return await send_fn(content=f"{ERR} | Failed to send response: `{e}`")
 
@@ -718,6 +862,215 @@ class RPGHunt(commands.Cog):
             send_fn        = _send,
             send_bonus_fn  = _send_bonus,
         )
+
+    # ══════════════════════════════════════════════════════
+    # INTERACTION HANDLER — Hunt buttons & selects
+    # ══════════════════════════════════════════════════════
+
+    @commands.Cog.listener("on_interaction")
+    async def on_hunt_buttons(self, interaction: discord.Interaction):
+        if interaction.type != discord.InteractionType.component:
+            return
+        data = interaction.data or {}
+        cid  = data.get("custom_id", "")
+        uid  = str(interaction.user.id)
+
+        # ── Route theo custom_id ─────────────────────────────
+        if cid == f"hunt_swcolor_{uid}":
+            await self._handle_switch_color(interaction)
+
+        elif cid == f"hunt_swdisplay_{uid}":
+            await self._handle_switch_display(interaction)
+
+        elif cid == f"hunt_colorsel_{uid}":
+            values = data.get("values", [])
+            await self._handle_color_select(interaction, values[0] if values else "none")
+
+        elif cid == f"hunt_confirmdsp_{uid}":
+            await self._handle_confirm_display(interaction)
+
+        elif cid == f"hunt_canceldsp_{uid}":
+            await self._handle_cancel_display(interaction)
+
+        # Người khác bấm nút của user này → báo lỗi nhẹ
+        elif any(cid.startswith(p) for p in (
+            "hunt_swcolor_", "hunt_swdisplay_",
+            "hunt_colorsel_", "hunt_confirmdsp_", "hunt_canceldsp_",
+        )):
+            try:
+                await interaction.response.send_message(
+                    "Nút này không dành cho bạn.", ephemeral=True
+                )
+            except Exception:
+                pass
+
+    # ── Switch color: hiển thị ephemeral chọn màu ────────────
+    async def _handle_switch_color(self, interaction: discord.Interaction):
+        uid = str(interaction.user.id)
+        color_select = discord.ui.StringSelect(
+            custom_id=f"hunt_colorsel_{uid}",
+            placeholder="Chọn màu container...",
+            options=[
+                discord.SelectOption(label="Không màu",  value="none",   description="Xóa màu container"),
+                discord.SelectOption(label="Xanh dương", value="blue",   description="#3498DB"),
+                discord.SelectOption(label="Đỏ",         value="red",    description="#E74C3C"),
+                discord.SelectOption(label="Tím",        value="purple", description="#9B59B6"),
+                discord.SelectOption(label="Đen",        value="black",  description="#23272A"),
+                discord.SelectOption(label="Trắng",      value="white",  description="#FFFFFF"),
+            ],
+        )
+        # Container chỉ chứa TextDisplay/Separator — ActionRow add top-level qua LayoutView
+        _container = discord.ui.Container(
+            discord.ui.TextDisplay("### Màu container hunt"),
+            discord.ui.Separator(),
+        )
+        _ar = discord.ui.ActionRow(color_select)
+        _lv = discord.ui.LayoutView()
+        _lv.add_item(_container)
+        _lv.add_item(_ar)
+        try:
+            await interaction.response.send_message(
+                view=_lv, flags=_eph_cv2_flags
+            )
+        except Exception as e:
+            print(f"⚠️  Warning: switch_color send failed: {e}")
+
+    # ── Switch display: hiển thị ephemeral xác nhận ──────────
+    async def _handle_switch_display(self, interaction: discord.Interaction):
+        uid = str(interaction.user.id)
+        try:
+            _data = load_data(uid)
+            _user = get_user(uid, _data)
+            _hs   = _get_hunt_settings(_user)
+            cur   = _hs.get("display_mode", "normal")
+        except Exception:
+            cur = "normal"
+
+        cur_label = "thường" if cur == "normal" else "gọn"
+        new_label = "gọn"    if cur == "normal" else "thường"
+
+        preview = (
+            "| item1**Tên item**item2**Tên item**\n"
+            f"{SWORD_EMOJI} | emoji**Tên vũ khí** ᴸⱽ⁰¹ (lv 1) — (2 ô chưa trang bị)\n"
+            "# +36xp  (+36 exp).\n------"
+        )
+        # Container chỉ chứa TextDisplay/Separator — ActionRow add top-level qua LayoutView
+        _container = discord.ui.Container(
+            discord.ui.TextDisplay(
+                f"### Chuyển chế độ hiển thị?\n"
+                f"Hiện tại: **{cur_label}** → Chuyển sang: **{new_label}**"
+            ),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(f"**Preview chế độ gọn:**\n{preview}"),
+            discord.ui.Separator(),
+        )
+        _ar = discord.ui.ActionRow(
+            discord.ui.Button(
+                label="Xác nhận",
+                custom_id=f"hunt_confirmdsp_{uid}",
+                style=discord.ButtonStyle.success,
+            ),
+            discord.ui.Button(
+                label="Hủy",
+                custom_id=f"hunt_canceldsp_{uid}",
+                style=discord.ButtonStyle.danger,
+            ),
+        )
+        _lv = discord.ui.LayoutView()
+        _lv.add_item(_container)
+        _lv.add_item(_ar)
+        try:
+            await interaction.response.send_message(
+                view=_lv, flags=_eph_cv2_flags
+            )
+        except Exception as e:
+            print(f"⚠️  Warning: switch_display send failed: {e}")
+
+    # ── Áp dụng màu được chọn ────────────────────────────────
+    async def _handle_color_select(self, interaction: discord.Interaction, color_key: str):
+        uid = str(interaction.user.id)
+        try:
+            async with get_user_lock(uid):
+                _data = load_data(uid)
+                _user = get_user(uid, _data)
+                _hs   = _get_hunt_settings(_user)
+                if color_key in _COLOR_MAP:
+                    _hs["color"] = _COLOR_MAP[color_key]
+                ok = await save_data(_data, uid)
+            label = _COLOR_LABELS.get(color_key, color_key)
+            if ok:
+                _c = discord.ui.Container(
+                    discord.ui.TextDisplay(f"{OK} Đã đổi màu container sang **{label}**!"),
+                )
+            else:
+                _c = discord.ui.Container(
+                    discord.ui.TextDisplay(f"{ERR} Lưu thất bại, thử lại sau."),
+                )
+            _lv = discord.ui.LayoutView()
+            _lv.add_item(_c)
+            await interaction.response.edit_message(view=_lv, flags=_eph_cv2_flags)
+        except Exception as e:
+            print(f"⚠️  Warning: color_select failed: {e}")
+            try:
+                _c = discord.ui.Container(
+                    discord.ui.TextDisplay(f"{ERR} Lỗi: `{e}`"),
+                )
+                _lv = discord.ui.LayoutView()
+                _lv.add_item(_c)
+                await interaction.response.edit_message(view=_lv, flags=_eph_cv2_flags)
+            except Exception:
+                pass
+
+    # ── Xác nhận chuyển display mode ─────────────────────────
+    async def _handle_confirm_display(self, interaction: discord.Interaction):
+        uid = str(interaction.user.id)
+        try:
+            async with get_user_lock(uid):
+                _data    = load_data(uid)
+                _user    = get_user(uid, _data)
+                _hs      = _get_hunt_settings(_user)
+                cur      = _hs.get("display_mode", "normal")
+                new_mode = "compact" if cur == "normal" else "normal"
+                _hs["display_mode"] = new_mode
+                ok = await save_data(_data, uid)
+            label = "gọn" if new_mode == "compact" else "thường"
+            if ok:
+                _c = discord.ui.Container(
+                    discord.ui.TextDisplay(
+                        f"{OK} Đã chuyển sang chế độ hiển thị **{label}**!\n"
+                        f"-# Hunt tiếp theo sẽ áp dụng chế độ mới."
+                    ),
+                )
+            else:
+                _c = discord.ui.Container(
+                    discord.ui.TextDisplay(f"{ERR} Lưu thất bại, thử lại sau."),
+                )
+            _lv = discord.ui.LayoutView()
+            _lv.add_item(_c)
+            await interaction.response.edit_message(view=_lv, flags=_eph_cv2_flags)
+        except Exception as e:
+            print(f"⚠️  Warning: confirm_display failed: {e}")
+            try:
+                _c = discord.ui.Container(
+                    discord.ui.TextDisplay(f"{ERR} Lỗi: `{e}`"),
+                )
+                _lv = discord.ui.LayoutView()
+                _lv.add_item(_c)
+                await interaction.response.edit_message(view=_lv, flags=_eph_cv2_flags)
+            except Exception:
+                pass
+
+    # ── Hủy chuyển display mode ───────────────────────────────
+    async def _handle_cancel_display(self, interaction: discord.Interaction):
+        try:
+            _c = discord.ui.Container(
+                discord.ui.TextDisplay("Đã hủy."),
+            )
+            _lv = discord.ui.LayoutView()
+            _lv.add_item(_c)
+            await interaction.response.edit_message(view=_lv, flags=_eph_cv2_flags)
+        except Exception as e:
+            print(f"⚠️  Warning: cancel_display failed: {e}")
 
 
 # ─────────────────────────────────────────────────────────
