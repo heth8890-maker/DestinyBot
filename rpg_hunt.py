@@ -57,7 +57,9 @@ OK  = "<:Tick:1495466684520206528>"
 _cv2_flags       = discord.MessageFlags()
 _cv2_flags.value = 1 << 15
 
-# _eph_cv2_flags đã bỏ — ephemeral response dùng ephemeral=True, CV2 discord.py tự set qua LayoutView
+# Ephemeral + CV2 combined (ephemeral = bit 6 = 64)
+_eph_cv2_flags       = discord.MessageFlags()
+_eph_cv2_flags.value = (1 << 15) | 64
 
 # ─────────────────────────────────────────────────────────
 # HUNT SETTINGS — COLOR & DISPLAY MODE
@@ -432,34 +434,23 @@ async def _run_hunt(
                 cv2_children.append(
                     discord.ui.TextDisplay(f"## {SKULL_EMOJI}  {display_name} đi săn!")
                 )
-
-                # ── Menu select (ngay trong container, dưới title) ─
-                _menu_ar = discord.ui.ActionRow(
-                    discord.ui.StringSelect(
-                        custom_id=f"hunt_menu_{author_id}",
-                        placeholder="⚙️ Cài đặt hunt...",
-                        options=[
-                            discord.SelectOption(
-                                label="Đổi màu container",
-                                value="switch_color",
-                                description="Chọn màu accent cho container hunt",
-                                emoji="🎨",
-                            ),
-                            discord.SelectOption(
-                                label="Đổi chế độ hiển thị",
-                                value="switch_display",
-                                description="Chuyển giữa Normal và Compact",
-                                emoji="📋",
-                            ),
-                        ],
-                        min_values=1,
-                        max_values=1,
-                    )
-                )
-                cv2_children.append(_menu_ar)
-
                 if not _compact:
                     cv2_children.append(discord.ui.Separator())
+
+                # ── Menu bar (Switch color / Switch display) ─────
+                # ActionRow KHÔNG được nằm trong Container — sẽ add top-level qua LayoutView
+                _menu_ar = discord.ui.ActionRow(
+                    discord.ui.Button(
+                        label="Switch color",
+                        custom_id=f"hunt_swcolor_{author_id}",
+                        style=discord.ButtonStyle.secondary,
+                    ),
+                    discord.ui.Button(
+                        label="Switch display",
+                        custom_id=f"hunt_swdisplay_{author_id}",
+                        style=discord.ButtonStyle.secondary,
+                    ),
+                )
 
                 # ── Items ────────────────────────────────────────
                 if not found:
@@ -557,9 +548,11 @@ async def _run_hunt(
                     cv2_children.append(discord.ui.Separator())
                 cv2_children.append(discord.ui.TextDisplay(footer_text))
 
-                # ── Assemble container ──────────────────────────
-                # ActionRow (StringSelect menu) nằm trong Container ngay dưới title
+                # ── Assemble container + menu ActionRow ─────────
+                # Container chỉ chứa TextDisplay/Separator (không có ActionRow)
+                # _menu_ar được add top-level vào LayoutView bên ngoài
                 container = discord.ui.Container(*cv2_children, accent_color=_accent)
+                _hunt_menu_ar = _menu_ar
 
             except Exception as e:
                 return await send_fn(content=f"{ERR} | Failed to build response: `{e}`")
@@ -726,7 +719,7 @@ async def _run_hunt(
 
             # ── Send ────────────────────────────────────────────
             try:
-                await send_fn(components=[container])
+                await send_fn(components=[container, _hunt_menu_ar])
             except Exception as e:
                 return await send_fn(content=f"{ERR} | Failed to send response: `{e}`")
 
@@ -790,13 +783,16 @@ async def _run_hunt_bonus(author_id: int, display_name: str, send_fn) -> None:
 
 
 # ─────────────────────────────────────────────────────────
-# PREFIX SEND HELPER  (discord.py 2.7+: ctx.send hỗ trợ components= trực tiếp)
+# PREFIX SEND HELPER  (ctx.send không hỗ trợ components=)
 # ─────────────────────────────────────────────────────────
 def _make_prefix_send(ctx):
-    """Trả về send_fn dùng components= trực tiếp (2.7+), không wrap LayoutView."""
+    """Trả về send_fn dùng LayoutView cho prefix command."""
     async def _send(content=None, components=None, **_):
         if components:
-            return await ctx.send(components=components, flags=_cv2_flags)
+            _lv = discord.ui.LayoutView()
+            for _comp in components:
+                _lv.add_item(_comp)
+            return await ctx.send(content=content, view=_lv)
         return await ctx.send(content=content)
     return _send
 
@@ -880,13 +876,11 @@ class RPGHunt(commands.Cog):
         uid  = str(interaction.user.id)
 
         # ── Route theo custom_id ─────────────────────────────
-        if cid == f"hunt_menu_{uid}":
-            values = data.get("values", [])
-            chosen = values[0] if values else ""
-            if chosen == "switch_color":
-                await self._handle_switch_color(interaction)
-            elif chosen == "switch_display":
-                await self._handle_switch_display(interaction)
+        if cid == f"hunt_swcolor_{uid}":
+            await self._handle_switch_color(interaction)
+
+        elif cid == f"hunt_swdisplay_{uid}":
+            await self._handle_switch_display(interaction)
 
         elif cid == f"hunt_colorsel_{uid}":
             values = data.get("values", [])
@@ -898,9 +892,9 @@ class RPGHunt(commands.Cog):
         elif cid == f"hunt_canceldsp_{uid}":
             await self._handle_cancel_display(interaction)
 
-        # Người khác dùng menu của user này → báo lỗi nhẹ
+        # Người khác bấm nút của user này → báo lỗi nhẹ
         elif any(cid.startswith(p) for p in (
-            "hunt_menu_",
+            "hunt_swcolor_", "hunt_swdisplay_",
             "hunt_colorsel_", "hunt_confirmdsp_", "hunt_canceldsp_",
         )):
             try:
@@ -925,17 +919,18 @@ class RPGHunt(commands.Cog):
                 discord.SelectOption(label="Trắng",      value="white",  description="#FFFFFF"),
             ],
         )
-        # ActionRow trong Container — hợp lệ 2.7+ (ref §3.7)
+        # Container chỉ chứa TextDisplay/Separator — ActionRow add top-level qua LayoutView
         _container = discord.ui.Container(
-            discord.ui.TextDisplay("### 🎨 Màu container hunt"),
+            discord.ui.TextDisplay("### Màu container hunt"),
             discord.ui.Separator(),
-            discord.ui.ActionRow(color_select),
         )
+        _ar = discord.ui.ActionRow(color_select)
+        _lv = discord.ui.LayoutView()
+        _lv.add_item(_container)
+        _lv.add_item(_ar)
         try:
             await interaction.response.send_message(
-                components=[_container],
-                flags=_cv2_flags,
-                ephemeral=True,
+                view=_lv, flags=_eph_cv2_flags
             )
         except Exception as e:
             print(f"⚠️  Warning: switch_color send failed: {e}")
@@ -959,33 +954,34 @@ class RPGHunt(commands.Cog):
             f"{SWORD_EMOJI} | emoji**Tên vũ khí** ᴸⱽ⁰¹ (lv 1) — (2 ô chưa trang bị)\n"
             "# +36xp  (+36 exp).\n------"
         )
-        # ActionRow trong Container — hợp lệ 2.7+ (ref §3.7)
+        # Container chỉ chứa TextDisplay/Separator — ActionRow add top-level qua LayoutView
         _container = discord.ui.Container(
             discord.ui.TextDisplay(
-                f"### 📋 Chuyển chế độ hiển thị?\n"
+                f"### Chuyển chế độ hiển thị?\n"
                 f"Hiện tại: **{cur_label}** → Chuyển sang: **{new_label}**"
             ),
             discord.ui.Separator(),
             discord.ui.TextDisplay(f"**Preview chế độ gọn:**\n{preview}"),
             discord.ui.Separator(),
-            discord.ui.ActionRow(
-                discord.ui.Button(
-                    label="Xác nhận",
-                    custom_id=f"hunt_confirmdsp_{uid}",
-                    style=discord.ButtonStyle.success,
-                ),
-                discord.ui.Button(
-                    label="Hủy",
-                    custom_id=f"hunt_canceldsp_{uid}",
-                    style=discord.ButtonStyle.danger,
-                ),
+        )
+        _ar = discord.ui.ActionRow(
+            discord.ui.Button(
+                label="Xác nhận",
+                custom_id=f"hunt_confirmdsp_{uid}",
+                style=discord.ButtonStyle.success,
+            ),
+            discord.ui.Button(
+                label="Hủy",
+                custom_id=f"hunt_canceldsp_{uid}",
+                style=discord.ButtonStyle.danger,
             ),
         )
+        _lv = discord.ui.LayoutView()
+        _lv.add_item(_container)
+        _lv.add_item(_ar)
         try:
             await interaction.response.send_message(
-                components=[_container],
-                flags=_cv2_flags,
-                ephemeral=True,
+                view=_lv, flags=_eph_cv2_flags
             )
         except Exception as e:
             print(f"⚠️  Warning: switch_display send failed: {e}")
@@ -1010,14 +1006,18 @@ class RPGHunt(commands.Cog):
                 _c = discord.ui.Container(
                     discord.ui.TextDisplay(f"{ERR} Lưu thất bại, thử lại sau."),
                 )
-            await interaction.response.edit_message(components=[_c], flags=_cv2_flags)
+            _lv = discord.ui.LayoutView()
+            _lv.add_item(_c)
+            await interaction.response.edit_message(view=_lv, flags=_eph_cv2_flags)
         except Exception as e:
             print(f"⚠️  Warning: color_select failed: {e}")
             try:
                 _c = discord.ui.Container(
                     discord.ui.TextDisplay(f"{ERR} Lỗi: `{e}`"),
                 )
-                await interaction.response.edit_message(components=[_c], flags=_cv2_flags)
+                _lv = discord.ui.LayoutView()
+                _lv.add_item(_c)
+                await interaction.response.edit_message(view=_lv, flags=_eph_cv2_flags)
             except Exception:
                 pass
 
@@ -1045,14 +1045,18 @@ class RPGHunt(commands.Cog):
                 _c = discord.ui.Container(
                     discord.ui.TextDisplay(f"{ERR} Lưu thất bại, thử lại sau."),
                 )
-            await interaction.response.edit_message(components=[_c], flags=_cv2_flags)
+            _lv = discord.ui.LayoutView()
+            _lv.add_item(_c)
+            await interaction.response.edit_message(view=_lv, flags=_eph_cv2_flags)
         except Exception as e:
             print(f"⚠️  Warning: confirm_display failed: {e}")
             try:
                 _c = discord.ui.Container(
                     discord.ui.TextDisplay(f"{ERR} Lỗi: `{e}`"),
                 )
-                await interaction.response.edit_message(components=[_c], flags=_cv2_flags)
+                _lv = discord.ui.LayoutView()
+                _lv.add_item(_c)
+                await interaction.response.edit_message(view=_lv, flags=_eph_cv2_flags)
             except Exception:
                 pass
 
@@ -1062,7 +1066,9 @@ class RPGHunt(commands.Cog):
             _c = discord.ui.Container(
                 discord.ui.TextDisplay("Đã hủy."),
             )
-            await interaction.response.edit_message(components=[_c], flags=_cv2_flags)
+            _lv = discord.ui.LayoutView()
+            _lv.add_item(_c)
+            await interaction.response.edit_message(view=_lv, flags=_eph_cv2_flags)
         except Exception as e:
             print(f"⚠️  Warning: cancel_display failed: {e}")
 
